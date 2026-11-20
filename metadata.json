@@ -1,0 +1,6 @@
+{
+  "name": "Vanguard RTX",
+  "description": "Тактический 3D-шутер от первого лица на OpenGL ES 3.0 с PBR/RTX-освещением, детализированными 1:1 моделями бойцов, настройками графики и редактором управления.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

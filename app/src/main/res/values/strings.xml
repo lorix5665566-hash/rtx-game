@@ -1,0 +1,15 @@
+<resources>
+    <string name="app_name">Vanguard RTX</string>
+    <string name="subtitle_rtx_engine">PBR RAY-TRACED PIPELINE • OPENGL ES 3.0</string>
+    <string name="btn_play">В БОЙ</string>
+    <string name="btn_settings">НАСТРОЙКИ</string>
+    <string name="btn_controls">УПРАВЛЕНИЕ</string>
+    <string name="btn_resume">ПРОДОЛЖИТЬ</string>
+    <string name="btn_restart">ЗАНОВО</string>
+    <string name="btn_exit_menu">В ГЛАВНОЕ МЕНЮ</string>
+    <string name="btn_save">СОХРАНИТЬ</string>
+    <string name="btn_reset">СБРОС</string>
+    <string name="mode_assault">ШТУРМ</string>
+    <string name="mode_survival">ВЫЖИВАНИЕ</string>
+    <string name="mode_range">ПОЛИГОН</string>
+</resources>
