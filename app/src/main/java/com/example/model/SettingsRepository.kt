@@ -23,7 +23,7 @@ class SettingsRepository(context: Context) {
                 dynamicLighting = gfxObj?.optBoolean("dynamicLighting", true) ?: true,
                 hdTextures = gfxObj?.optBoolean("hdTextures", true) ?: true,
                 bloomAndAces = gfxObj?.optBoolean("bloomAndAces", true) ?: true,
-                fov = (gfxObj?.optDouble("fov", 78.0) ?: 78.0).toFloat().coerceIn(65f, 105f),
+                fov = (gfxObj?.optDouble("fov", 80.0) ?: 80.0).toFloat().coerceIn(65f, 105f),
                 showFps = gfxObj?.optBoolean("showFps", true) ?: true
             )
 
@@ -31,25 +31,24 @@ class SettingsRepository(context: Context) {
             val sensitivity = SensitivitySettings(
                 lookSensitivity = (sensObj?.optDouble("lookSensitivity", 1.0) ?: 1.0).toFloat()
                     .coerceIn(0.2f, 3.0f),
-                adsSensitivity = (sensObj?.optDouble("adsSensitivity", 0.62) ?: 0.62).toFloat()
+                adsSensitivity = (sensObj?.optDouble("adsSensitivity", 0.56) ?: 0.56).toFloat()
                     .coerceIn(0.2f, 2.0f),
                 xAxisMultiplier = (sensObj?.optDouble("xAxisMultiplier", 1.0) ?: 1.0).toFloat()
                     .coerceIn(0.5f, 2.0f),
                 yAxisMultiplier = (sensObj?.optDouble("yAxisMultiplier", 0.85) ?: 0.85).toFloat()
                     .coerceIn(0.5f, 2.0f),
-                invertY = sensObj?.optBoolean("invertY", false) ?: false,
-                aimAssist = sensObj?.optBoolean("aimAssist", true) ?: true
+                invertY = sensObj?.optBoolean("invertY", false) ?: false
             )
 
             val audioObj = root.optJSONObject("audio")
             val audio = AudioSettings(
-                sfxVolume = (audioObj?.optDouble("sfxVolume", 0.85) ?: 0.85).toFloat()
+                sfxVolume = (audioObj?.optDouble("sfxVolume", 0.92) ?: 0.92).toFloat()
                     .coerceIn(0f, 1f),
                 hapticsEnabled = audioObj?.optBoolean("hapticsEnabled", true) ?: true
             )
 
             val defaults = ControlLayout.defaultTwoFingerMap()
-            val layoutObj = root.optJSONObject("controlLayout")
+            val layoutObj = root.optJSONObject("controlLayoutV2")
             val widgets = defaults.toMutableMap()
             if (layoutObj != null) {
                 for (id in ControlWidgetId.entries) {
@@ -97,13 +96,12 @@ class SettingsRepository(context: Context) {
                 put("xAxisMultiplier", settings.sensitivity.xAxisMultiplier.toDouble())
                 put("yAxisMultiplier", settings.sensitivity.yAxisMultiplier.toDouble())
                 put("invertY", settings.sensitivity.invertY)
-                put("aimAssist", settings.sensitivity.aimAssist)
             })
             put("audio", JSONObject().apply {
                 put("sfxVolume", settings.audio.sfxVolume.toDouble())
                 put("hapticsEnabled", settings.audio.hapticsEnabled)
             })
-            put("controlLayout", JSONObject().apply {
+            put("controlLayoutV2", JSONObject().apply {
                 for ((id, cfg) in settings.controlLayout.widgets) {
                     put(id.name, JSONObject().apply {
                         put("x", cfg.xFraction.toDouble())

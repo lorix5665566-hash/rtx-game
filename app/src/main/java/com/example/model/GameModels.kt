@@ -8,16 +8,20 @@ enum class GraphicsPreset(
     LOW(0, "НИЗКИЕ", "Максимум FPS • Упрощённый свет"),
     MEDIUM(1, "СРЕДНИЕ", "Баланс • Базовый PBR"),
     HIGH(2, "ВЫСОКИЕ", "Полный PBR • HD-текстуры"),
-    ULTRA_RTX(3, "УЛЬТРА RTX", "Трассировка отражений • Полный RTX")
+    ULTRA_RTX(3, "УЛЬТРА RTX", "Полный PBR • Динамический свет и отражения")
+}
+
+enum class TeamSide(val shortRu: String, val titleRu: String) {
+    CT("СПЕЦНАЗ", "Спецназ (CT)"),
+    T("ТЕРРОРИСТЫ", "Террористы (T)")
 }
 
 enum class GameMode(
     val titleRu: String,
     val subtitleRu: String
 ) {
-    ASSAULT("ШТУРМ", "5 волн спецназа • Зачистка сектора"),
-    SURVIVAL("ВЫЖИВАНИЕ", "Бесконечные волны • Рекорд очков"),
-    RANGE("ПОЛИГОН", "Стрельбище • Тренировка оружия")
+    BOMB_DEFUSAL("ЗАКЛАДКА БОМБЫ", "Классический CS2 • Установка и разминирование C4"),
+    TEAM_DEATHMATCH("БОЙ НАСМЕРТЬ", "Мгновенное возрождение • Бесплатный магазин")
 }
 
 enum class ArenaMapId(
@@ -25,14 +29,39 @@ enum class ArenaMapId(
     val subtitleRu: String,
     val envTagRu: String
 ) {
-    INDUSTRIAL("ПРОМЗОНА", "Ночной дождь • Мокрый асфальт RTX", "НОЧЬ • RTX"),
-    HARBOR("ПОРТ-СИТИ", "Контейнерный терминал • Туман", "ТУМАН • ПОРТ"),
-    RUINS("ФОРПОСТ", "Закатная пустыня • Длинные линии", "ЗАКАТ • ПЕСОК")
+    MIRAGE("MIRAGE", "Классическая карта CS2 • Точки A, B, Мид и Ковры", "CS2 • ДЕНЬ"),
+    INDUSTRIAL("ПРОМЗОНА", "Ночной комплекс • Мокрый асфальт RTX", "НОЧЬ • RTX"),
+    HARBOR("ПОРТ-СИТИ", "Контейнерный терминал • Плотные коридоры", "ТУМАН • ПОРТ")
+}
+
+data class MatchConfig(
+    val mode: GameMode = GameMode.BOMB_DEFUSAL,
+    val map: ArenaMapId = ArenaMapId.MIRAGE,
+    val playerSide: TeamSide = TeamSide.T,
+    val playerTeamSize: Int = 5, // 1..5 (includes player)
+    val enemyTeamSize: Int = 5,  // 1..5
+    val roundsToWin: Int = 8
+)
+
+enum class WeaponSlot {
+    PRIMARY,
+    PISTOL,
+    KNIFE,
+    BOMB
+}
+
+enum class WeaponCategory(val titleRu: String) {
+    PISTOLS("ПИСТОЛЕТЫ"),
+    SMGS("ПП"),
+    RIFLES("ВИНТОВКИ")
 }
 
 enum class WeaponType(
+    val slot: WeaponSlot,
+    val category: WeaponCategory?,
     val shortLabel: String,
     val titleRu: String,
+    val price: Int,
     val magSize: Int,
     val initialReserve: Int,
     val fireIntervalSec: Float,
@@ -44,59 +73,228 @@ enum class WeaponType(
     val recoilKick: Float,
     val recoilPitch: Float,
     val adsZoomFactor: Float,
+    val moveSpeedMult: Float,
     val isAutomatic: Boolean,
-    val hasSniperScope: Boolean
+    val hasSniperScope: Boolean,
+    val isSuppressed: Boolean = false,
+    val killReward: Int = 300
 ) {
-    M4A1(
-        shortLabel = "M4A1",
-        titleRu = "M4A1 Тактический",
-        magSize = 30,
-        initialReserve = 180,
-        fireIntervalSec = 0.105f,
-        reloadSec = 1.55f,
-        bodyDamage = 32f,
-        headDamage = 84f,
-        hipSpread = 0.013f,
-        adsSpread = 0.0025f,
-        recoilKick = 0.45f,
-        recoilPitch = 0.011f,
-        adsZoomFactor = 0.64f,
-        isAutomatic = true,
+    KNIFE(
+        slot = WeaponSlot.KNIFE,
+        category = null,
+        shortLabel = "НОЖ",
+        titleRu = "Боевой нож",
+        price = 0,
+        magSize = 0,
+        initialReserve = 0,
+        fireIntervalSec = 0.42f,
+        reloadSec = 0f,
+        bodyDamage = 55f,
+        headDamage = 110f,
+        hipSpread = 0f,
+        adsSpread = 0f,
+        recoilKick = 0.2f,
+        recoilPitch = 0f,
+        adsZoomFactor = 1.0f,
+        moveSpeedMult = 1.15f,
+        isAutomatic = false,
+        hasSniperScope = false,
+        killReward = 1500
+    ),
+    C4_BOMB(
+        slot = WeaponSlot.BOMB,
+        category = null,
+        shortLabel = "C4",
+        titleRu = "Бомба C4",
+        price = 0,
+        magSize = 0,
+        initialReserve = 0,
+        fireIntervalSec = 0.5f,
+        reloadSec = 0f,
+        bodyDamage = 0f,
+        headDamage = 0f,
+        hipSpread = 0f,
+        adsSpread = 0f,
+        recoilKick = 0f,
+        recoilPitch = 0f,
+        adsZoomFactor = 1.0f,
+        moveSpeedMult = 1.10f,
+        isAutomatic = false,
+        hasSniperScope = false,
+        killReward = 0
+    ),
+    USP_S(
+        slot = WeaponSlot.PISTOL,
+        category = WeaponCategory.PISTOLS,
+        shortLabel = "USP-S",
+        titleRu = "USP-S",
+        price = 200,
+        magSize = 12,
+        initialReserve = 24,
+        fireIntervalSec = 0.17f,
+        reloadSec = 1.45f,
+        bodyDamage = 30f,
+        headDamage = 102f,
+        hipSpread = 0.009f,
+        adsSpread = 0.002f,
+        recoilKick = 0.28f,
+        recoilPitch = 0.009f,
+        adsZoomFactor = 0.80f,
+        moveSpeedMult = 1.06f,
+        isAutomatic = false,
+        hasSniperScope = false,
+        isSuppressed = true
+    ),
+    GLOCK_18(
+        slot = WeaponSlot.PISTOL,
+        category = WeaponCategory.PISTOLS,
+        shortLabel = "GLOCK-18",
+        titleRu = "Glock-18",
+        price = 200,
+        magSize = 20,
+        initialReserve = 120,
+        fireIntervalSec = 0.145f,
+        reloadSec = 1.45f,
+        bodyDamage = 24f,
+        headDamage = 92f,
+        hipSpread = 0.011f,
+        adsSpread = 0.003f,
+        recoilKick = 0.26f,
+        recoilPitch = 0.008f,
+        adsZoomFactor = 0.82f,
+        moveSpeedMult = 1.06f,
+        isAutomatic = false,
         hasSniperScope = false
+    ),
+    DESERT_EAGLE(
+        slot = WeaponSlot.PISTOL,
+        category = WeaponCategory.PISTOLS,
+        shortLabel = "DEAGLE",
+        titleRu = "Desert Eagle",
+        price = 700,
+        magSize = 7,
+        initialReserve = 35,
+        fireIntervalSec = 0.26f,
+        reloadSec = 1.65f,
+        bodyDamage = 58f,
+        headDamage = 180f,
+        hipSpread = 0.014f,
+        adsSpread = 0.0018f,
+        recoilKick = 0.92f,
+        recoilPitch = 0.028f,
+        adsZoomFactor = 0.78f,
+        moveSpeedMult = 1.02f,
+        isAutomatic = false,
+        hasSniperScope = false
+    ),
+    MP9(
+        slot = WeaponSlot.PRIMARY,
+        category = WeaponCategory.SMGS,
+        shortLabel = "MP9",
+        titleRu = "MP9",
+        price = 1250,
+        magSize = 30,
+        initialReserve = 120,
+        fireIntervalSec = 0.075f,
+        reloadSec = 1.50f,
+        bodyDamage = 23f,
+        headDamage = 64f,
+        hipSpread = 0.016f,
+        adsSpread = 0.006f,
+        recoilKick = 0.30f,
+        recoilPitch = 0.008f,
+        adsZoomFactor = 0.74f,
+        moveSpeedMult = 1.04f,
+        isAutomatic = true,
+        hasSniperScope = false,
+        killReward = 600
+    ),
+    P90(
+        slot = WeaponSlot.PRIMARY,
+        category = WeaponCategory.SMGS,
+        shortLabel = "P90",
+        titleRu = "P90",
+        price = 2350,
+        magSize = 50,
+        initialReserve = 100,
+        fireIntervalSec = 0.072f,
+        reloadSec = 1.95f,
+        bodyDamage = 25f,
+        headDamage = 70f,
+        hipSpread = 0.015f,
+        adsSpread = 0.005f,
+        recoilKick = 0.32f,
+        recoilPitch = 0.0085f,
+        adsZoomFactor = 0.72f,
+        moveSpeedMult = 1.02f,
+        isAutomatic = true,
+        hasSniperScope = false,
+        killReward = 300
+    ),
+    M4A1_S(
+        slot = WeaponSlot.PRIMARY,
+        category = WeaponCategory.RIFLES,
+        shortLabel = "M4A1-S",
+        titleRu = "M4A1-S",
+        price = 2900,
+        magSize = 25,
+        initialReserve = 100,
+        fireIntervalSec = 0.100f,
+        reloadSec = 1.60f,
+        bodyDamage = 35f,
+        headDamage = 96f,
+        hipSpread = 0.011f,
+        adsSpread = 0.0022f,
+        recoilKick = 0.38f,
+        recoilPitch = 0.010f,
+        adsZoomFactor = 0.65f,
+        moveSpeedMult = 0.96f,
+        isAutomatic = true,
+        hasSniperScope = false,
+        isSuppressed = true
     ),
     AK47(
+        slot = WeaponSlot.PRIMARY,
+        category = WeaponCategory.RIFLES,
         shortLabel = "AK-47",
-        titleRu = "AK-47 Штурмовой",
+        titleRu = "AK-47",
+        price = 2700,
         magSize = 30,
-        initialReserve = 150,
-        fireIntervalSec = 0.132f,
+        initialReserve = 90,
+        fireIntervalSec = 0.105f,
         reloadSec = 1.75f,
-        bodyDamage = 44f,
-        headDamage = 112f,
-        hipSpread = 0.018f,
-        adsSpread = 0.0042f,
-        recoilKick = 0.72f,
-        recoilPitch = 0.019f,
+        bodyDamage = 39f,
+        headDamage = 128f,
+        hipSpread = 0.015f,
+        adsSpread = 0.0032f,
+        recoilKick = 0.62f,
+        recoilPitch = 0.016f,
         adsZoomFactor = 0.68f,
+        moveSpeedMult = 0.94f,
         isAutomatic = true,
         hasSniperScope = false
     ),
-    SNIPER(
-        shortLabel = "AWM",
-        titleRu = "AWM .338 Снайпер",
+    AWP(
+        slot = WeaponSlot.PRIMARY,
+        category = WeaponCategory.RIFLES,
+        shortLabel = "AWP",
+        titleRu = "AWP .338",
+        price = 4750,
         magSize = 5,
-        initialReserve = 35,
-        fireIntervalSec = 1.05f,
-        reloadSec = 2.25f,
-        bodyDamage = 118f,
-        headDamage = 280f,
-        hipSpread = 0.045f,
-        adsSpread = 0.0004f,
+        initialReserve = 30,
+        fireIntervalSec = 1.25f,
+        reloadSec = 2.30f,
+        bodyDamage = 115f,
+        headDamage = 320f,
+        hipSpread = 0.050f,
+        adsSpread = 0.0003f,
         recoilKick = 1.25f,
-        recoilPitch = 0.042f,
-        adsZoomFactor = 0.25f,
+        recoilPitch = 0.038f,
+        adsZoomFactor = 0.24f,
+        moveSpeedMult = 0.86f,
         isAutomatic = false,
-        hasSniperScope = true
+        hasSniperScope = true,
+        killReward = 100
     )
 }
 
@@ -107,7 +305,7 @@ data class GraphicsSettings(
     val dynamicLighting: Boolean = true,
     val hdTextures: Boolean = true,
     val bloomAndAces: Boolean = true,
-    val fov: Float = 78f,
+    val fov: Float = 80f,
     val showFps: Boolean = true
 ) {
     companion object {
@@ -119,7 +317,7 @@ data class GraphicsSettings(
                 dynamicLighting = false,
                 hdTextures = false,
                 bloomAndAces = false,
-                fov = 75f,
+                fov = 76f,
                 showFps = true
             )
             GraphicsPreset.MEDIUM -> GraphicsSettings(
@@ -129,7 +327,7 @@ data class GraphicsSettings(
                 dynamicLighting = true,
                 hdTextures = true,
                 bloomAndAces = false,
-                fov = 76f,
+                fov = 78f,
                 showFps = true
             )
             GraphicsPreset.HIGH -> GraphicsSettings(
@@ -139,7 +337,7 @@ data class GraphicsSettings(
                 dynamicLighting = true,
                 hdTextures = true,
                 bloomAndAces = true,
-                fov = 78f,
+                fov = 80f,
                 showFps = true
             )
             GraphicsPreset.ULTRA_RTX -> GraphicsSettings(
@@ -149,28 +347,28 @@ data class GraphicsSettings(
                 dynamicLighting = true,
                 hdTextures = true,
                 bloomAndAces = true,
-                fov = 78f,
+                fov = 80f,
                 showFps = true
             )
         }
     }
 }
 
+// Pure raw skill aiming — aim assist has been completely removed!
 data class SensitivitySettings(
     val lookSensitivity: Float = 1.0f,
-    val adsSensitivity: Float = 0.58f,
+    val adsSensitivity: Float = 0.56f,
     val xAxisMultiplier: Float = 1.0f,
     val yAxisMultiplier: Float = 0.85f,
-    val invertY: Boolean = false,
-    val aimAssist: Boolean = true
+    val invertY: Boolean = false
 )
 
 data class AudioSettings(
-    val sfxVolume: Float = 0.90f,
+    val sfxVolume: Float = 0.92f,
     val hapticsEnabled: Boolean = true
 )
 
-enum class ControlWidgetId(val labelRu: String, val canHide: Boolean) {
+enum class ControlWidgetId(val labelRu: String, val canHide: Boolean, val isWide: Boolean = false) {
     JOYSTICK("Джойстик", false),
     FIRE_RIGHT("Огонь (прав.)", false),
     FIRE_LEFT("Огонь (лев.)", true),
@@ -178,7 +376,8 @@ enum class ControlWidgetId(val labelRu: String, val canHide: Boolean) {
     RELOAD("Перезарядка", false),
     CROUCH("Присед", true),
     JUMP("Прыжок", true),
-    WEAPON_SWITCH("Оружие", false),
+    WEAPON_SWIPE("Оружие (свайп)", false, isWide = true),
+    SHOP("Магазин", false),
     PAUSE("Пауза", false)
 }
 
@@ -187,7 +386,7 @@ data class ControlWidgetConfig(
     val xFraction: Float,
     val yFraction: Float,
     val scale: Float = 1.0f,
-    val opacity: Float = 0.85f,
+    val opacity: Float = 0.88f,
     val visible: Boolean = true
 )
 
@@ -201,28 +400,31 @@ data class ControlLayout(
         copy(widgets = widgets + (config.id to config))
 
     companion object {
+        // Ergonomic landscape defaults
         fun defaultTwoFingerMap(): Map<ControlWidgetId, ControlWidgetConfig> = mapOf(
-            ControlWidgetId.JOYSTICK to ControlWidgetConfig(ControlWidgetId.JOYSTICK, 0.16f, 0.78f, 1.0f, 0.82f, true),
-            ControlWidgetId.FIRE_RIGHT to ControlWidgetConfig(ControlWidgetId.FIRE_RIGHT, 0.85f, 0.75f, 1.1f, 0.92f, true),
-            ControlWidgetId.FIRE_LEFT to ControlWidgetConfig(ControlWidgetId.FIRE_LEFT, 0.14f, 0.44f, 0.9f, 0.78f, false),
-            ControlWidgetId.ADS to ControlWidgetConfig(ControlWidgetId.ADS, 0.88f, 0.55f, 1.0f, 0.85f, true),
-            ControlWidgetId.RELOAD to ControlWidgetConfig(ControlWidgetId.RELOAD, 0.70f, 0.83f, 0.95f, 0.85f, true),
-            ControlWidgetId.CROUCH to ControlWidgetConfig(ControlWidgetId.CROUCH, 0.60f, 0.73f, 0.90f, 0.80f, true),
-            ControlWidgetId.JUMP to ControlWidgetConfig(ControlWidgetId.JUMP, 0.73f, 0.64f, 0.92f, 0.82f, true),
-            ControlWidgetId.WEAPON_SWITCH to ControlWidgetConfig(ControlWidgetId.WEAPON_SWITCH, 0.88f, 0.38f, 0.95f, 0.88f, true),
-            ControlWidgetId.PAUSE to ControlWidgetConfig(ControlWidgetId.PAUSE, 0.92f, 0.08f, 0.95f, 0.88f, true)
+            ControlWidgetId.JOYSTICK to ControlWidgetConfig(ControlWidgetId.JOYSTICK, 0.13f, 0.72f, 1.0f, 0.80f, true),
+            ControlWidgetId.FIRE_RIGHT to ControlWidgetConfig(ControlWidgetId.FIRE_RIGHT, 0.87f, 0.68f, 1.08f, 0.92f, true),
+            ControlWidgetId.FIRE_LEFT to ControlWidgetConfig(ControlWidgetId.FIRE_LEFT, 0.12f, 0.32f, 0.90f, 0.80f, false),
+            ControlWidgetId.ADS to ControlWidgetConfig(ControlWidgetId.ADS, 0.92f, 0.44f, 0.96f, 0.86f, true),
+            ControlWidgetId.RELOAD to ControlWidgetConfig(ControlWidgetId.RELOAD, 0.76f, 0.78f, 0.92f, 0.86f, true),
+            ControlWidgetId.CROUCH to ControlWidgetConfig(ControlWidgetId.CROUCH, 0.76f, 0.56f, 0.88f, 0.82f, true),
+            ControlWidgetId.JUMP to ControlWidgetConfig(ControlWidgetId.JUMP, 0.84f, 0.42f, 0.90f, 0.84f, true),
+            ControlWidgetId.WEAPON_SWIPE to ControlWidgetConfig(ControlWidgetId.WEAPON_SWIPE, 0.86f, 0.88f, 1.0f, 0.92f, true),
+            ControlWidgetId.SHOP to ControlWidgetConfig(ControlWidgetId.SHOP, 0.91f, 0.14f, 0.95f, 0.92f, true),
+            ControlWidgetId.PAUSE to ControlWidgetConfig(ControlWidgetId.PAUSE, 0.96f, 0.09f, 0.86f, 0.86f, true)
         )
 
         fun fourFingerClawMap(): Map<ControlWidgetId, ControlWidgetConfig> = mapOf(
-            ControlWidgetId.JOYSTICK to ControlWidgetConfig(ControlWidgetId.JOYSTICK, 0.16f, 0.78f, 1.0f, 0.80f, true),
-            ControlWidgetId.FIRE_RIGHT to ControlWidgetConfig(ControlWidgetId.FIRE_RIGHT, 0.85f, 0.78f, 0.95f, 0.80f, true),
-            ControlWidgetId.FIRE_LEFT to ControlWidgetConfig(ControlWidgetId.FIRE_LEFT, 0.14f, 0.24f, 1.15f, 0.92f, true),
-            ControlWidgetId.ADS to ControlWidgetConfig(ControlWidgetId.ADS, 0.86f, 0.24f, 1.1f, 0.92f, true),
-            ControlWidgetId.RELOAD to ControlWidgetConfig(ControlWidgetId.RELOAD, 0.70f, 0.85f, 0.95f, 0.85f, true),
-            ControlWidgetId.CROUCH to ControlWidgetConfig(ControlWidgetId.CROUCH, 0.72f, 0.36f, 0.95f, 0.82f, true),
-            ControlWidgetId.JUMP to ControlWidgetConfig(ControlWidgetId.JUMP, 0.86f, 0.42f, 0.95f, 0.82f, true),
-            ControlWidgetId.WEAPON_SWITCH to ControlWidgetConfig(ControlWidgetId.WEAPON_SWITCH, 0.72f, 0.22f, 0.92f, 0.85f, true),
-            ControlWidgetId.PAUSE to ControlWidgetConfig(ControlWidgetId.PAUSE, 0.50f, 0.07f, 0.90f, 0.85f, true)
+            ControlWidgetId.JOYSTICK to ControlWidgetConfig(ControlWidgetId.JOYSTICK, 0.13f, 0.74f, 1.0f, 0.78f, true),
+            ControlWidgetId.FIRE_RIGHT to ControlWidgetConfig(ControlWidgetId.FIRE_RIGHT, 0.87f, 0.70f, 0.92f, 0.78f, true),
+            ControlWidgetId.FIRE_LEFT to ControlWidgetConfig(ControlWidgetId.FIRE_LEFT, 0.13f, 0.22f, 1.15f, 0.92f, true),
+            ControlWidgetId.ADS to ControlWidgetConfig(ControlWidgetId.ADS, 0.86f, 0.22f, 1.10f, 0.92f, true),
+            ControlWidgetId.RELOAD to ControlWidgetConfig(ControlWidgetId.RELOAD, 0.76f, 0.72f, 0.92f, 0.85f, true),
+            ControlWidgetId.CROUCH to ControlWidgetConfig(ControlWidgetId.CROUCH, 0.76f, 0.34f, 0.92f, 0.84f, true),
+            ControlWidgetId.JUMP to ControlWidgetConfig(ControlWidgetId.JUMP, 0.88f, 0.44f, 0.94f, 0.84f, true),
+            ControlWidgetId.WEAPON_SWIPE to ControlWidgetConfig(ControlWidgetId.WEAPON_SWIPE, 0.86f, 0.88f, 1.0f, 0.92f, true),
+            ControlWidgetId.SHOP to ControlWidgetConfig(ControlWidgetId.SHOP, 0.74f, 0.12f, 0.92f, 0.90f, true),
+            ControlWidgetId.PAUSE to ControlWidgetConfig(ControlWidgetId.PAUSE, 0.96f, 0.09f, 0.86f, 0.85f, true)
         )
 
         fun defaultTwoFinger(): ControlLayout = ControlLayout(defaultTwoFingerMap())
@@ -244,41 +446,72 @@ data class PlayerStats(
     val gamesPlayed: Int = 0
 )
 
+enum class BombState {
+    CARRIED,
+    PLANTED,
+    DEFUSED,
+    EXPLODED
+}
+
 data class RadarBlip(
     val relX: Float,
     val relZ: Float,
-    val isElite: Boolean
+    val isAlly: Boolean,
+    val isBomb: Boolean = false
 )
 
 data class HudSnapshot(
     val hp: Int = 100,
     val maxHp: Int = 100,
-    val armor: Int = 100,
-    val weapon: WeaponType = WeaponType.M4A1,
-    val ammo: Int = 30,
-    val magSize: Int = 30,
-    val reserveAmmo: Int = 180,
+    val armor: Int = 0,
+    val hasDefuseKit: Boolean = false,
+    val money: Int = 800,
+    val mode: GameMode = GameMode.BOMB_DEFUSAL,
+    val playerSide: TeamSide = TeamSide.T,
+    val activeWeapon: WeaponType = WeaponType.GLOCK_18,
+    val primaryWeapon: WeaponType? = null,
+    val pistolWeapon: WeaponType = WeaponType.GLOCK_18,
+    val hasBomb: Boolean = true,
+    val ammo: Int = 20,
+    val magSize: Int = 20,
+    val reserveAmmo: Int = 120,
     val isReloading: Boolean = false,
     val reloadProgress: Float = 0f,
     val isAds: Boolean = false,
     val adsBlend: Float = 0f,
     val isCrouching: Boolean = false,
+    val isPlayerDead: Boolean = false,
+    val ctScore: Int = 0,
+    val tScore: Int = 0,
+    val roundsToWin: Int = 8,
+    val roundNumber: Int = 1,
+    val roundTimeSec: Float = 105f,
+    val ctAlive: Int = 5,
+    val tAlive: Int = 5,
+    val bombState: BombState = BombState.CARRIED,
+    val bombSiteLabel: String = "",
+    val bombCountdownSec: Float = 35f,
+    val inPlantZoneLabel: String = "",
+    val canPlantBomb: Boolean = false,
+    val canDefuseBomb: Boolean = false,
+    val bombActionProgress: Float = 0f,
+    val canBuy: Boolean = true,
+    val calloutName: String = "",
     val score: Int = 0,
-    val wave: Int = 1,
-    val totalWaves: Int = 5,
     val kills: Int = 0,
+    val deaths: Int = 0,
     val headshots: Int = 0,
     val shotsFired: Int = 0,
     val shotsHit: Int = 0,
-    val enemiesAlive: Int = 0,
     val fps: Int = 60,
     val hitMarkerAlpha: Float = 0f,
     val isHeadshotHit: Boolean = false,
     val damageFlashAlpha: Float = 0f,
     val crosshairSpread: Float = 0f,
-    val isGameOver: Boolean = false,
-    val isVictory: Boolean = false,
+    val isMatchFinished: Boolean = false,
+    val isPlayerTeamWinner: Boolean = false,
     val bannerText: String = "",
+    val killFeedText: String = "",
     val radarBlips: List<RadarBlip> = emptyList(),
     val playerYawDeg: Float = 0f
 ) {

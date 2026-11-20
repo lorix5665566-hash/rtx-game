@@ -80,7 +80,7 @@ fun SettingsScreen(
     BackHandler { onBack() }
 
     var selectedTab by remember { mutableIntStateOf(0) }
-    val tabs = listOf("ГРАФИКА RTX", "ЧУВСТВИТ.", "ЗВУК И HUD")
+    val tabs = listOf("ГРАФИКА RTX", "ЧУВСТВИТЕЛЬНОСТЬ", "ЗВУК И УПРАВЛЕНИЕ")
 
     Box(
         modifier = Modifier
@@ -91,11 +91,11 @@ fun SettingsScreen(
         Column(
             modifier = Modifier
                 .fillMaxSize()
-                .widthIn(max = 680.dp)
+                .widthIn(max = 820.dp)
                 .align(Alignment.TopCenter)
-                .padding(horizontal = 16.dp, vertical = 12.dp)
+                .padding(horizontal = 20.dp, vertical = 10.dp)
         ) {
-            // Top Bar
+            // Compact landscape header + tabs
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 verticalAlignment = Alignment.CenterVertically,
@@ -114,61 +114,54 @@ fun SettingsScreen(
                     }
                     Column {
                         Text(
-                            text = "НАСТРОЙКИ СИСТЕМЫ",
-                            style = MaterialTheme.typography.headlineMedium,
+                            text = "НАСТРОЙКИ",
+                            style = MaterialTheme.typography.headlineSmall,
                             color = TextPrimary
                         )
                         Text(
-                            text = "Изменения применяются к 3D-движку мгновенно",
+                            text = "Применяются к 3D-движку мгновенно • Без помощи в прицеливании",
                             style = MaterialTheme.typography.labelSmall,
                             color = TextSecondary
                         )
                     }
                 }
-            }
 
-            Spacer(modifier = Modifier.height(12.dp))
-
-            // Segmented AAA Tabs
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(8.dp)
-            ) {
-                tabs.forEachIndexed { idx, label ->
-                    val active = selectedTab == idx
-                    val shape = CutCornerShape(topStart = 8.dp, bottomEnd = 8.dp)
-                    Box(
-                        modifier = Modifier
-                            .weight(1f)
-                            .clip(shape)
-                            .background(if (active) RtxEmerald.copy(alpha = 0.2f) else TacticalSurface)
-                            .border(
-                                width = if (active) 1.5.dp else 1.dp,
-                                color = if (active) RtxEmerald else BorderSteel,
-                                shape = shape
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    tabs.forEachIndexed { idx, label ->
+                        val active = selectedTab == idx
+                        val shape = CutCornerShape(topStart = 7.dp, bottomEnd = 7.dp)
+                        Box(
+                            modifier = Modifier
+                                .clip(shape)
+                                .background(if (active) RtxEmerald.copy(alpha = 0.22f) else TacticalSurface)
+                                .border(
+                                    width = if (active) 1.5.dp else 1.dp,
+                                    color = if (active) RtxEmerald else BorderSteel,
+                                    shape = shape
+                                )
+                                .clickable { selectedTab = idx }
+                                .padding(horizontal = 14.dp, vertical = 9.dp)
+                                .testTag("settings_tab_$idx"),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Text(
+                                text = label,
+                                style = MaterialTheme.typography.labelMedium,
+                                color = if (active) RtxEmerald else TextSecondary
                             )
-                            .clickable { selectedTab = idx }
-                            .padding(vertical = 11.dp)
-                            .testTag("settings_tab_$idx"),
-                        contentAlignment = Alignment.Center
-                    ) {
-                        Text(
-                            text = label,
-                            style = MaterialTheme.typography.labelLarge,
-                            color = if (active) RtxEmerald else TextSecondary
-                        )
+                        }
                     }
                 }
             }
 
-            Spacer(modifier = Modifier.height(14.dp))
+            Spacer(modifier = Modifier.height(10.dp))
 
             // Scrollable Tab Content
             Column(
                 modifier = Modifier
                     .weight(1f)
                     .verticalScroll(rememberScrollState()),
-                verticalArrangement = Arrangement.spacedBy(12.dp)
+                verticalArrangement = Arrangement.spacedBy(10.dp)
             ) {
                 when (selectedTab) {
                     0 -> GraphicsSettingsSection(
@@ -187,7 +180,7 @@ fun SettingsScreen(
                         onResetAll = onResetAll
                     )
                 }
-                Spacer(modifier = Modifier.height(20.dp))
+                Spacer(modifier = Modifier.height(14.dp))
             }
         }
     }
@@ -202,70 +195,55 @@ private fun GraphicsSettingsSection(
     SettingsCard(title = "ПРЕСЕТ КАЧЕСТВА ГРАФИКИ", icon = {
         Icon(Icons.Default.Visibility, contentDescription = null, tint = RtxEmerald, modifier = Modifier.size(18.dp))
     }) {
-        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(8.dp)
-            ) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            GraphicsPreset.entries.forEach { preset ->
                 PresetChip(
-                    preset = GraphicsPreset.LOW,
-                    selected = graphics.preset == GraphicsPreset.LOW,
-                    onClick = { onApplyPreset(GraphicsPreset.LOW) },
-                    modifier = Modifier.weight(1f)
-                )
-                PresetChip(
-                    preset = GraphicsPreset.MEDIUM,
-                    selected = graphics.preset == GraphicsPreset.MEDIUM,
-                    onClick = { onApplyPreset(GraphicsPreset.MEDIUM) },
-                    modifier = Modifier.weight(1f)
-                )
-            }
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(8.dp)
-            ) {
-                PresetChip(
-                    preset = GraphicsPreset.HIGH,
-                    selected = graphics.preset == GraphicsPreset.HIGH,
-                    onClick = { onApplyPreset(GraphicsPreset.HIGH) },
-                    modifier = Modifier.weight(1f)
-                )
-                PresetChip(
-                    preset = GraphicsPreset.ULTRA_RTX,
-                    selected = graphics.preset == GraphicsPreset.ULTRA_RTX,
-                    onClick = { onApplyPreset(GraphicsPreset.ULTRA_RTX) },
+                    preset = preset,
+                    selected = graphics.preset == preset,
+                    onClick = { onApplyPreset(preset) },
                     modifier = Modifier.weight(1f),
-                    isRtx = true
+                    isRtx = preset == GraphicsPreset.ULTRA_RTX
                 )
             }
-            Text(
-                text = graphics.preset.subtitleRu,
-                style = MaterialTheme.typography.bodyMedium,
-                color = RtxEmerald
-            )
         }
+        Text(
+            text = graphics.preset.subtitleRu,
+            style = MaterialTheme.typography.bodyMedium,
+            color = RtxEmerald
+        )
     }
 
     SettingsCard(title = "ТОНКАЯ НАСТРОЙКА RTX & PBR") {
-        SettingsSliderRow(
-            label = "Масштаб разрешения 3D",
-            valueText = "${(graphics.resolutionScale * 100).roundToInt()}%",
-            value = graphics.resolutionScale,
-            valueRange = 0.60f..1.00f,
-            onValueChange = { onUpdate(graphics.copy(resolutionScale = it)) }
-        )
-
-        SettingsSliderRow(
-            label = "Угол обзора (FOV)",
-            valueText = "${graphics.fov.roundToInt()}°",
-            value = graphics.fov,
-            valueRange = 65f..105f,
-            onValueChange = { onUpdate(graphics.copy(fov = it)) }
-        )
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(18.dp)
+        ) {
+            Box(modifier = Modifier.weight(1f)) {
+                SettingsSliderRow(
+                    label = "Масштаб разрешения 3D",
+                    valueText = "${(graphics.resolutionScale * 100).roundToInt()}%",
+                    value = graphics.resolutionScale,
+                    valueRange = 0.60f..1.00f,
+                    onValueChange = { onUpdate(graphics.copy(resolutionScale = it)) }
+                )
+            }
+            Box(modifier = Modifier.weight(1f)) {
+                SettingsSliderRow(
+                    label = "Угол обзора (FOV)",
+                    valueText = "${graphics.fov.roundToInt()}°",
+                    value = graphics.fov,
+                    valueRange = 65f..105f,
+                    onValueChange = { onUpdate(graphics.copy(fov = it)) }
+                )
+            }
+        }
 
         SettingsToggleRow(
-            title = "RTX-отражения на мокром асфальте и броне",
-            subtitle = "Отражение неона, неба и водной ряби в реальном времени",
+            title = "RTX-отражения на стали, асфальте и броне",
+            subtitle = "Зеркальные блики окружения и металла в реальном времени",
             checked = graphics.rtxReflections,
             onCheckedChange = { onUpdate(graphics.copy(rtxReflections = it)) },
             tag = "toggle_rtx_reflections"
@@ -273,7 +251,7 @@ private fun GraphicsSettingsSection(
 
         SettingsToggleRow(
             title = "Динамический свет и вспышки выстрелов",
-            subtitle = "4 точечных источника света + тени и контактное затенение",
+            subtitle = "4 точечных источника света + мгновенное освещение выстрелом",
             checked = graphics.dynamicLighting,
             onCheckedChange = { onUpdate(graphics.copy(dynamicLighting = it)) },
             tag = "toggle_dynamic_lighting"
@@ -281,7 +259,7 @@ private fun GraphicsSettingsSection(
 
         SettingsToggleRow(
             title = "Супер-текстуры HD и карты нормалей",
-            subtitle = "Детализированный кевлар, бетон, царапины металла и кожа",
+            subtitle = "Воронёная сталь, полимер, ткань формы и марокканская плитка",
             checked = graphics.hdTextures,
             onCheckedChange = { onUpdate(graphics.copy(hdTextures = it)) },
             tag = "toggle_hd_textures"
@@ -289,7 +267,7 @@ private fun GraphicsSettingsSection(
 
         SettingsToggleRow(
             title = "ACES Filmic Tone Mapping & Bloom",
-            subtitle = "Кинематографический HDR-диапазон и мягкое свечение",
+            subtitle = "Кинематографический HDR-контраст и мягкое свечение",
             checked = graphics.bloomAndAces,
             onCheckedChange = { onUpdate(graphics.copy(bloomAndAces = it)) },
             tag = "toggle_bloom_aces"
@@ -310,40 +288,56 @@ private fun SensitivitySettingsSection(
     sensitivity: SensitivitySettings,
     onUpdate: (SensitivitySettings) -> Unit
 ) {
-    SettingsCard(title = "ЧУВСТВИТЕЛЬНОСТЬ ПРИЦЕЛИВАНИЯ", icon = {
+    SettingsCard(title = "ЧУВСТВИТЕЛЬНОСТЬ ПРИЦЕЛИВАНИЯ (ЧИСТЫЙ СКИЛЛ • БЕЗ АИМ-АССИСТА)", icon = {
         Icon(Icons.Default.Tune, contentDescription = null, tint = TacticalAmber, modifier = Modifier.size(18.dp))
     }) {
-        SettingsSliderRow(
-            label = "Общая чувствительность обзора",
-            valueText = String.format("%.2fx", sensitivity.lookSensitivity),
-            value = sensitivity.lookSensitivity,
-            valueRange = 0.2f..3.0f,
-            onValueChange = { onUpdate(sensitivity.copy(lookSensitivity = it)) }
-        )
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(18.dp)
+        ) {
+            Box(modifier = Modifier.weight(1f)) {
+                SettingsSliderRow(
+                    label = "Общая чувствительность обзора",
+                    valueText = String.format("%.2fx", sensitivity.lookSensitivity),
+                    value = sensitivity.lookSensitivity,
+                    valueRange = 0.2f..3.0f,
+                    onValueChange = { onUpdate(sensitivity.copy(lookSensitivity = it)) }
+                )
+            }
+            Box(modifier = Modifier.weight(1f)) {
+                SettingsSliderRow(
+                    label = "Чувствительность в прицеле (ADS / AWP)",
+                    valueText = String.format("%.2fx", sensitivity.adsSensitivity),
+                    value = sensitivity.adsSensitivity,
+                    valueRange = 0.2f..2.0f,
+                    onValueChange = { onUpdate(sensitivity.copy(adsSensitivity = it)) }
+                )
+            }
+        }
 
-        SettingsSliderRow(
-            label = "Чувствительность в прицеле (ADS)",
-            valueText = String.format("%.2fx", sensitivity.adsSensitivity),
-            value = sensitivity.adsSensitivity,
-            valueRange = 0.2f..2.0f,
-            onValueChange = { onUpdate(sensitivity.copy(adsSensitivity = it)) }
-        )
-
-        SettingsSliderRow(
-            label = "Горизонтальная ось (X)",
-            valueText = String.format("%.2fx", sensitivity.xAxisMultiplier),
-            value = sensitivity.xAxisMultiplier,
-            valueRange = 0.5f..2.0f,
-            onValueChange = { onUpdate(sensitivity.copy(xAxisMultiplier = it)) }
-        )
-
-        SettingsSliderRow(
-            label = "Вертикальная ось (Y)",
-            valueText = String.format("%.2fx", sensitivity.yAxisMultiplier),
-            value = sensitivity.yAxisMultiplier,
-            valueRange = 0.5f..2.0f,
-            onValueChange = { onUpdate(sensitivity.copy(yAxisMultiplier = it)) }
-        )
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(18.dp)
+        ) {
+            Box(modifier = Modifier.weight(1f)) {
+                SettingsSliderRow(
+                    label = "Горизонтальная ось (X)",
+                    valueText = String.format("%.2fx", sensitivity.xAxisMultiplier),
+                    value = sensitivity.xAxisMultiplier,
+                    valueRange = 0.5f..2.0f,
+                    onValueChange = { onUpdate(sensitivity.copy(xAxisMultiplier = it)) }
+                )
+            }
+            Box(modifier = Modifier.weight(1f)) {
+                SettingsSliderRow(
+                    label = "Вертикальная ось (Y)",
+                    valueText = String.format("%.2fx", sensitivity.yAxisMultiplier),
+                    value = sensitivity.yAxisMultiplier,
+                    valueRange = 0.5f..2.0f,
+                    onValueChange = { onUpdate(sensitivity.copy(yAxisMultiplier = it)) }
+                )
+            }
+        }
 
         SettingsToggleRow(
             title = "Инверсия вертикальной оси Y",
@@ -351,14 +345,6 @@ private fun SensitivitySettingsSection(
             checked = sensitivity.invertY,
             onCheckedChange = { onUpdate(sensitivity.copy(invertY = it)) },
             tag = "toggle_invert_y"
-        )
-
-        SettingsToggleRow(
-            title = "Тактическая помощь в прицеливании",
-            subtitle = "Мягкая доводка на корпус цели при стрельбе и в ADS",
-            checked = sensitivity.aimAssist,
-            onCheckedChange = { onUpdate(sensitivity.copy(aimAssist = it)) },
-            tag = "toggle_aim_assist"
         )
     }
 }
@@ -370,65 +356,73 @@ private fun AudioAndHudSection(
     onOpenControlEditor: () -> Unit,
     onResetAll: () -> Unit
 ) {
-    SettingsCard(title = "ЗВУК И ВИБРООТКЛИК", icon = {
-        Icon(Icons.Default.GraphicEq, contentDescription = null, tint = RtxEmerald, modifier = Modifier.size(18.dp))
-    }) {
-        SettingsSliderRow(
-            label = "Громкость стрельбы и эффектов",
-            valueText = "${(audio.sfxVolume * 100).roundToInt()}%",
-            value = audio.sfxVolume,
-            valueRange = 0f..1f,
-            onValueChange = { onUpdateAudio(audio.copy(sfxVolume = it)) }
-        )
-        SettingsToggleRow(
-            title = "Тактильная вибрация",
-            subtitle = "Отдача при выстрелах, хедшотах и получении урона",
-            checked = audio.hapticsEnabled,
-            onCheckedChange = { onUpdateAudio(audio.copy(hapticsEnabled = it)) },
-            tag = "toggle_haptics"
-        )
-    }
-
-    SettingsCard(title = "РАСКЛАДКА УПРАВЛЕНИЯ (HUD)", icon = {
-        Icon(Icons.Default.Gamepad, contentDescription = null, tint = TacticalAmber, modifier = Modifier.size(18.dp))
-    }) {
-        Text(
-            text = "Перетаскивайте кнопки на экране, меняйте их размер, прозрачность или выберите раскладку в 4 пальца (Claw).",
-            style = MaterialTheme.typography.bodyMedium,
-            color = TextSecondary
-        )
-        Spacer(modifier = Modifier.height(4.dp))
-        Button(
-            onClick = onOpenControlEditor,
-            modifier = Modifier
-                .fillMaxWidth()
-                .height(50.dp)
-                .testTag("settings_open_control_editor"),
-            shape = CutCornerShape(topStart = 10.dp, bottomEnd = 10.dp),
-            colors = ButtonDefaults.buttonColors(
-                containerColor = TacticalAmber,
-                contentColor = ObsidianVoid
-            )
-        ) {
-            Icon(Icons.Default.Gamepad, contentDescription = null, modifier = Modifier.size(20.dp))
-            Spacer(modifier = Modifier.width(8.dp))
-            Text("ОТКРЫТЬ РЕДАКТОР УПРАВЛЕНИЯ", style = MaterialTheme.typography.labelLarge)
-        }
-    }
-
-    OutlinedButton(
-        onClick = onResetAll,
-        modifier = Modifier
-            .fillMaxWidth()
-            .height(48.dp)
-            .testTag("settings_reset_all"),
-        shape = CutCornerShape(topStart = 8.dp, bottomEnd = 8.dp),
-        border = BorderStroke(1.dp, ThreatCrimson.copy(alpha = 0.6f)),
-        colors = ButtonDefaults.outlinedButtonColors(contentColor = ThreatCrimson)
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.spacedBy(12.dp)
     ) {
-        Icon(Icons.Default.Refresh, contentDescription = null, modifier = Modifier.size(18.dp))
-        Spacer(modifier = Modifier.width(6.dp))
-        Text("СБРОСИТЬ ВСЕ НАСТРОЙКИ", style = MaterialTheme.typography.labelLarge)
+        Box(modifier = Modifier.weight(1f)) {
+            SettingsCard(title = "ЗВУК И ВИБРООТКЛИК", icon = {
+                Icon(Icons.Default.GraphicEq, contentDescription = null, tint = RtxEmerald, modifier = Modifier.size(18.dp))
+            }) {
+                SettingsSliderRow(
+                    label = "Громкость стрельбы и эффектов",
+                    valueText = "${(audio.sfxVolume * 100).roundToInt()}%",
+                    value = audio.sfxVolume,
+                    valueRange = 0f..1f,
+                    onValueChange = { onUpdateAudio(audio.copy(sfxVolume = it)) }
+                )
+                SettingsToggleRow(
+                    title = "Тактильная вибрация",
+                    subtitle = "Отдача при выстрелах, хедшотах и уроне",
+                    checked = audio.hapticsEnabled,
+                    onCheckedChange = { onUpdateAudio(audio.copy(hapticsEnabled = it)) },
+                    tag = "toggle_haptics"
+                )
+            }
+        }
+
+        Box(modifier = Modifier.weight(1f)) {
+            SettingsCard(title = "РАСКЛАДКА УПРАВЛЕНИЯ (HUD)", icon = {
+                Icon(Icons.Default.Gamepad, contentDescription = null, tint = TacticalAmber, modifier = Modifier.size(18.dp))
+            }) {
+                Text(
+                    text = "Перетаскивайте кнопки (включая широкую кнопку свайпа оружия и магазин), меняйте размер и прозрачность.",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = TextSecondary
+                )
+                Button(
+                    onClick = onOpenControlEditor,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(48.dp)
+                        .testTag("settings_open_control_editor"),
+                    shape = CutCornerShape(topStart = 10.dp, bottomEnd = 10.dp),
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = TacticalAmber,
+                        contentColor = ObsidianVoid
+                    )
+                ) {
+                    Icon(Icons.Default.Gamepad, contentDescription = null, modifier = Modifier.size(20.dp))
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Text("РЕДАКТОР УПРАВЛЕНИЯ", style = MaterialTheme.typography.labelLarge)
+                }
+
+                OutlinedButton(
+                    onClick = onResetAll,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(44.dp)
+                        .testTag("settings_reset_all"),
+                    shape = CutCornerShape(topStart = 8.dp, bottomEnd = 8.dp),
+                    border = BorderStroke(1.dp, ThreatCrimson.copy(alpha = 0.6f)),
+                    colors = ButtonDefaults.outlinedButtonColors(contentColor = ThreatCrimson)
+                ) {
+                    Icon(Icons.Default.Refresh, contentDescription = null, modifier = Modifier.size(18.dp))
+                    Spacer(modifier = Modifier.width(6.dp))
+                    Text("СБРОСИТЬ ВСЕ НАСТРОЙКИ", style = MaterialTheme.typography.labelMedium)
+                }
+            }
+        }
     }
 }
 
@@ -452,13 +446,13 @@ private fun PresetChip(
                 shape = shape
             )
             .clickable(onClick = onClick)
-            .padding(vertical = 12.dp, horizontal = 8.dp)
+            .padding(vertical = 10.dp, horizontal = 8.dp)
             .testTag("preset_${preset.name.lowercase()}"),
         contentAlignment = Alignment.Center
     ) {
         Text(
             text = preset.titleRu,
-            style = MaterialTheme.typography.labelLarge,
+            style = MaterialTheme.typography.labelMedium,
             color = if (selected) accent else TextPrimary
         )
     }
@@ -478,7 +472,7 @@ private fun SettingsCard(
     ) {
         Column(
             modifier = Modifier.padding(14.dp),
-            verticalArrangement = Arrangement.spacedBy(12.dp)
+            verticalArrangement = Arrangement.spacedBy(10.dp)
         ) {
             Row(
                 verticalAlignment = Alignment.CenterVertically,
@@ -510,7 +504,7 @@ private fun SettingsSliderRow(
             horizontalArrangement = Arrangement.SpaceBetween,
             verticalAlignment = Alignment.CenterVertically
         ) {
-            Text(text = label, style = MaterialTheme.typography.bodyLarge, color = TextPrimary)
+            Text(text = label, style = MaterialTheme.typography.bodyMedium, color = TextPrimary)
             Text(text = valueText, style = MaterialTheme.typography.labelLarge, color = RtxEmerald)
         }
         Slider(
@@ -543,7 +537,7 @@ private fun SettingsToggleRow(
     ) {
         Column(modifier = Modifier.weight(1f).padding(end = 12.dp)) {
             Text(text = title, style = MaterialTheme.typography.bodyLarge, color = TextPrimary)
-            Text(text = subtitle, style = MaterialTheme.typography.bodyMedium, color = TextSecondary)
+            Text(text = subtitle, style = MaterialTheme.typography.bodySmall, color = TextSecondary)
         }
         Switch(
             checked = checked,

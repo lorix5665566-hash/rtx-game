@@ -9,17 +9,15 @@ import android.os.VibratorManager
 import androidx.lifecycle.AndroidViewModel
 import com.example.audio.SoundEngine
 import com.example.engine.GameEngine
-import com.example.model.ArenaMapId
 import com.example.model.AudioSettings
 import com.example.model.ControlLayout
-import com.example.model.GameMode
 import com.example.model.GameSettings
 import com.example.model.GraphicsPreset
 import com.example.model.GraphicsSettings
+import com.example.model.MatchConfig
 import com.example.model.PlayerStats
 import com.example.model.SensitivitySettings
 import com.example.model.SettingsRepository
-import com.example.model.WeaponType
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -48,14 +46,8 @@ class GameViewModel(application: Application) : AndroidViewModel(application) {
     private val _stats = MutableStateFlow(repository.loadStats())
     val stats: StateFlow<PlayerStats> = _stats.asStateFlow()
 
-    private val _selectedMode = MutableStateFlow(GameMode.ASSAULT)
-    val selectedMode: StateFlow<GameMode> = _selectedMode.asStateFlow()
-
-    private val _selectedMap = MutableStateFlow(ArenaMapId.INDUSTRIAL)
-    val selectedMap: StateFlow<ArenaMapId> = _selectedMap.asStateFlow()
-
-    private val _selectedWeapon = MutableStateFlow(WeaponType.M4A1)
-    val selectedWeapon: StateFlow<WeaponType> = _selectedWeapon.asStateFlow()
+    private val _matchConfig = MutableStateFlow(MatchConfig())
+    val matchConfig: StateFlow<MatchConfig> = _matchConfig.asStateFlow()
 
     private val _screen = MutableStateFlow<AppScreen>(AppScreen.Menu)
     val screen: StateFlow<AppScreen> = _screen.asStateFlow()
@@ -74,22 +66,14 @@ class GameViewModel(application: Application) : AndroidViewModel(application) {
         it.settings = _settings.value
     }
 
-    fun selectMode(mode: GameMode) {
-        _selectedMode.value = mode
-    }
-
-    fun selectMap(map: ArenaMapId) {
-        _selectedMap.value = map
-    }
-
-    fun selectStartingWeapon(weapon: WeaponType) {
-        _selectedWeapon.value = weapon
+    fun updateMatchConfig(transform: (MatchConfig) -> MatchConfig) {
+        _matchConfig.value = transform(_matchConfig.value)
     }
 
     fun startGame() {
         _isPauseOverlayOpen.value = false
         engine.settings = _settings.value
-        engine.startNewMatch(_selectedMode.value, _selectedMap.value, _selectedWeapon.value)
+        engine.startNewMatch(_matchConfig.value)
         _screen.value = AppScreen.Playing
     }
 
@@ -126,6 +110,7 @@ class GameViewModel(application: Application) : AndroidViewModel(application) {
     fun exitToMainMenu() {
         engine.isPaused = true
         engine.isFiring = false
+        engine.isBombActionHeld = false
         _isPauseOverlayOpen.value = false
         _screen.value = AppScreen.Menu
     }

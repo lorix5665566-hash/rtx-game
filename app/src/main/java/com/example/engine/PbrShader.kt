@@ -6,6 +6,7 @@ import android.util.Log
 class PbrShader {
     val programId: Int
     val skyProgramId: Int
+    val flashProgramId: Int
 
     val uMvp: Int
     val uModel: Int
@@ -40,9 +41,15 @@ class PbrShader {
     val skyUSunDir: Int
     val skyUSunGlow: Int
 
+    val flashUMvp: Int
+    val flashUTex: Int
+    val flashUIntensity: Int
+    val flashUColorTint: Int
+
     init {
         programId = compileProgram(PBR_VERTEX_SHADER, PBR_FRAGMENT_SHADER)
         skyProgramId = compileProgram(SKY_VERTEX_SHADER, SKY_FRAGMENT_SHADER)
+        flashProgramId = compileProgram(FLASH_VERTEX_SHADER, FLASH_FRAGMENT_SHADER)
 
         uMvp = GLES30.glGetUniformLocation(programId, "uMvp")
         uModel = GLES30.glGetUniformLocation(programId, "uModel")
@@ -76,11 +83,17 @@ class PbrShader {
         skyUHorizonColor = GLES30.glGetUniformLocation(skyProgramId, "uHorizonColor")
         skyUSunDir = GLES30.glGetUniformLocation(skyProgramId, "uSunDir")
         skyUSunGlow = GLES30.glGetUniformLocation(skyProgramId, "uSunGlow")
+
+        flashUMvp = GLES30.glGetUniformLocation(flashProgramId, "uMvp")
+        flashUTex = GLES30.glGetUniformLocation(flashProgramId, "uFlameTex")
+        flashUIntensity = GLES30.glGetUniformLocation(flashProgramId, "uIntensity")
+        flashUColorTint = GLES30.glGetUniformLocation(flashProgramId, "uColorTint")
     }
 
     fun release() {
         GLES30.glDeleteProgram(programId)
         GLES30.glDeleteProgram(skyProgramId)
+        GLES30.glDeleteProgram(flashProgramId)
     }
 
     private fun compileProgram(vsSrc: String, fsSrc: String): Int {
@@ -218,22 +231,22 @@ class PbrShader {
 
             vec3 sampleEnvironmentRtx(vec3 R, float roughness) {
                 float up = clamp(R.y, -1.0, 1.0);
-                vec3 zenith = uFogColor * 0.75 + vec3(0.03, 0.06, 0.10);
-                vec3 horizon = uFogColor * 1.9 + vec3(0.06, 0.09, 0.12);
-                vec3 ground = uFogColor * 0.35;
+                vec3 zenith = uFogColor * 0.78 + vec3(0.08, 0.14, 0.24);
+                vec3 horizon = uFogColor * 1.45 + uSunColor * 0.14;
+                vec3 ground = uFogColor * 0.45;
                 vec3 env = up >= 0.0
                     ? mix(horizon, zenith, pow(up, 0.55))
-                    : mix(horizon * 0.45, ground, clamp(-up * 2.5, 0.0, 1.0));
+                    : mix(horizon * 0.55, ground, clamp(-up * 2.2, 0.0, 1.0));
 
                 float az = atan(R.z, R.x);
-                float bandA = pow(max(0.0, sin(az * 2.0 + 0.7)), 6.0) * exp(-abs(up - 0.12) * 8.0);
-                float bandB = pow(max(0.0, cos(az * 2.0 - 0.5)), 6.0) * exp(-abs(up - 0.10) * 9.0);
-                float clarity = mix(1.0, 0.22, roughness);
-                env += uLightColor[0] * bandA * 0.35 * clarity;
-                env += uLightColor[1] * bandB * 0.35 * clarity;
+                float bandA = pow(max(0.0, sin(az * 2.0 + 0.7)), 5.0) * exp(-abs(up - 0.14) * 7.0);
+                float bandB = pow(max(0.0, cos(az * 2.0 - 0.5)), 5.0) * exp(-abs(up - 0.12) * 8.0);
+                float clarity = mix(1.0, 0.24, roughness);
+                env += uLightColor[0] * bandA * 0.22 * clarity;
+                env += uLightColor[1] * bandB * 0.22 * clarity;
 
-                float sunSpec = pow(max(dot(R, normalize(uSunDir)), 0.0), mix(140.0, 12.0, roughness));
-                env += uSunColor * sunSpec * 1.35 * clarity;
+                float sunSpec = pow(max(dot(R, normalize(uSunDir)), 0.0), mix(160.0, 14.0, roughness));
+                env += uSunColor * sunSpec * 1.55 * clarity;
                 return env;
             }
 
@@ -242,8 +255,8 @@ class PbrShader {
                 if (NdotL <= 0.0) return vec3(0.0);
                 vec3 H = normalize(V + L);
                 if (uQualityLevel == 0) {
-                    float spec = pow(max(dot(N, H), 0.0), mix(48.0, 6.0, roughness)) * (1.0 - roughness * 0.6);
-                    return (albedo * 0.85 + vec3(spec * 0.35)) * radiance * NdotL;
+                    float spec = pow(max(dot(N, H), 0.0), mix(56.0, 8.0, roughness)) * (1.0 - roughness * 0.6);
+                    return (albedo * 0.85 + vec3(spec * 0.42)) * radiance * NdotL;
                 }
                 float NDF = distributionGGX(N, H, roughness);
                 float G = geometrySmith(N, V, L, roughness);
@@ -268,42 +281,53 @@ class PbrShader {
                 vec4 texSample = texture(uAlbedoTex, vUv);
                 vec3 albedo = (uHdTextures == 1)
                     ? (texSample.rgb * uBaseColor)
-                    : (mix(vec3(0.75), texSample.rgb, 0.45) * uBaseColor);
+                    : (mix(vec3(0.76), texSample.rgb, 0.50) * uBaseColor);
 
-                float puddleMask = clamp((texSample.a - 0.35) * 1.8, 0.0, 1.0) * uReflectivity;
-                float roughness = clamp(uRoughness, 0.06, 0.98);
-                if (uRtxReflections == 1 && puddleMask > 0.05) {
-                    roughness = mix(roughness, 0.07, puddleMask);
-                    albedo *= mix(1.0, 0.70, puddleMask);
+                // Alpha carries micro-gloss / wetness detail
+                float glossDetail = texSample.a;
+                float puddleMask = clamp((glossDetail - 0.42) * 1.8, 0.0, 1.0) * uReflectivity;
+                float roughness = clamp(uRoughness * mix(1.15, 0.72, glossDetail), 0.05, 0.98);
+                if (uRtxReflections == 1 && puddleMask > 0.08 && uMetallic < 0.35) {
+                    roughness = mix(roughness, 0.08, puddleMask * 0.75);
+                    albedo *= mix(1.0, 0.78, puddleMask * 0.65);
                 }
 
                 vec3 N = normalize(vWorldNormal);
                 if (uHdTextures == 1 && uQualityLevel >= 1) {
                     vec3 mapN = texture(uNormalTex, vUv).xyz * 2.0 - 1.0;
-                    if (uRtxReflections == 1 && puddleMask > 0.25 && uQualityLevel >= 2) {
-                        float rip = sin(vWorldPos.x * 16.0 + uTime * 5.0) * cos(vWorldPos.z * 16.0 - uTime * 4.2) * 0.032;
-                        mapN = normalize(mix(mapN, vec3(rip, rip, 1.0), puddleMask * 0.80));
+                    if (uRtxReflections == 1 && puddleMask > 0.30 && uMetallic < 0.3 && uQualityLevel >= 2) {
+                        float rip = sin(vWorldPos.x * 16.0 + uTime * 5.0) * cos(vWorldPos.z * 16.0 - uTime * 4.2) * 0.028;
+                        mapN = normalize(mix(mapN, vec3(rip, rip, 1.0), puddleMask * 0.75));
                     }
                     N = perturbNormal(N, vWorldPos, vUv, mapN);
                 }
 
                 vec3 V = normalize(uCamPos - vWorldPos);
                 vec3 F0 = mix(vec3(0.04), albedo, uMetallic);
-                if (uRtxReflections == 1 && puddleMask > 0.1) {
+                if (uMetallic > 0.5) {
+                    // Realistic gunmetal/steel metallic edge reflectance
+                    F0 = max(F0, vec3(0.52, 0.55, 0.58) * uMetallic);
+                } else if (uRtxReflections == 1 && puddleMask > 0.1) {
                     F0 = mix(F0, vec3(0.065), puddleMask);
                 }
 
-                float contactAo = mix(0.64, 1.0, clamp((vWorldPos.y + 0.05) * 0.9, 0.0, 1.0));
-                vec3 skyAmb = mix(uFogColor * 0.8 + vec3(0.04), uSunColor * 0.22 + vec3(0.09, 0.12, 0.16), N.y * 0.5 + 0.5);
-                vec3 color = albedo * skyAmb * (1.0 - uMetallic * 0.50) * contactAo;
+                float contactAo = mix(0.68, 1.0, clamp((vWorldPos.y + 0.06) * 0.85, 0.0, 1.0));
+                vec3 groundBounce = uFogColor * 0.65 + uSunColor * 0.12;
+                vec3 skyBounce = uSunColor * 0.24 + uFogColor * 0.55 + vec3(0.06, 0.09, 0.14);
+                vec3 hemiAmb = mix(groundBounce, skyBounce, N.y * 0.5 + 0.5);
+                vec3 color = albedo * hemiAmb * (1.0 - uMetallic * 0.48) * contactAo;
 
                 vec3 sunL = normalize(uSunDir);
                 float shadowTerm = 1.0;
                 if (uDynamicLights == 1 && vWorldPos.y < 0.08) {
-                    float pattern = sin(vWorldPos.x * 0.35 + vWorldPos.z * 0.2) * 0.5 + 0.5;
-                    shadowTerm = mix(0.75, 1.0, pattern);
+                    float pattern = sin(vWorldPos.x * 0.24 + vWorldPos.z * 0.18) * 0.5 + 0.5;
+                    shadowTerm = mix(0.84, 1.0, pattern);
                 }
                 color += evalPbrLight(N, V, sunL, uSunColor * shadowTerm, albedo, uMetallic, roughness, F0);
+
+                // Subtle sky fill light from opposite hemisphere so dark sides of weapons/soldiers show crisp metallic bevels
+                vec3 fillDir = normalize(vec3(-sunL.x, 0.45, -sunL.z));
+                color += evalPbrLight(N, V, fillDir, (uFogColor + vec3(0.18, 0.22, 0.28)) * 0.42, albedo, uMetallic, roughness, F0);
 
                 if (uDynamicLights == 1) {
                     int lightCount = (uQualityLevel >= 2) ? 4 : 2;
@@ -315,7 +339,7 @@ class PbrShader {
                         if (dist < rad) {
                             vec3 L = toL / max(dist, 0.001);
                             float att = clamp(1.0 - (dist / rad), 0.0, 1.0);
-                            att = att * att * 2.3;
+                            att = att * att * 2.2;
                             color += evalPbrLight(N, V, L, uLightColor[i] * att, albedo, uMetallic, roughness, F0);
                         }
                     }
@@ -325,29 +349,29 @@ class PbrShader {
                     vec3 R = reflect(-V, N);
                     vec3 envRefl = sampleEnvironmentRtx(R, roughness);
                     vec3 Fenv = fresnelSchlick(max(dot(N, V), 0.0), F0);
-                    float reflWeight = max(uMetallic * 0.82, puddleMask * 1.15);
+                    float reflWeight = max(uMetallic * 0.90, puddleMask * 0.95);
                     if (uQualityLevel >= 3) {
-                        color += envRefl * Fenv * (0.48 + reflWeight * 1.30);
+                        color += envRefl * Fenv * (0.42 + reflWeight * 1.25);
                     } else {
-                        color += envRefl * Fenv * (0.25 + reflWeight * 0.72);
+                        color += envRefl * Fenv * (0.24 + reflWeight * 0.72);
                     }
                 } else {
                     float rim = pow(1.0 - max(dot(N, V), 0.0), 3.0);
-                    color += vec3(0.08, 0.11, 0.15) * rim * (1.0 - roughness);
+                    color += vec3(0.10, 0.12, 0.15) * rim * (1.0 - roughness);
                 }
 
                 color += uEmissive;
 
                 float distToCam = length(uCamPos - vWorldPos);
                 float fogFactor = 1.0 - exp(-distToCam * distToCam * uFogDensity);
-                color = mix(color, uFogColor, clamp(fogFactor, 0.0, 0.86));
+                color = mix(color, uFogColor, clamp(fogFactor, 0.0, 0.82));
 
                 if (uBloomAces == 1) {
                     float luma = dot(color, vec3(0.2126, 0.7152, 0.0722));
-                    if (luma > 0.88) {
-                        color += (color - vec3(0.88)) * 0.30;
+                    if (luma > 0.90) {
+                        color += (color - vec3(0.90)) * 0.26;
                     }
-                    color = acesToneMap(color * 1.12);
+                    color = acesToneMap(color * 1.08);
                 } else {
                     color = color / (color + vec3(1.0));
                 }
@@ -414,26 +438,63 @@ class PbrShader {
             void main() {
                 vec3 d = normalize(vDir);
                 float h = clamp(d.y, 0.0, 1.0);
-                vec3 sky = mix(uHorizonColor, uTopColor, pow(h, 0.55));
+                vec3 sky = mix(uHorizonColor, uTopColor, pow(h, 0.52));
 
                 if (d.y > 0.01) {
-                    vec2 cloudUv = d.xz / (d.y + 0.25) * 1.4 + vec2(uTime * 0.010, uTime * 0.005);
+                    vec2 cloudUv = d.xz / (d.y + 0.28) * 1.2 + vec2(uTime * 0.008, uTime * 0.004);
                     float c = fbm(cloudUv);
-                    float cloudMask = smoothstep(0.42, 0.82, c) * smoothstep(0.01, 0.25, d.y);
-                    vec3 cloudCol = mix(uTopColor * 1.2, uHorizonColor * 1.65, c);
-                    sky = mix(sky, cloudCol, cloudMask * 0.68);
+                    float cloudMask = smoothstep(0.45, 0.84, c) * smoothstep(0.01, 0.28, d.y);
+                    vec3 cloudCol = mix(uTopColor * 1.15, vec3(1.0, 0.97, 0.92), c * 0.75);
+                    sky = mix(sky, cloudCol, cloudMask * 0.55);
                 }
 
                 vec3 sunDirN = normalize(uSunDir);
                 float sunDot = max(dot(d, sunDirN), 0.0);
-                sky += uSunGlow * pow(sunDot, 12.0) * 0.55;
-                sky += (uSunGlow + vec3(0.4)) * smoothstep(0.994, 0.999, sunDot) * 1.5;
+                sky += uSunGlow * pow(sunDot, 10.0) * 0.52;
+                sky += (uSunGlow + vec3(0.45)) * smoothstep(0.994, 0.999, sunDot) * 1.6;
 
                 if (uBloomAces == 1) {
                     sky = sky / (sky + vec3(0.85));
                 }
                 sky = pow(clamp(sky, 0.0, 1.0), vec3(1.0 / 2.2));
                 fragColor = vec4(sky, 1.0);
+            }
+        """.trimIndent()
+
+        // Dedicated additive volumetric fire shader for realistic microsecond gunfire flames!
+        private val FLASH_VERTEX_SHADER = """
+            #version 300 es
+            precision highp float;
+
+            layout(location = 0) in vec3 aPos;
+            layout(location = 1) in vec3 aNormal;
+            layout(location = 2) in vec2 aUv;
+
+            uniform mat4 uMvp;
+            out vec2 vUv;
+
+            void main() {
+                vUv = aUv;
+                gl_Position = uMvp * vec4(aPos, 1.0);
+            }
+        """.trimIndent()
+
+        private val FLASH_FRAGMENT_SHADER = """
+            #version 300 es
+            precision highp float;
+
+            in vec2 vUv;
+            uniform sampler2D uFlameTex;
+            uniform float uIntensity;
+            uniform vec3 uColorTint;
+            out vec4 fragColor;
+
+            void main() {
+                vec4 tex = texture(uFlameTex, vUv);
+                float alpha = tex.a * uIntensity;
+                if (alpha < 0.015) discard;
+                vec3 col = tex.rgb * uColorTint * (1.2 + uIntensity * 1.3);
+                fragColor = vec4(col, alpha);
             }
         """.trimIndent()
     }
