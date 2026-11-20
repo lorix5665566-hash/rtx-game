@@ -1,6 +1,7 @@
 package com.example.ui
 
-import android.opengl.GLSurfaceView
+import android.graphics.BitmapFactory
+import android.view.SurfaceView
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Canvas
@@ -36,6 +37,7 @@ import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.ShoppingCart
+import androidx.compose.material.icons.filled.ViewInAr
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Icon
@@ -61,9 +63,12 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.graphics.drawscope.rotate
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
@@ -71,16 +76,20 @@ import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.IntOffset
+import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.compose.LocalLifecycleOwner
+import com.example.engine.FilamentGameplayController
 import com.example.engine.GameEngine
-import com.example.engine.ShooterGlRenderer
 import com.example.model.BombState
 import com.example.model.ControlWidgetId
 import com.example.model.GameMode
 import com.example.model.GameSettings
 import com.example.model.HudSnapshot
+import com.example.model.ModelAssetRegistry
 import com.example.model.TeamSide
 import com.example.model.WeaponCategory
 import com.example.model.WeaponSlot
@@ -88,6 +97,7 @@ import com.example.model.WeaponType
 import com.example.ui.theme.BorderSteel
 import com.example.ui.theme.ElevatedGunmetal
 import com.example.ui.theme.IceCyan
+import com.example.ui.theme.LocalUiMetrics
 import com.example.ui.theme.ObsidianVoid
 import com.example.ui.theme.RtxEmerald
 import com.example.ui.theme.TacticalAmber
@@ -105,15 +115,20 @@ import kotlin.math.sin
 @Composable
 fun GameplayScreen(
     engine: GameEngine,
+    modelRegistry: ModelAssetRegistry,
     settings: GameSettings,
     isPaused: Boolean,
     onSetPaused: (Boolean) -> Unit,
     onRestart: () -> Unit,
     onOpenSettings: () -> Unit,
     onOpenControlEditor: () -> Unit,
+    onOpenModelManager: () -> Unit,
     onExitToMenu: () -> Unit
 ) {
     val context = LocalContext.current
+    val lifecycleOwner = LocalLifecycleOwner.current
+    val m = LocalUiMetrics.current
+
     var hud by remember { mutableStateOf(engine.latestHud) }
     var isShopOpen by remember { mutableStateOf(false) }
     var swipeFeedback by remember { mutableStateOf("") }
@@ -143,24 +158,43 @@ fun GameplayScreen(
         }
     }
 
-    val glSurfaceView = remember(engine) {
-        GLSurfaceView(context).apply {
-            setEGLContextClientVersion(3)
-            setEGLConfigChooser(8, 8, 8, 8, 24, 0)
-            preserveEGLContextOnPause = true
-            setRenderer(ShooterGlRenderer(engine))
-            renderMode = GLSurfaceView.RENDERMODE_CONTINUOUSLY
+    val filamentController = remember(engine, modelRegistry) {
+        FilamentGameplayController(
+            context = context,
+            gameEngine = engine,
+            registry = modelRegistry
+        )
+    }
+
+    val surfaceView = remember(filamentController) {
+        SurfaceView(context).also { sv ->
+            filamentController.attachTo(sv)
         }
     }
 
-    DisposableEffect(glSurfaceView) {
-        glSurfaceView.onResume()
+    DisposableEffect(lifecycleOwner, filamentController) {
+        val observer = LifecycleEventObserver { _, event ->
+            when (event) {
+                Lifecycle.Event.ON_RESUME -> filamentController.start()
+                Lifecycle.Event.ON_PAUSE -> {
+                    engine.isFiring = false
+                    engine.isBombActionHeld = false
+                    engine.moveInputX = 0f
+                    engine.moveInputY = 0f
+                    filamentController.stop()
+                }
+                else -> Unit
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        filamentController.start()
         onDispose {
+            lifecycleOwner.lifecycle.removeObserver(observer)
             engine.isFiring = false
             engine.isBombActionHeld = false
             engine.moveInputX = 0f
             engine.moveInputY = 0f
-            glSurfaceView.onPause()
+            filamentController.destroy()
         }
     }
 
@@ -173,9 +207,9 @@ fun GameplayScreen(
         val screenWidthPx = with(density) { maxWidth.toPx() }.coerceAtLeast(1f)
         val screenHeightPx = with(density) { maxHeight.toPx() }.coerceAtLeast(1f)
 
-        // 1. Live OpenGL ES 3.0 PBR / RTX 3D Viewport
+        // 1. Live AAA Google Filament PBR 3D Viewport
         AndroidView(
-            factory = { glSurfaceView },
+            factory = { surfaceView },
             modifier = Modifier.fillMaxSize()
         )
 
@@ -193,7 +227,23 @@ fun GameplayScreen(
             )
         }
 
-        // 3. Damage Vignette Flash
+        // 3. Blinding White-Orange C4 Explosion Flash Overlay
+        if (hud.explosionFlashAlpha > 0.01f) {
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .background(
+                        Brush.radialGradient(
+                            colors = listOf(
+                                Color(0xFFFFF4DC).copy(alpha = (hud.explosionFlashAlpha * 0.92f).coerceIn(0f, 0.95f)),
+                                Color(0xFFFF8822).copy(alpha = (hud.explosionFlashAlpha * 0.58f).coerceIn(0f, 0.72f))
+                            )
+                        )
+                    )
+            )
+        }
+
+        // 4. Damage Vignette Flash
         if (hud.damageFlashAlpha > 0.01f) {
             Box(
                 modifier = Modifier
@@ -209,7 +259,7 @@ fun GameplayScreen(
             )
         }
 
-        // 4. AWP 4x Optical Scope Overlay OR Dynamic Precision Crosshair
+        // 5. AWP 4x Optical Scope Overlay OR Dynamic Precision Crosshair
         val showSniperScope = hud.activeWeapon.hasSniperScope && hud.adsBlend > 0.55f && !hud.isPlayerDead
         if (showSniperScope) {
             SniperScopeOverlay(
@@ -226,119 +276,119 @@ fun GameplayScreen(
             )
         }
 
-        // 5. Top-Left Circular Tactical Radar + $ Money + FPS
+        // 6. Top-Left Circular CS2 Map Radar + $ Money + Callout + FPS
         Column(
             modifier = Modifier
                 .align(Alignment.TopStart)
                 .safeDrawingPadding()
-                .padding(start = 10.dp, top = 6.dp),
-            verticalArrangement = Arrangement.spacedBy(5.dp)
+                .padding(start = m.s(10f), top = m.s(6f)),
+            verticalArrangement = Arrangement.spacedBy(m.s(4f))
         ) {
             Row(
                 verticalAlignment = Alignment.Top,
-                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                horizontalArrangement = Arrangement.spacedBy(m.s(7f))
             ) {
                 TacticalRadar(hud = hud)
-                Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                    // CS2 Green Dollar Balance
+                Column(verticalArrangement = Arrangement.spacedBy(m.s(4f))) {
                     Surface(
                         color = Color(0xB80A111A),
-                        shape = RoundedCornerShape(6.dp),
-                        border = BorderStroke(1.dp, RtxEmerald.copy(alpha = 0.5f))
+                        shape = RoundedCornerShape(m.s(6f)),
+                        border = BorderStroke(1.dp, RtxEmerald.copy(alpha = 0.55f))
                     ) {
                         Text(
                             text = "$${hud.money}",
-                            style = MaterialTheme.typography.titleSmall,
+                            fontSize = m.sp(12.5f),
                             fontWeight = FontWeight.Black,
                             color = RtxEmerald,
-                            modifier = Modifier.padding(horizontal = 9.dp, vertical = 3.dp)
+                            modifier = Modifier.padding(horizontal = m.s(8f), vertical = m.s(3f))
                         )
                     }
                     if (hud.calloutName.isNotEmpty()) {
                         Surface(
                             color = Color(0xA60A1018),
-                            shape = RoundedCornerShape(5.dp)
+                            shape = RoundedCornerShape(m.s(5f))
                         ) {
                             Text(
                                 text = hud.calloutName,
-                                style = MaterialTheme.typography.labelSmall,
+                                fontSize = m.sp(9.5f),
+                                fontWeight = FontWeight.Bold,
                                 color = TacticalAmber,
-                                modifier = Modifier.padding(horizontal = 7.dp, vertical = 2.dp)
+                                modifier = Modifier.padding(horizontal = m.s(7f), vertical = m.s(2f))
                             )
                         }
                     }
                     if (settings.graphics.showFps) {
                         Text(
                             text = "${hud.fps} FPS • ${settings.graphics.preset.titleRu}",
-                            style = MaterialTheme.typography.labelSmall,
-                            color = Color.White.copy(alpha = 0.72f),
-                            fontSize = 10.sp
+                            fontSize = m.sp(9f),
+                            color = Color.White.copy(alpha = 0.78f)
                         )
                     }
                 }
             }
         }
 
-        // 6. Top-Center CS2 Round Scoreboard (CT vs T + Round Timer / C4 Countdown + Alive Counts)
+        // 7. Top-Center CS2 Round Scoreboard (CT vs T + Timer / C4 Countdown + Alive Counts)
         Column(
             modifier = Modifier
                 .align(Alignment.TopCenter)
                 .safeDrawingPadding()
-                .padding(top = 6.dp),
+                .padding(top = m.s(6f)),
             horizontalAlignment = Alignment.CenterHorizontally,
-            verticalArrangement = Arrangement.spacedBy(4.dp)
+            verticalArrangement = Arrangement.spacedBy(m.s(4f))
         ) {
             Cs2ScoreboardBar(hud = hud)
 
             if (hud.bannerText.isNotEmpty()) {
                 Surface(
-                    color = Color(0xCC0A111A),
-                    shape = CutCornerShape(topStart = 8.dp, bottomEnd = 8.dp),
-                    border = BorderStroke(1.dp, TacticalAmber.copy(alpha = 0.7f))
+                    color = Color(0xD10A111A),
+                    shape = CutCornerShape(topStart = m.s(8f), bottomEnd = m.s(8f)),
+                    border = BorderStroke(1.dp, TacticalAmber.copy(alpha = 0.78f))
                 ) {
                     Text(
                         text = hud.bannerText,
-                        style = MaterialTheme.typography.labelLarge,
+                        fontSize = m.sp(11f),
+                        fontWeight = FontWeight.ExtraBold,
                         color = TacticalAmber,
-                        modifier = Modifier.padding(horizontal = 14.dp, vertical = 4.dp)
+                        modifier = Modifier.padding(horizontal = m.s(13f), vertical = m.s(4f))
                     )
                 }
             }
 
             if (hud.killFeedText.isNotEmpty()) {
                 Surface(
-                    color = Color(0xA614090C),
-                    shape = RoundedCornerShape(5.dp),
-                    border = BorderStroke(1.dp, ThreatCrimson.copy(alpha = 0.45f))
+                    color = Color(0xAD14090C),
+                    shape = RoundedCornerShape(m.s(5f)),
+                    border = BorderStroke(1.dp, ThreatCrimson.copy(alpha = 0.50f))
                 ) {
                     Text(
                         text = hud.killFeedText,
-                        style = MaterialTheme.typography.labelSmall,
+                        fontSize = m.sp(9.5f),
                         color = TextPrimary,
-                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 2.dp)
+                        modifier = Modifier.padding(horizontal = m.s(9f), vertical = m.s(2f))
                     )
                 }
             }
         }
 
-        // 7. Bottom-Left Compact Vitals Strip (HP + Armor + Defuse Kit)
+        // 8. Bottom-Left Compact Vitals Strip (HP + Armor + Defuse Kit)
         Row(
             modifier = Modifier
                 .align(Alignment.BottomStart)
                 .safeDrawingPadding()
-                .padding(start = 12.dp, bottom = 8.dp),
+                .padding(start = m.s(12f), bottom = m.s(8f)),
             verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(8.dp)
+            horizontalArrangement = Arrangement.spacedBy(m.s(7f))
         ) {
             Surface(
                 color = Color(0xB80B111A),
-                shape = RoundedCornerShape(8.dp),
-                border = BorderStroke(1.dp, BorderSteel.copy(alpha = 0.7f))
+                shape = RoundedCornerShape(m.s(8f)),
+                border = BorderStroke(1.dp, BorderSteel.copy(alpha = 0.75f))
             ) {
                 Row(
-                    modifier = Modifier.padding(horizontal = 10.dp, vertical = 5.dp),
+                    modifier = Modifier.padding(horizontal = m.s(10f), vertical = m.s(5f)),
                     verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(10.dp)
+                    horizontalArrangement = Arrangement.spacedBy(m.s(9f))
                 ) {
                     val hpColor = when {
                         hud.hp > 50 -> RtxEmerald
@@ -347,19 +397,21 @@ fun GameplayScreen(
                     }
                     Text(
                         text = "+ ${hud.hp}",
-                        style = MaterialTheme.typography.titleSmall,
+                        fontSize = m.sp(13f),
                         fontWeight = FontWeight.Black,
                         color = hpColor
                     )
                     Text(
                         text = "БР ${hud.armor}",
-                        style = MaterialTheme.typography.labelLarge,
+                        fontSize = m.sp(11f),
+                        fontWeight = FontWeight.Bold,
                         color = IceCyan
                     )
                     if (hud.hasDefuseKit) {
                         Text(
                             text = "САПЁР",
-                            style = MaterialTheme.typography.labelSmall,
+                            fontSize = m.sp(9.5f),
+                            fontWeight = FontWeight.Bold,
                             color = RtxEmerald
                         )
                     }
@@ -369,25 +421,25 @@ fun GameplayScreen(
             if (hud.isReloading) {
                 Surface(
                     color = Color(0xCC0D1420),
-                    shape = RoundedCornerShape(6.dp),
-                    border = BorderStroke(1.dp, TacticalAmber.copy(alpha = 0.6f))
+                    shape = RoundedCornerShape(m.s(6f)),
+                    border = BorderStroke(1.dp, TacticalAmber.copy(alpha = 0.65f))
                 ) {
                     Column(
                         modifier = Modifier
-                            .width(120.dp)
-                            .padding(horizontal = 8.dp, vertical = 4.dp)
+                            .width(m.s(114f))
+                            .padding(horizontal = m.s(8f), vertical = m.s(4f))
                     ) {
                         Text(
                             text = "ПЕРЕЗАРЯДКА",
-                            style = MaterialTheme.typography.labelSmall,
-                            color = TacticalAmber,
-                            fontSize = 9.sp
+                            fontSize = m.sp(8.5f),
+                            fontWeight = FontWeight.Bold,
+                            color = TacticalAmber
                         )
                         LinearProgressIndicator(
                             progress = { hud.reloadProgress },
                             modifier = Modifier
                                 .fillMaxWidth()
-                                .height(4.dp)
+                                .height(m.s(4f))
                                 .clip(RoundedCornerShape(2.dp)),
                             color = TacticalAmber,
                             trackColor = ElevatedGunmetal
@@ -397,7 +449,7 @@ fun GameplayScreen(
             }
         }
 
-        // 8. Contextual C4 Plant / Defuse Hold Button (Lower-Center when in Bomb Zone!)
+        // 9. Contextual C4 Plant / Defuse Hold Button
         if (!isPaused && !isShopOpen && !hud.isPlayerDead && (hud.canPlantBomb || hud.canDefuseBomb)) {
             BombActionHoldButton(
                 isPlant = hud.canPlantBomb,
@@ -407,26 +459,26 @@ fun GameplayScreen(
                 modifier = Modifier
                     .align(Alignment.BottomCenter)
                     .safeDrawingPadding()
-                    .padding(bottom = 16.dp)
+                    .padding(bottom = m.s(16f))
             )
         }
 
-        // 9. Dead Spectator Banner (during Bomb Defusal round)
+        // 10. Dead Spectator Banner
         if (hud.isPlayerDead && !hud.isMatchFinished && !isPaused) {
             Surface(
                 color = Color(0xCC12090D),
-                shape = CutCornerShape(topStart = 10.dp, bottomEnd = 10.dp),
-                border = BorderStroke(1.dp, ThreatCrimson.copy(alpha = 0.7f)),
-                modifier = Modifier
-                    .align(Alignment.Center)
+                shape = CutCornerShape(topStart = m.s(10f), bottomEnd = m.s(10f)),
+                border = BorderStroke(1.dp, ThreatCrimson.copy(alpha = 0.72f)),
+                modifier = Modifier.align(Alignment.Center)
             ) {
                 Column(
-                    modifier = Modifier.padding(horizontal = 22.dp, vertical = 12.dp),
+                    modifier = Modifier.padding(horizontal = m.s(20f), vertical = m.s(11f)),
                     horizontalAlignment = Alignment.CenterHorizontally
                 ) {
                     Text(
                         text = "ВЫ УБИТЫ",
-                        style = MaterialTheme.typography.titleMedium,
+                        fontSize = m.sp(15f),
+                        fontWeight = FontWeight.Black,
                         color = ThreatCrimson
                     )
                     Text(
@@ -435,21 +487,20 @@ fun GameplayScreen(
                         } else {
                             "Возрождение..."
                         },
-                        style = MaterialTheme.typography.labelMedium,
+                        fontSize = m.sp(10.5f),
                         color = TextSecondary
                     )
                 }
             }
         }
 
-        // 10. Customizable Landscape Controls + Single Wide Swipe Weapon Button + Shop Button
+        // 11. Adaptive Customizable Landscape Controls + Single Wide Swipe Weapon Button + Shop Button
         if (!isPaused && !hud.isMatchFinished && !isShopOpen) {
             val layout = settings.controlLayout
 
-            // Movement Joystick
             val joyCfg = layout.get(ControlWidgetId.JOYSTICK)
             if (joyCfg.visible) {
-                val sizeDp = widgetBaseWidthDp(ControlWidgetId.JOYSTICK) * joyCfg.scale
+                val sizeDp = widgetBaseWidthDp(ControlWidgetId.JOYSTICK) * joyCfg.scale * m.scale
                 val sizePx = with(density) { sizeDp.toPx() }
                 VirtualJoystick(
                     sizeDp = sizeDp,
@@ -469,11 +520,10 @@ fun GameplayScreen(
                 )
             }
 
-            // Fire Buttons (Right & optional Left)
             listOf(ControlWidgetId.FIRE_RIGHT, ControlWidgetId.FIRE_LEFT).forEach { fireId ->
                 val cfg = layout.get(fireId)
                 if (cfg.visible) {
-                    val sizeDp = widgetBaseWidthDp(fireId) * cfg.scale
+                    val sizeDp = (widgetBaseWidthDp(fireId) * cfg.scale * m.scale).coerceAtLeast(48.dp)
                     val sizePx = with(density) { sizeDp.toPx() }
                     HoldActionButton(
                         id = fireId,
@@ -493,7 +543,6 @@ fun GameplayScreen(
                 }
             }
 
-            // ADS, Reload, Crouch, Jump, Shop, Pause
             listOf(
                 ControlWidgetId.ADS,
                 ControlWidgetId.RELOAD,
@@ -504,7 +553,7 @@ fun GameplayScreen(
             ).forEach { id ->
                 val cfg = layout.get(id)
                 if (cfg.visible) {
-                    val sizeDp = widgetBaseWidthDp(id) * cfg.scale
+                    val sizeDp = (widgetBaseWidthDp(id) * cfg.scale * m.scale).coerceAtLeast(44.dp)
                     val sizePx = with(density) { sizeDp.toPx() }
                     val activeState = when (id) {
                         ControlWidgetId.ADS -> hud.isAds
@@ -555,11 +604,10 @@ fun GameplayScreen(
                 }
             }
 
-            // SINGLE WIDE SWIPE WEAPON BUTTON (Left=Knife, Right=Pistol, Down=Primary, Up=Bomb C4, Tap=Quick Switch)
             val swipeCfg = layout.get(ControlWidgetId.WEAPON_SWIPE)
             if (swipeCfg.visible) {
-                val widthDp = widgetBaseWidthDp(ControlWidgetId.WEAPON_SWIPE) * swipeCfg.scale
-                val heightDp = widgetBaseHeightDp(ControlWidgetId.WEAPON_SWIPE) * swipeCfg.scale
+                val widthDp = widgetBaseWidthDp(ControlWidgetId.WEAPON_SWIPE) * swipeCfg.scale * m.scale
+                val heightDp = widgetBaseHeightDp(ControlWidgetId.WEAPON_SWIPE) * swipeCfg.scale * m.scale
                 val widthPx = with(density) { widthDp.toPx() }
                 val heightPx = with(density) { heightDp.toPx() }
                 WeaponSwipeControl(
@@ -588,31 +636,30 @@ fun GameplayScreen(
             }
         }
 
-        // 11. Compact In-Game Buy Menu (Shop) Overlay
+        // 12. Compact In-Game Buy Menu Overlay
         if (isShopOpen && !isPaused && !hud.isMatchFinished) {
             CompactBuyMenuOverlay(
                 hud = hud,
-                onBuyWeapon = { weapon ->
-                    engine.buyWeapon(weapon)
-                },
+                onBuyWeapon = { weapon -> engine.buyWeapon(weapon) },
                 onBuyArmor = { engine.buyArmor() },
                 onBuyDefuseKit = { engine.buyDefuseKit() },
                 onClose = { isShopOpen = false }
             )
         }
 
-        // 12. Pause Overlay
+        // 13. Pause Overlay
         if (isPaused && !hud.isMatchFinished) {
             PauseOverlay(
                 onResume = { onSetPaused(false) },
                 onRestart = onRestart,
                 onSettings = onOpenSettings,
                 onControls = onOpenControlEditor,
+                onModels = onOpenModelManager,
                 onExit = onExitToMenu
             )
         }
 
-        // 13. Match Finished Summary Overlay
+        // 14. Match Finished Summary Overlay
         if (hud.isMatchFinished) {
             MatchEndOverlay(
                 hud = hud,
@@ -625,6 +672,7 @@ fun GameplayScreen(
 
 @Composable
 private fun Cs2ScoreboardBar(hud: HudSnapshot) {
+    val m = LocalUiMetrics.current
     val timeSecInt = if (hud.bombState == BombState.PLANTED) {
         hud.bombCountdownSec.roundToInt().coerceAtLeast(0)
     } else {
@@ -636,84 +684,75 @@ private fun Cs2ScoreboardBar(hud: HudSnapshot) {
 
     Surface(
         color = Color(0xC20A101A),
-        shape = CutCornerShape(topStart = 10.dp, bottomEnd = 10.dp),
+        shape = CutCornerShape(topStart = m.s(10f), bottomEnd = m.s(10f)),
         border = BorderStroke(
             width = 1.dp,
             color = if (hud.bombState == BombState.PLANTED) ThreatCrimson else Color.White.copy(alpha = 0.16f)
         )
     ) {
         Row(
-            modifier = Modifier.padding(horizontal = 12.dp, vertical = 5.dp),
+            modifier = Modifier.padding(horizontal = m.s(11f), vertical = m.s(4f)),
             verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(12.dp)
+            horizontalArrangement = Arrangement.spacedBy(m.s(11f))
         ) {
-            // CT Score & Alive
             Row(
                 verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(6.dp)
+                horizontalArrangement = Arrangement.spacedBy(m.s(5f))
             ) {
                 Column(horizontalAlignment = Alignment.End) {
-                    Text("CT", style = MaterialTheme.typography.labelSmall, color = IceCyan, fontSize = 9.sp)
-                    Text("ЖИВ: ${hud.ctAlive}", style = MaterialTheme.typography.labelSmall, color = TextSecondary, fontSize = 8.sp)
+                    Text("CT", fontSize = m.sp(8.5f), fontWeight = FontWeight.Bold, color = IceCyan)
+                    Text("ЖИВ: ${hud.ctAlive}", fontSize = m.sp(7.5f), color = TextSecondary)
                 }
                 Text(
                     text = "${hud.ctScore}",
-                    style = MaterialTheme.typography.titleMedium,
+                    fontSize = m.sp(15f),
                     fontWeight = FontWeight.Black,
                     color = IceCyan
                 )
             }
 
-            // Center Timer / C4 Countdown
             Column(horizontalAlignment = Alignment.CenterHorizontally) {
                 if (hud.bombState == BombState.PLANTED) {
                     Text(
                         text = "C4 ${hud.bombSiteLabel} • $timeText",
-                        style = MaterialTheme.typography.labelLarge,
+                        fontSize = m.sp(11.5f),
                         fontWeight = FontWeight.Black,
                         color = ThreatCrimson
                     )
                 } else {
                     Text(
                         text = timeText,
-                        style = MaterialTheme.typography.titleSmall,
+                        fontSize = m.sp(12.5f),
                         fontWeight = FontWeight.Bold,
                         color = TextPrimary
                     )
                     Text(
                         text = if (hud.mode == GameMode.BOMB_DEFUSAL) "Р${hud.roundNumber} • ДО ${hud.roundsToWin}" else "БОЙ НАСМЕРТЬ",
-                        style = MaterialTheme.typography.labelSmall,
-                        color = TextSecondary,
-                        fontSize = 8.sp
+                        fontSize = m.sp(7.5f),
+                        color = TextSecondary
                     )
                 }
             }
 
-            // T Score & Alive
             Row(
                 verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(6.dp)
+                horizontalArrangement = Arrangement.spacedBy(m.s(5f))
             ) {
                 Text(
                     text = "${hud.tScore}",
-                    style = MaterialTheme.typography.titleMedium,
+                    fontSize = m.sp(15f),
                     fontWeight = FontWeight.Black,
                     color = TacticalAmber
                 )
                 Column(horizontalAlignment = Alignment.Start) {
-                    Text("T", style = MaterialTheme.typography.labelSmall, color = TacticalAmber, fontSize = 9.sp)
-                    Text("ЖИВ: ${hud.tAlive}", style = MaterialTheme.typography.labelSmall, color = TextSecondary, fontSize = 8.sp)
+                    Text("T", fontSize = m.sp(8.5f), fontWeight = FontWeight.Bold, color = TacticalAmber)
+                    Text("ЖИВ: ${hud.tAlive}", fontSize = m.sp(7.5f), color = TextSecondary)
                 }
             }
         }
     }
 }
 
-/**
- * Single Wide Swipe Weapon Switcher Button:
- * Displays currently held weapon silhouette + name + ammo.
- * Swipe Left = Knife | Swipe Right = Pistol | Swipe Down = Primary | Swipe Up = Bomb C4 | Tap = Quick Switch
- */
 @Composable
 private fun WeaponSwipeControl(
     hud: HudSnapshot,
@@ -725,9 +764,10 @@ private fun WeaponSwipeControl(
     onSelectSlot: (WeaponSlot, String) -> Unit,
     onQuickSwitch: () -> Unit
 ) {
+    val m = LocalUiMetrics.current
     val density = LocalDensity.current
-    val swipeThresholdPx = with(density) { 22.dp.toPx() }
-    val shape = RoundedCornerShape(11.dp)
+    val swipeThresholdPx = with(density) { m.s(20f).toPx() }
+    val shape = RoundedCornerShape(m.s(11f))
     val accentColor = when (hud.activeWeapon.slot) {
         WeaponSlot.BOMB -> ThreatCrimson
         WeaponSlot.KNIFE -> IceCyan
@@ -782,24 +822,22 @@ private fun WeaponSwipeControl(
                     }
                 }
             }
-            .padding(horizontal = 8.dp, vertical = 4.dp)
+            .padding(horizontal = m.s(8f), vertical = m.s(4f))
     ) {
-        // Top micro-hint (Bomb C4 swipe up when in Bomb Defusal)
         if (hud.mode == GameMode.BOMB_DEFUSAL && hud.hasBomb) {
             Text(
                 text = "▲ C4",
-                style = MaterialTheme.typography.labelSmall,
-                color = ThreatCrimson.copy(alpha = 0.9f),
-                fontSize = 8.sp,
+                fontSize = m.sp(7.5f),
+                fontWeight = FontWeight.Bold,
+                color = ThreatCrimson.copy(alpha = 0.92f),
                 modifier = Modifier.align(Alignment.TopCenter)
             )
         }
 
-        // Main Center Row: Current Weapon Silhouette + Name & Ammo
         Row(
             modifier = Modifier
                 .fillMaxSize()
-                .padding(top = 4.dp, bottom = 7.dp),
+                .padding(top = m.s(4f), bottom = m.s(7f)),
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.SpaceBetween
         ) {
@@ -814,7 +852,7 @@ private fun WeaponSwipeControl(
             Column(horizontalAlignment = Alignment.End) {
                 Text(
                     text = if (swipeFeedback.isNotEmpty()) swipeFeedback else hud.activeWeapon.shortLabel,
-                    style = MaterialTheme.typography.labelLarge,
+                    fontSize = m.sp(11f),
                     fontWeight = FontWeight.Black,
                     color = accentColor,
                     maxLines = 1
@@ -826,27 +864,25 @@ private fun WeaponSwipeControl(
                 }
                 Text(
                     text = ammoLabel,
-                    style = MaterialTheme.typography.labelSmall,
-                    color = TextPrimary,
-                    fontSize = 10.sp
+                    fontSize = m.sp(9.5f),
+                    color = TextPrimary
                 )
             }
         }
 
-        // Bottom directional legend
         Row(
             modifier = Modifier
                 .fillMaxWidth()
                 .align(Alignment.BottomCenter),
             horizontalArrangement = Arrangement.SpaceBetween
         ) {
-            Text("◄ НОЖ", fontSize = 8.sp, color = TextSecondary)
+            Text("◄ НОЖ", fontSize = m.sp(7.5f), color = TextSecondary)
             Text(
                 text = if (hud.primaryWeapon != null) "▼ ${hud.primaryWeapon.shortLabel}" else "▼ ОСН",
-                fontSize = 8.sp,
+                fontSize = m.sp(7.5f),
                 color = if (hud.primaryWeapon != null) RtxEmerald.copy(alpha = 0.85f) else TextSecondary.copy(alpha = 0.5f)
             )
-            Text("${hud.pistolWeapon.shortLabel} ►", fontSize = 8.sp, color = TacticalAmber.copy(alpha = 0.85f))
+            Text("${hud.pistolWeapon.shortLabel} ►", fontSize = m.sp(7.5f), color = TacticalAmber.copy(alpha = 0.85f))
         }
     }
 }
@@ -887,9 +923,7 @@ private fun WeaponSilhouetteIcon(
                 )
             }
             WeaponType.USP_S, WeaponType.GLOCK_18, WeaponType.DESERT_EAGLE -> {
-                // Slide
                 drawRect(tint, Offset(w * 0.20f, h * 0.26f), Size(w * if (weapon.isSuppressed) 0.70f else 0.52f, h * 0.22f))
-                // Grip
                 val grip = Path().apply {
                     moveTo(w * 0.22f, h * 0.46f)
                     lineTo(w * 0.38f, h * 0.46f)
@@ -900,18 +934,14 @@ private fun WeaponSilhouetteIcon(
                 drawPath(grip, color = tint)
             }
             WeaponType.AWP -> {
-                // Scope
                 drawRect(tint, Offset(w * 0.34f, h * 0.14f), Size(w * 0.30f, h * 0.14f))
-                // Long Barrel + Chassis + Stock
                 drawRect(tint, Offset(w * 0.06f, h * 0.36f), Size(w * 0.88f, h * 0.16f))
                 drawRect(tint, Offset(w * 0.06f, h * 0.48f), Size(w * 0.22f, h * 0.26f))
                 drawRect(tint, Offset(w * 0.44f, h * 0.52f), Size(w * 0.10f, h * 0.22f))
             }
             else -> {
-                // Rifle / SMG silhouette
                 drawRect(tint, Offset(w * 0.06f, h * 0.34f), Size(w * 0.86f, h * 0.19f))
                 drawRect(tint, Offset(w * 0.06f, h * 0.46f), Size(w * 0.20f, h * 0.26f))
-                // Magazine
                 val mag = Path().apply {
                     moveTo(w * 0.48f, h * 0.52f)
                     lineTo(w * 0.60f, h * 0.52f)
@@ -933,6 +963,7 @@ private fun CompactBuyMenuOverlay(
     onBuyDefuseKit: () -> Unit,
     onClose: () -> Unit
 ) {
+    val m = LocalUiMetrics.current
     val isFreeTdm = hud.mode == GameMode.TEAM_DEATHMATCH
     val pistols = WeaponType.entries.filter { it.category == WeaponCategory.PISTOLS }
     val smgs = WeaponType.entries.filter { it.category == WeaponCategory.SMGS }
@@ -944,24 +975,23 @@ private fun CompactBuyMenuOverlay(
             .background(Color(0x9E060A11))
             .clickable(onClick = onClose)
             .safeDrawingPadding()
-            .padding(14.dp),
+            .padding(m.s(12f)),
         contentAlignment = Alignment.Center
     ) {
         Surface(
             color = Color(0xEC0D1420),
-            shape = CutCornerShape(topStart = 14.dp, bottomEnd = 14.dp),
+            shape = CutCornerShape(topStart = m.s(14f), bottomEnd = m.s(14f)),
             border = BorderStroke(1.2.dp, RtxEmerald.copy(alpha = 0.6f)),
             modifier = Modifier
-                .widthIn(max = 720.dp)
+                .widthIn(max = m.s(710f))
                 .fillMaxWidth()
                 .clickable(enabled = false) {}
                 .testTag("compact_buy_menu")
         ) {
             Column(
-                modifier = Modifier.padding(14.dp),
-                verticalArrangement = Arrangement.spacedBy(10.dp)
+                modifier = Modifier.padding(m.s(12f)),
+                verticalArrangement = Arrangement.spacedBy(m.s(9f))
             ) {
-                // Header
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.SpaceBetween,
@@ -969,25 +999,26 @@ private fun CompactBuyMenuOverlay(
                 ) {
                     Row(
                         verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(10.dp)
+                        horizontalArrangement = Arrangement.spacedBy(m.s(9f))
                     ) {
-                        Icon(Icons.Default.ShoppingCart, contentDescription = null, tint = RtxEmerald, modifier = Modifier.size(20.dp))
+                        Icon(Icons.Default.ShoppingCart, contentDescription = null, tint = RtxEmerald, modifier = Modifier.size(m.s(19f)))
                         Text(
                             text = "МАГАЗИН ОРУЖИЯ",
-                            style = MaterialTheme.typography.titleMedium,
+                            fontSize = m.sp(14f),
+                            fontWeight = FontWeight.Black,
                             color = TextPrimary
                         )
                         Surface(
                             color = RtxEmerald.copy(alpha = 0.18f),
-                            shape = RoundedCornerShape(6.dp),
+                            shape = RoundedCornerShape(m.s(6f)),
                             border = BorderStroke(1.dp, RtxEmerald.copy(alpha = 0.6f))
                         ) {
                             Text(
                                 text = if (isFreeTdm) "БЕСПЛАТНО (DM)" else "$${hud.money}",
-                                style = MaterialTheme.typography.titleSmall,
+                                fontSize = m.sp(12f),
                                 fontWeight = FontWeight.Black,
                                 color = RtxEmerald,
-                                modifier = Modifier.padding(horizontal = 10.dp, vertical = 3.dp)
+                                modifier = Modifier.padding(horizontal = m.s(9f), vertical = m.s(3f))
                             )
                         }
                     }
@@ -995,17 +1026,16 @@ private fun CompactBuyMenuOverlay(
                     IconButton(
                         onClick = onClose,
                         modifier = Modifier
-                            .size(34.dp)
+                            .size(m.s(34f))
                             .testTag("buy_menu_close")
                     ) {
                         Icon(Icons.Default.Close, contentDescription = "Закрыть магазин", tint = TextPrimary)
                     }
                 }
 
-                // 4 Compact Columns: Pistols | SMGs | Rifles | Gear
                 Row(
                     modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    horizontalArrangement = Arrangement.spacedBy(m.s(7f))
                 ) {
                     BuyColumn(title = "ПИСТОЛЕТЫ", accent = TacticalAmber, modifier = Modifier.weight(1f)) {
                         pistols.forEach { w ->
@@ -1094,13 +1124,14 @@ private fun BuyColumn(
     modifier: Modifier = Modifier,
     content: @Composable () -> Unit
 ) {
+    val m = LocalUiMetrics.current
     Column(
         modifier = modifier,
-        verticalArrangement = Arrangement.spacedBy(6.dp)
+        verticalArrangement = Arrangement.spacedBy(m.s(5f))
     ) {
         Text(
             text = title,
-            style = MaterialTheme.typography.labelSmall,
+            fontSize = m.sp(9.5f),
             color = accent,
             fontWeight = FontWeight.Bold
         )
@@ -1118,7 +1149,8 @@ private fun BuyItemButton(
     onClick: () -> Unit,
     tag: String
 ) {
-    val shape = RoundedCornerShape(8.dp)
+    val m = LocalUiMetrics.current
+    val shape = RoundedCornerShape(m.s(8f))
     Box(
         modifier = Modifier
             .fillMaxWidth()
@@ -1136,7 +1168,7 @@ private fun BuyItemButton(
                 shape = shape
             )
             .clickable(enabled = enabled, onClick = onClick)
-            .padding(horizontal = 9.dp, vertical = 9.dp)
+            .padding(horizontal = m.s(8f), vertical = m.s(8f))
             .testTag(tag)
     ) {
         Row(
@@ -1146,13 +1178,13 @@ private fun BuyItemButton(
         ) {
             Text(
                 text = title,
-                style = MaterialTheme.typography.labelMedium,
+                fontSize = m.sp(10.5f),
                 color = if (enabled || owned) TextPrimary else TextSecondary.copy(alpha = 0.45f),
                 maxLines = 1
             )
             Text(
                 text = priceText,
-                style = MaterialTheme.typography.labelSmall,
+                fontSize = m.sp(9.5f),
                 fontWeight = FontWeight.Bold,
                 color = when {
                     owned -> accent
@@ -1172,14 +1204,15 @@ private fun BombActionHoldButton(
     onHeldChange: (Boolean) -> Unit,
     modifier: Modifier = Modifier
 ) {
+    val m = LocalUiMetrics.current
     val accent = if (isPlant) ThreatCrimson else IceCyan
     val label = if (isPlant) "УДЕРЖ. ЗАЛОЖИТЬ C4 ($siteLabel)" else "УДЕРЖ. РАЗМИНИРОВАТЬ C4 ($siteLabel)"
     Surface(
         color = Color(0xD90E141F),
-        shape = CutCornerShape(topStart = 10.dp, bottomEnd = 10.dp),
+        shape = CutCornerShape(topStart = m.s(10f), bottomEnd = m.s(10f)),
         border = BorderStroke(1.8.dp, accent),
         modifier = modifier
-            .width(240.dp)
+            .width(m.s(236f))
             .pointerInput(isPlant) {
                 awaitEachGesture {
                     awaitFirstDown(requireUnconsumed = false)
@@ -1194,13 +1227,13 @@ private fun BombActionHoldButton(
             .testTag("hud_bomb_action_button")
     ) {
         Column(
-            modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
+            modifier = Modifier.padding(horizontal = m.s(11f), vertical = m.s(7f)),
             horizontalAlignment = Alignment.CenterHorizontally,
-            verticalArrangement = Arrangement.spacedBy(5.dp)
+            verticalArrangement = Arrangement.spacedBy(m.s(5f))
         ) {
             Text(
                 text = label,
-                style = MaterialTheme.typography.labelLarge,
+                fontSize = m.sp(11f),
                 fontWeight = FontWeight.Black,
                 color = accent
             )
@@ -1208,7 +1241,7 @@ private fun BombActionHoldButton(
                 progress = { progress.coerceIn(0f, 1f) },
                 modifier = Modifier
                     .fillMaxWidth()
-                    .height(6.dp)
+                    .height(m.s(6f))
                     .clip(RoundedCornerShape(3.dp)),
                 color = accent,
                 trackColor = ElevatedGunmetal
@@ -1219,37 +1252,58 @@ private fun BombActionHoldButton(
 
 @Composable
 private fun TacticalRadar(hud: HudSnapshot) {
-    val radarSize = 86.dp
+    val context = LocalContext.current
+    val m = LocalUiMetrics.current
+    val radarSize = m.s(84f)
+
+    // Load real CS2 radar PNG from bundled assets
+    val radarBitmap: ImageBitmap? = remember(hud.mapId) {
+        runCatching {
+            context.assets.open(hud.mapId.radarAssetPath).use { stream ->
+                BitmapFactory.decodeStream(stream)?.asImageBitmap()
+            }
+        }.getOrNull()
+    }
+
     Box(
         modifier = Modifier
             .size(radarSize)
-            .background(Color(0xA6080E16), CircleShape)
-            .border(1.5.dp, RtxEmerald.copy(alpha = 0.55f), CircleShape)
+            .clip(CircleShape)
+            .background(Color(0xB8080E16), CircleShape)
+            .border(1.5.dp, RtxEmerald.copy(alpha = 0.62f), CircleShape)
     ) {
         Canvas(modifier = Modifier.fillMaxSize()) {
             val c = Offset(size.width * 0.5f, size.height * 0.5f)
-            val r = size.minDimension * 0.45f
+            val r = size.minDimension * 0.48f
 
-            drawCircle(Color.White.copy(alpha = 0.14f), r * 0.5f, c, style = Stroke(1f))
-            drawLine(Color.White.copy(alpha = 0.10f), Offset(c.x - r, c.y), Offset(c.x + r, c.y), 1f)
-            drawLine(Color.White.copy(alpha = 0.10f), Offset(c.x, c.y - r), Offset(c.x, c.y + r), 1f)
+            // Real CS2 radar map backdrop rotated with player heading
+            if (radarBitmap != null) {
+                rotate(degrees = hud.playerYawDeg, pivot = c) {
+                    drawImage(
+                        image = radarBitmap,
+                        dstOffset = IntOffset.Zero,
+                        dstSize = IntSize(size.width.roundToInt(), size.height.roundToInt()),
+                        alpha = 0.68f
+                    )
+                }
+            }
 
-            // FOV Cone
-            drawLine(RtxEmerald.copy(alpha = 0.35f), c, Offset(c.x - r * 0.50f, c.y - r * 0.86f), 1.5f)
-            drawLine(RtxEmerald.copy(alpha = 0.35f), c, Offset(c.x + r * 0.50f, c.y - r * 0.86f), 1.5f)
+            drawCircle(Color.White.copy(alpha = 0.16f), r * 0.52f, c, style = Stroke(1f))
+            drawLine(RtxEmerald.copy(alpha = 0.45f), c, Offset(c.x - r * 0.48f, c.y - r * 0.84f), 1.5f)
+            drawLine(RtxEmerald.copy(alpha = 0.45f), c, Offset(c.x + r * 0.48f, c.y - r * 0.84f), 1.5f)
 
-            // Player center
-            drawCircle(Color.White, 3.2f, c)
+            // Player center marker
+            drawCircle(Color.White, 3.4f, c)
 
-            // Allies, Enemies & Planted Bomb
+            // Allies, Enemies & Planted C4
             val yawRad = Math.toRadians(hud.playerYawDeg.toDouble()).toFloat()
             val cosY = cos(yawRad)
             val sinY = sin(yawRad)
             for (blip in hud.radarBlips) {
                 val localX = blip.relX * cosY - blip.relZ * sinY
                 val localZ = blip.relX * sinY + blip.relZ * cosY
-                val nx = (localX / 36f).coerceIn(-0.92f, 0.92f)
-                val nz = (localZ / 36f).coerceIn(-0.92f, 0.92f)
+                val nx = (localX / 44f).coerceIn(-0.92f, 0.92f)
+                val nz = (localZ / 44f).coerceIn(-0.92f, 0.92f)
                 val bx = c.x + nx * r
                 val by = c.y + nz * r
                 val color = when {
@@ -1257,7 +1311,7 @@ private fun TacticalRadar(hud: HudSnapshot) {
                     blip.isAlly -> RtxEmerald
                     else -> ThreatCrimson
                 }
-                drawCircle(color, if (blip.isBomb) 4.8f else 3.6f, Offset(bx, by))
+                drawCircle(color, if (blip.isBomb) 5.0f else 3.8f, Offset(bx, by))
             }
         }
     }
@@ -1508,83 +1562,95 @@ private fun PauseOverlay(
     onRestart: () -> Unit,
     onSettings: () -> Unit,
     onControls: () -> Unit,
+    onModels: () -> Unit,
     onExit: () -> Unit
 ) {
+    val m = LocalUiMetrics.current
     Box(
         modifier = Modifier
             .fillMaxSize()
             .background(Color(0xBF05070B))
             .safeDrawingPadding()
-            .padding(20.dp),
+            .padding(m.s(16f)),
         contentAlignment = Alignment.Center
     ) {
         Surface(
             color = TacticalSurface,
-            shape = CutCornerShape(topStart = 14.dp, bottomEnd = 14.dp),
+            shape = CutCornerShape(topStart = m.s(14f), bottomEnd = m.s(14f)),
             border = BorderStroke(1.dp, BorderSteel),
-            modifier = Modifier.width(340.dp)
+            modifier = Modifier.width(m.s(350f))
         ) {
             Column(
-                modifier = Modifier.padding(18.dp),
-                verticalArrangement = Arrangement.spacedBy(9.dp),
+                modifier = Modifier.padding(m.s(16f)),
+                verticalArrangement = Arrangement.spacedBy(m.s(8f)),
                 horizontalAlignment = Alignment.CenterHorizontally
             ) {
-                Text("ПАУЗА", style = MaterialTheme.typography.headlineSmall, color = TextPrimary)
+                Text("ПАУЗА", fontSize = m.sp(18f), fontWeight = FontWeight.Black, color = TextPrimary)
 
                 Button(
                     onClick = onResume,
-                    modifier = Modifier.fillMaxWidth().height(46.dp).testTag("pause_resume_button"),
-                    shape = CutCornerShape(topStart = 8.dp, bottomEnd = 8.dp),
+                    modifier = Modifier.fillMaxWidth().height(m.s(44f).coerceAtLeast(48.dp)).testTag("pause_resume_button"),
+                    shape = CutCornerShape(topStart = m.s(8f), bottomEnd = m.s(8f)),
                     colors = ButtonDefaults.buttonColors(containerColor = RtxEmerald, contentColor = ObsidianVoid)
                 ) {
                     Icon(Icons.Default.PlayArrow, contentDescription = null)
-                    Spacer(modifier = Modifier.width(6.dp))
-                    Text("ПРОДОЛЖИТЬ", style = MaterialTheme.typography.labelLarge)
+                    Spacer(modifier = Modifier.width(m.s(5f)))
+                    Text("ПРОДОЛЖИТЬ", fontSize = m.sp(12.5f), fontWeight = FontWeight.Black)
                 }
 
-                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(m.s(7f))) {
                     OutlinedButton(
                         onClick = onSettings,
-                        modifier = Modifier.weight(1f).height(44.dp).testTag("pause_settings_button"),
-                        shape = CutCornerShape(topStart = 8.dp, bottomEnd = 8.dp),
+                        modifier = Modifier.weight(1f).height(m.s(42f).coerceAtLeast(44.dp)).testTag("pause_settings_button"),
+                        shape = CutCornerShape(topStart = m.s(8f), bottomEnd = m.s(8f)),
                         border = BorderStroke(1.dp, BorderSteel)
                     ) {
-                        Icon(Icons.Default.Settings, contentDescription = null, tint = TextPrimary, modifier = Modifier.size(17.dp))
-                        Spacer(modifier = Modifier.width(4.dp))
-                        Text("НАСТР.", color = TextPrimary, style = MaterialTheme.typography.labelSmall)
+                        Icon(Icons.Default.Settings, contentDescription = null, tint = TextPrimary, modifier = Modifier.size(m.s(16f)))
+                        Spacer(modifier = Modifier.width(m.s(4f)))
+                        Text("НАСТР.", color = TextPrimary, fontSize = m.sp(10f))
                     }
                     OutlinedButton(
                         onClick = onControls,
-                        modifier = Modifier.weight(1f).height(44.dp).testTag("pause_controls_button"),
-                        shape = CutCornerShape(topStart = 8.dp, bottomEnd = 8.dp),
+                        modifier = Modifier.weight(1f).height(m.s(42f).coerceAtLeast(44.dp)).testTag("pause_controls_button"),
+                        shape = CutCornerShape(topStart = m.s(8f), bottomEnd = m.s(8f)),
                         border = BorderStroke(1.dp, TacticalAmber.copy(alpha = 0.7f))
                     ) {
-                        Icon(Icons.Default.Gamepad, contentDescription = null, tint = TacticalAmber, modifier = Modifier.size(17.dp))
-                        Spacer(modifier = Modifier.width(4.dp))
-                        Text("HUD", color = TacticalAmber, style = MaterialTheme.typography.labelSmall)
+                        Icon(Icons.Default.Gamepad, contentDescription = null, tint = TacticalAmber, modifier = Modifier.size(m.s(16f)))
+                        Spacer(modifier = Modifier.width(m.s(4f)))
+                        Text("HUD", color = TacticalAmber, fontSize = m.sp(10f))
+                    }
+                    OutlinedButton(
+                        onClick = onModels,
+                        modifier = Modifier.weight(1f).height(m.s(42f).coerceAtLeast(44.dp)).testTag("pause_models_button"),
+                        shape = CutCornerShape(topStart = m.s(8f), bottomEnd = m.s(8f)),
+                        border = BorderStroke(1.dp, IceCyan.copy(alpha = 0.7f))
+                    ) {
+                        Icon(Icons.Default.ViewInAr, contentDescription = null, tint = IceCyan, modifier = Modifier.size(m.s(16f)))
+                        Spacer(modifier = Modifier.width(m.s(4f)))
+                        Text("3D .GLB", color = IceCyan, fontSize = m.sp(10f))
                     }
                 }
 
-                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(m.s(8f))) {
                     OutlinedButton(
                         onClick = onRestart,
-                        modifier = Modifier.weight(1f).height(44.dp).testTag("pause_restart_button"),
-                        shape = CutCornerShape(topStart = 8.dp, bottomEnd = 8.dp),
+                        modifier = Modifier.weight(1f).height(m.s(42f).coerceAtLeast(44.dp)).testTag("pause_restart_button"),
+                        shape = CutCornerShape(topStart = m.s(8f), bottomEnd = m.s(8f)),
                         border = BorderStroke(1.dp, BorderSteel)
                     ) {
-                        Icon(Icons.Default.Refresh, contentDescription = null, tint = TextPrimary, modifier = Modifier.size(17.dp))
-                        Spacer(modifier = Modifier.width(4.dp))
-                        Text("ЗАНОВО", color = TextPrimary, style = MaterialTheme.typography.labelSmall)
+                        Icon(Icons.Default.Refresh, contentDescription = null, tint = TextPrimary, modifier = Modifier.size(m.s(16f)))
+                        Spacer(modifier = Modifier.width(m.s(4f)))
+                        Text("ЗАНОВО", color = TextPrimary, fontSize = m.sp(10.5f))
                     }
                     OutlinedButton(
                         onClick = onExit,
-                        modifier = Modifier.weight(1f).height(44.dp).testTag("pause_exit_button"),
-                        shape = CutCornerShape(topStart = 8.dp, bottomEnd = 8.dp),
+                        modifier = Modifier.weight(1f).height(m.s(42f).coerceAtLeast(44.dp)).testTag("pause_exit_button"),
+                        shape = CutCornerShape(topStart = m.s(8f), bottomEnd = m.s(8f)),
                         border = BorderStroke(1.dp, ThreatCrimson.copy(alpha = 0.65f))
                     ) {
-                        Icon(Icons.Default.Home, contentDescription = null, tint = ThreatCrimson, modifier = Modifier.size(17.dp))
-                        Spacer(modifier = Modifier.width(4.dp))
-                        Text("МЕНЮ", color = ThreatCrimson, style = MaterialTheme.typography.labelSmall)
+                        Icon(Icons.Default.Home, contentDescription = null, tint = ThreatCrimson, modifier = Modifier.size(m.s(16f)))
+                        Spacer(modifier = Modifier.width(m.s(4f)))
+                        Text("МЕНЮ", color = ThreatCrimson, fontSize = m.sp(10.5f))
                     }
                 }
             }
@@ -1598,34 +1664,36 @@ private fun MatchEndOverlay(
     onReplay: () -> Unit,
     onExit: () -> Unit
 ) {
+    val m = LocalUiMetrics.current
     val accent = if (hud.isPlayerTeamWinner) RtxEmerald else ThreatCrimson
     Box(
         modifier = Modifier
             .fillMaxSize()
             .background(Color(0xD405070B))
             .safeDrawingPadding()
-            .padding(20.dp),
+            .padding(m.s(18f)),
         contentAlignment = Alignment.Center
     ) {
         Surface(
             color = TacticalSurface,
-            shape = CutCornerShape(topStart = 16.dp, bottomEnd = 16.dp),
+            shape = CutCornerShape(topStart = m.s(16f), bottomEnd = m.s(16f)),
             border = BorderStroke(1.5.dp, accent),
-            modifier = Modifier.width(420.dp)
+            modifier = Modifier.width(m.s(410f))
         ) {
             Column(
-                modifier = Modifier.padding(20.dp),
+                modifier = Modifier.padding(m.s(18f)),
                 horizontalAlignment = Alignment.CenterHorizontally,
-                verticalArrangement = Arrangement.spacedBy(10.dp)
+                verticalArrangement = Arrangement.spacedBy(m.s(10f))
             ) {
                 Text(
                     text = if (hud.isPlayerTeamWinner) "ПОБЕДА КОМАНДЫ" else "ПОРАЖЕНИЕ",
-                    style = MaterialTheme.typography.headlineMedium,
+                    fontSize = m.sp(20f),
+                    fontWeight = FontWeight.Black,
                     color = accent
                 )
                 Text(
                     text = "CT ${hud.ctScore}  :  ${hud.tScore} T",
-                    style = MaterialTheme.typography.headlineSmall,
+                    fontSize = m.sp(17f),
                     fontWeight = FontWeight.Black,
                     color = TextPrimary
                 )
@@ -1642,23 +1710,23 @@ private fun MatchEndOverlay(
 
                 Row(
                     modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(10.dp)
+                    horizontalArrangement = Arrangement.spacedBy(m.s(10f))
                 ) {
                     Button(
                         onClick = onReplay,
-                        modifier = Modifier.weight(1f).height(46.dp).testTag("gameover_replay_button"),
-                        shape = CutCornerShape(topStart = 8.dp, bottomEnd = 8.dp),
+                        modifier = Modifier.weight(1f).height(m.s(44f).coerceAtLeast(48.dp)).testTag("gameover_replay_button"),
+                        shape = CutCornerShape(topStart = m.s(8f), bottomEnd = m.s(8f)),
                         colors = ButtonDefaults.buttonColors(containerColor = RtxEmerald, contentColor = ObsidianVoid)
                     ) {
-                        Text("НОВЫЙ МАТЧ", style = MaterialTheme.typography.labelLarge)
+                        Text("НОВЫЙ МАТЧ", fontSize = m.sp(12f), fontWeight = FontWeight.Black)
                     }
                     OutlinedButton(
                         onClick = onExit,
-                        modifier = Modifier.weight(1f).height(46.dp).testTag("gameover_menu_button"),
-                        shape = CutCornerShape(topStart = 8.dp, bottomEnd = 8.dp),
+                        modifier = Modifier.weight(1f).height(m.s(44f).coerceAtLeast(48.dp)).testTag("gameover_menu_button"),
+                        shape = CutCornerShape(topStart = m.s(8f), bottomEnd = m.s(8f)),
                         border = BorderStroke(1.dp, BorderSteel)
                     ) {
-                        Text("В МЕНЮ", color = TextPrimary, style = MaterialTheme.typography.labelLarge)
+                        Text("В МЕНЮ", color = TextPrimary, fontSize = m.sp(12f), fontWeight = FontWeight.Bold)
                     }
                 }
             }
@@ -1668,8 +1736,9 @@ private fun MatchEndOverlay(
 
 @Composable
 private fun EndStat(label: String, value: String, color: Color) {
+    val m = LocalUiMetrics.current
     Column(horizontalAlignment = Alignment.CenterHorizontally) {
-        Text(value, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Black, color = color)
-        Text(label, style = MaterialTheme.typography.labelSmall, color = TextSecondary)
+        Text(value, fontSize = m.sp(15f), fontWeight = FontWeight.Black, color = color)
+        Text(label, fontSize = m.sp(9.5f), color = TextSecondary)
     }
 }

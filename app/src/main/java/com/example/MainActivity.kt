@@ -15,7 +15,9 @@ import com.example.ui.ControlEditorScreen
 import com.example.ui.GameViewModel
 import com.example.ui.GameplayScreen
 import com.example.ui.MainMenuScreen
+import com.example.ui.ModelManagerScreen
 import com.example.ui.SettingsScreen
+import com.example.ui.theme.ResponsiveUiProvider
 import com.example.ui.theme.VanguardTheme
 
 class MainActivity : ComponentActivity() {
@@ -27,7 +29,9 @@ class MainActivity : ComponentActivity() {
         )
         setContent {
             VanguardTheme {
-                VanguardRtxApp()
+                ResponsiveUiProvider {
+                    VanguardRtxApp()
+                }
             }
         }
     }
@@ -46,20 +50,24 @@ fun VanguardRtxApp(vm: GameViewModel = viewModel()) {
             settings = settings,
             stats = stats,
             matchConfig = matchConfig,
+            modelRegistry = vm.modelRegistry,
             onUpdateMatchConfig = vm::updateMatchConfig,
             onPlay = vm::startGame,
             onOpenSettings = { vm.openSettings(fromGame = false) },
-            onOpenControls = { vm.openControlEditor(fromGame = false) }
+            onOpenControls = { vm.openControlEditor(fromGame = false) },
+            onOpenModelManager = { vm.openModelManager(fromGame = false) }
         )
 
         AppScreen.Playing -> GameplayScreen(
             engine = vm.engine,
+            modelRegistry = vm.modelRegistry,
             settings = settings,
             isPaused = isPaused,
             onSetPaused = vm::setPaused,
             onRestart = vm::restartMatch,
             onOpenSettings = { vm.openSettings(fromGame = true) },
             onOpenControlEditor = { vm.openControlEditor(fromGame = true) },
+            onOpenModelManager = { vm.openModelManager(fromGame = true) },
             onExitToMenu = vm::exitToMainMenu
         )
 
@@ -81,6 +89,12 @@ fun VanguardRtxApp(vm: GameViewModel = viewModel()) {
                 vm.navigateBackToOrigin(current.returnToGame)
             },
             onCancel = { vm.navigateBackToOrigin(current.returnToGame) }
+        )
+
+        is AppScreen.ModelManager -> ModelManagerScreen(
+            registry = vm.modelRegistry,
+            onImportGlb = vm::importModelGlb,
+            onBack = { vm.navigateBackToOrigin(current.returnToGame) }
         )
     }
 }

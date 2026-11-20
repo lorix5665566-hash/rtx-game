@@ -1,6 +1,6 @@
 package com.example.ui
 
-import android.opengl.GLSurfaceView
+import android.view.SurfaceView
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
@@ -11,6 +11,7 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectHorizontalDragGestures
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -40,7 +41,6 @@ import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
-import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -49,6 +49,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -59,20 +60,25 @@ import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
-import com.example.engine.LobbyGlRenderer
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.compose.LocalLifecycleOwner
+import com.example.engine.FilamentLobbyController
 import com.example.model.ArenaMapId
 import com.example.model.GameMode
 import com.example.model.GameSettings
 import com.example.model.MatchConfig
+import com.example.model.ModelAssetRegistry
 import com.example.model.PlayerStats
 import com.example.model.TeamSide
 import com.example.model.WeaponType
 import com.example.ui.theme.BorderSteel
 import com.example.ui.theme.ElevatedGunmetal
 import com.example.ui.theme.IceCyan
+import com.example.ui.theme.LocalUiMetrics
 import com.example.ui.theme.ObsidianVoid
 import com.example.ui.theme.RtxEmerald
 import com.example.ui.theme.TacticalAmber
@@ -86,37 +92,54 @@ fun MainMenuScreen(
     settings: GameSettings,
     stats: PlayerStats,
     matchConfig: MatchConfig,
+    modelRegistry: ModelAssetRegistry,
     onUpdateMatchConfig: ((MatchConfig) -> MatchConfig) -> Unit,
     onPlay: () -> Unit,
     onOpenSettings: () -> Unit,
-    onOpenControls: () -> Unit
+    onOpenControls: () -> Unit,
+    onOpenModelManager: () -> Unit
 ) {
     val context = LocalContext.current
+    val lifecycleOwner = LocalLifecycleOwner.current
+    val m = LocalUiMetrics.current
+    val latestGraphics by rememberUpdatedState(settings.graphics)
+
     var activeTab by remember { mutableStateOf(MenuTab.HOME) }
     var showcaseWeapon by remember { mutableStateOf(WeaponType.KNIFE) }
 
-    val lobbyRenderer = remember {
-        LobbyGlRenderer(getGraphics = { settings.graphics })
+    val lobbyController = remember(modelRegistry) {
+        FilamentLobbyController(
+            context = context,
+            registry = modelRegistry,
+            getGraphics = { latestGraphics }
+        )
     }
 
     LaunchedEffect(matchConfig.playerSide, showcaseWeapon) {
-        lobbyRenderer.showcaseSide = matchConfig.playerSide
-        lobbyRenderer.showcaseWeapon = showcaseWeapon
+        lobbyController.showcaseSide = matchConfig.playerSide
+        lobbyController.showcaseWeapon = showcaseWeapon
     }
 
-    val glView = remember {
-        GLSurfaceView(context).apply {
-            setEGLContextClientVersion(3)
-            setEGLConfigChooser(8, 8, 8, 8, 24, 0)
-            preserveEGLContextOnPause = true
-            setRenderer(lobbyRenderer)
-            renderMode = GLSurfaceView.RENDERMODE_CONTINUOUSLY
+    val surfaceView = remember(lobbyController) {
+        SurfaceView(context).also { sv ->
+            lobbyController.attachTo(sv)
         }
     }
 
-    DisposableEffect(glView) {
-        glView.onResume()
-        onDispose { glView.onPause() }
+    DisposableEffect(lifecycleOwner, lobbyController) {
+        val observer = LifecycleEventObserver { _, event ->
+            when (event) {
+                Lifecycle.Event.ON_RESUME -> lobbyController.start()
+                Lifecycle.Event.ON_PAUSE -> lobbyController.stop()
+                else -> Unit
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        lobbyController.start()
+        onDispose {
+            lifecycleOwner.lifecycle.removeObserver(observer)
+            lobbyController.destroy()
+        }
     }
 
     Box(
@@ -124,85 +147,89 @@ fun MainMenuScreen(
             .fillMaxSize()
             .background(ObsidianVoid)
     ) {
-        // 1. Live Full-Screen 3D CS2 Mirage Courtyard + Interactive 3D Character (T / CT)
+        // 1. Live Google Filament PBR 3D CS2 Mirage Courtyard + Rigged Interactive 3D Character (T / CT)
         AndroidView(
-            factory = { glView },
+            factory = { surfaceView },
             modifier = Modifier
                 .fillMaxSize()
                 .pointerInput(Unit) {
                     detectHorizontalDragGestures { change, dragAmount ->
                         change.consume()
-                        lobbyRenderer.characterYawDeg =
-                            (lobbyRenderer.characterYawDeg + dragAmount * 0.42f) % 360f
+                        lobbyController.characterYawDeg =
+                            (lobbyController.characterYawDeg + dragAmount * 0.42f) % 360f
                     }
                 }
         )
 
-        // Very subtle top/bottom atmospheric vignette (leaves sunlit courtyard & character crisp!)
+        // Atmospheric top & bottom vignette leaving center sunlit Mirage courtyard & operative crisp
         Box(
             modifier = Modifier
                 .fillMaxWidth()
-                .height(84.dp)
+                .height(m.s(76f))
                 .align(Alignment.TopCenter)
                 .background(
                     Brush.verticalGradient(
-                        listOf(Color(0xB8090D14), Color.Transparent)
+                        listOf(Color(0xB8080D14), Color.Transparent)
                     )
                 )
         )
         Box(
             modifier = Modifier
                 .fillMaxWidth()
-                .height(92.dp)
+                .height(m.s(86f))
                 .align(Alignment.BottomCenter)
                 .background(
                     Brush.verticalGradient(
-                        listOf(Color.Transparent, Color(0xBD090D14))
+                        listOf(Color.Transparent, Color(0xC2080D14))
                     )
                 )
         )
 
-        // 2. Minimalist CS2 Top Bar (Settings gear in top-left corner, clean center tabs, minimal right stats)
+        // 2. Crisp Adaptive CS2 Frosted Top Navigation Bar
         Row(
             modifier = Modifier
                 .fillMaxWidth()
                 .align(Alignment.TopCenter)
-                .background(Color(0x9910151F))
-                .border(0.5.dp, Color.White.copy(alpha = 0.12f))
+                .background(
+                    Brush.horizontalGradient(
+                        listOf(Color(0xB50C121C), Color(0x9E101826), Color(0xB50C121C))
+                    )
+                )
+                .border(0.6.dp, Color.White.copy(alpha = 0.14f))
                 .safeDrawingPadding()
-                .padding(horizontal = 14.dp, vertical = 4.dp),
+                .padding(horizontal = m.s(12f), vertical = m.s(4f)),
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.SpaceBetween
         ) {
-            // Top-Left Corner: Settings Gear + Quick Faction Preview Toggle (T / CT)
+            // Top-Left: Settings Gear + Faction Switcher (T / CT)
             Row(
                 verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                horizontalArrangement = Arrangement.spacedBy(m.s(7f))
             ) {
                 IconButton(
                     onClick = onOpenSettings,
                     modifier = Modifier
-                        .size(40.dp)
+                        .size(m.s(38f).coerceAtLeast(44.dp))
                         .clip(CircleShape)
-                        .background(Color.White.copy(alpha = 0.08f))
+                        .background(Color.White.copy(alpha = 0.10f))
+                        .border(0.8.dp, Color.White.copy(alpha = 0.18f), CircleShape)
                         .testTag("menu_settings_button")
                 ) {
                     Icon(
                         imageVector = Icons.Default.Settings,
                         contentDescription = "Настройки",
                         tint = TextPrimary,
-                        modifier = Modifier.size(21.dp)
+                        modifier = Modifier.size(m.s(19f))
                     )
                 }
 
-                // Compact Faction Switcher (Террорист / Спецназ)
                 Row(
                     modifier = Modifier
-                        .clip(RoundedCornerShape(6.dp))
-                        .background(Color(0x990C1119))
-                        .border(1.dp, Color.White.copy(alpha = 0.14f), RoundedCornerShape(6.dp))
-                        .padding(2.dp),
-                    horizontalArrangement = Arrangement.spacedBy(2.dp)
+                        .clip(RoundedCornerShape(m.s(6f)))
+                        .background(Color(0xA60B1018))
+                        .border(1.dp, Color.White.copy(alpha = 0.15f), RoundedCornerShape(m.s(6f)))
+                        .padding(m.s(2f)),
+                    horizontalArrangement = Arrangement.spacedBy(m.s(2f))
                 ) {
                     FactionMiniChip(
                         label = "T",
@@ -221,16 +248,27 @@ fun MainMenuScreen(
                 }
             }
 
-            // Center CS2-Style Clean Navigation Tabs
+            // Center CS2 Clean Navigation Tabs (horizontalScroll safety for ultra-narrow phones)
             Row(
+                modifier = Modifier
+                    .weight(1f, fill = false)
+                    .horizontalScroll(rememberScrollState())
+                    .padding(horizontal = m.s(6f)),
                 verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(6.dp)
+                horizontalArrangement = Arrangement.spacedBy(m.s(4f))
             ) {
                 Cs2NavTab(
                     label = "ГЛАВНАЯ",
                     selected = activeTab == MenuTab.HOME,
                     onClick = { activeTab = MenuTab.HOME },
                     tag = "nav_home"
+                )
+                Cs2NavTab(
+                    label = "3D-МОДЕЛИ",
+                    selected = false,
+                    accentOverride = IceCyan,
+                    onClick = onOpenModelManager,
+                    tag = "nav_models"
                 )
                 Cs2NavTab(
                     label = "СНАРЯЖЕНИЕ",
@@ -253,45 +291,40 @@ fun MainMenuScreen(
                 )
             }
 
-            // Top-Right Compact Stats Pill
+            // Top-Right Compact Stats & Engine Pill
             Row(
                 verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                horizontalArrangement = Arrangement.spacedBy(m.s(6f)),
                 modifier = Modifier
-                    .clip(RoundedCornerShape(6.dp))
-                    .background(Color(0x800B1018))
-                    .border(1.dp, Color.White.copy(alpha = 0.12f), RoundedCornerShape(6.dp))
-                    .padding(horizontal = 10.dp, vertical = 5.dp)
+                    .clip(RoundedCornerShape(m.s(6f)))
+                    .background(Color(0x940A1019))
+                    .border(1.dp, Color.White.copy(alpha = 0.13f), RoundedCornerShape(m.s(6f)))
+                    .padding(horizontal = m.s(9f), vertical = m.s(4f))
             ) {
                 Text(
                     text = "УБ ${stats.totalKills}",
-                    style = MaterialTheme.typography.labelSmall,
+                    fontSize = m.sp(10f),
+                    fontWeight = FontWeight.Bold,
                     color = TextPrimary
                 )
-                Text(
-                    text = "•",
-                    style = MaterialTheme.typography.labelSmall,
-                    color = TextSecondary
-                )
+                Text("•", fontSize = m.sp(10f), color = TextSecondary)
                 Text(
                     text = "ХШ ${stats.totalHeadshots}",
-                    style = MaterialTheme.typography.labelSmall,
+                    fontSize = m.sp(10f),
+                    fontWeight = FontWeight.Bold,
                     color = TacticalAmber
                 )
-                Text(
-                    text = "•",
-                    style = MaterialTheme.typography.labelSmall,
-                    color = TextSecondary
-                )
+                Text("•", fontSize = m.sp(10f), color = TextSecondary)
                 Text(
                     text = settings.graphics.preset.titleRu,
-                    style = MaterialTheme.typography.labelSmall,
+                    fontSize = m.sp(10f),
+                    fontWeight = FontWeight.Bold,
                     color = RtxEmerald
                 )
             }
         }
 
-        // 3. HOME Bottom Bar (Minimalist CS2 footer — leaves center 3D operative completely unobstructed!)
+        // 3. HOME Minimalist CS2 Footer (Center 3D operative remains completely unobstructed!)
         AnimatedVisibility(
             visible = activeTab == MenuTab.HOME,
             enter = fadeIn(),
@@ -299,50 +332,55 @@ fun MainMenuScreen(
             modifier = Modifier
                 .align(Alignment.BottomCenter)
                 .safeDrawingPadding()
-                .padding(horizontal = 20.dp, vertical = 12.dp)
+                .padding(horizontal = m.s(18f), vertical = m.s(10f))
         ) {
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                // Bottom-Left subtle operative badge
-                Column {
+                // Bottom-Left Operative Plate
+                Column(verticalArrangement = Arrangement.spacedBy(m.s(2f))) {
                     Text(
-                        text = if (matchConfig.playerSide == TeamSide.T) "ТЕРРОРИСТ • MIRAGE" else "СПЕЦНАЗ • MIRAGE",
-                        style = MaterialTheme.typography.labelLarge,
+                        text = if (matchConfig.playerSide == TeamSide.T) "ТЕРРОРИСТ • CS2 MIRAGE" else "СПЕЦНАЗ • CS2 MIRAGE",
+                        fontSize = m.sp(12.5f),
+                        fontWeight = FontWeight.Black,
                         color = if (matchConfig.playerSide == TeamSide.T) TacticalAmber else IceCyan,
-                        letterSpacing = 1.2.sp
+                        letterSpacing = m.sp(1.1f)
                     )
                     Text(
-                        text = "Потяните персонажа для обзора 360°",
-                        style = MaterialTheme.typography.labelSmall,
-                        color = Color.White.copy(alpha = 0.72f)
+                        text = "Потяните бойца для обзора 360° • PBR Filament",
+                        fontSize = m.sp(9.5f),
+                        color = Color.White.copy(alpha = 0.78f)
                     )
                 }
 
                 // Bottom-Right Quick Match Summary + Launch CTA
                 Row(
                     verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(10.dp)
+                    horizontalArrangement = Arrangement.spacedBy(m.s(10f))
                 ) {
                     Surface(
-                        color = Color(0xB30D131D),
-                        shape = CutCornerShape(topStart = 8.dp, bottomEnd = 8.dp),
-                        border = BorderStroke(1.dp, Color.White.copy(alpha = 0.18f)),
+                        color = Color(0xBA0C131E),
+                        shape = CutCornerShape(topStart = m.s(8f), bottomEnd = m.s(8f)),
+                        border = BorderStroke(1.dp, Color.White.copy(alpha = 0.20f)),
                         modifier = Modifier
                             .clickable { activeTab = MenuTab.PLAY }
                             .testTag("menu_match_summary_pill")
                     ) {
-                        Column(modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp)) {
+                        Column(
+                            modifier = Modifier.padding(horizontal = m.s(12f), vertical = m.s(6f)),
+                            verticalArrangement = Arrangement.spacedBy(m.s(1f))
+                        ) {
                             Text(
                                 text = "${matchConfig.map.titleRu}  •  ${matchConfig.mode.titleRu}",
-                                style = MaterialTheme.typography.labelMedium,
+                                fontSize = m.sp(11f),
+                                fontWeight = FontWeight.Bold,
                                 color = TextPrimary
                             )
                             Text(
-                                text = "${matchConfig.playerTeamSize} vs ${matchConfig.enemyTeamSize}  •  до ${matchConfig.roundsToWin} раундов  •  Изменить",
-                                style = MaterialTheme.typography.labelSmall,
+                                text = "${matchConfig.playerTeamSize} vs ${matchConfig.enemyTeamSize}  •  до ${matchConfig.roundsToWin} раундов  •  Настроить",
+                                fontSize = m.sp(9.5f),
                                 color = TextSecondary
                             )
                         }
@@ -350,25 +388,25 @@ fun MainMenuScreen(
 
                     Button(
                         onClick = onPlay,
-                        shape = CutCornerShape(topStart = 10.dp, bottomEnd = 10.dp),
+                        shape = CutCornerShape(topStart = m.s(10f), bottomEnd = m.s(10f)),
                         colors = ButtonDefaults.buttonColors(
                             containerColor = RtxEmerald,
                             contentColor = ObsidianVoid
                         ),
-                        contentPadding = PaddingValues(horizontal = 24.dp, vertical = 12.dp),
+                        contentPadding = PaddingValues(horizontal = m.s(22f), vertical = m.s(10f)),
                         modifier = Modifier
-                            .height(48.dp)
+                            .height(m.s(46f).coerceAtLeast(48.dp))
                             .testTag("menu_quick_play_button")
                     ) {
                         Icon(
                             imageVector = Icons.Default.PlayArrow,
                             contentDescription = null,
-                            modifier = Modifier.size(22.dp)
+                            modifier = Modifier.size(m.s(21f))
                         )
-                        Spacer(modifier = Modifier.width(6.dp))
+                        Spacer(modifier = Modifier.width(m.s(5f)))
                         Text(
                             text = "ИГРАТЬ",
-                            style = MaterialTheme.typography.titleSmall,
+                            fontSize = m.sp(13f),
                             fontWeight = FontWeight.Black
                         )
                     }
@@ -376,7 +414,7 @@ fun MainMenuScreen(
             }
         }
 
-        // 4. LOADOUT Inspection Bar (Bottom floating bar to inspect models & showcase weapons on the 3D operative)
+        // 4. LOADOUT Weapon Showcase Bar (Inspect real .GLB weapons floating beside operative)
         AnimatedVisibility(
             visible = activeTab == MenuTab.LOADOUT,
             enter = fadeIn(),
@@ -384,49 +422,55 @@ fun MainMenuScreen(
             modifier = Modifier
                 .align(Alignment.BottomCenter)
                 .safeDrawingPadding()
-                .padding(horizontal = 18.dp, vertical = 12.dp)
+                .padding(horizontal = m.s(14f), vertical = m.s(10f))
         ) {
             Surface(
-                color = Color(0xCC0D131E),
-                shape = CutCornerShape(topStart = 12.dp, bottomEnd = 12.dp),
-                border = BorderStroke(1.dp, Color.White.copy(alpha = 0.16f))
+                color = Color(0xD40D1420),
+                shape = CutCornerShape(topStart = m.s(12f), bottomEnd = m.s(12f)),
+                border = BorderStroke(1.dp, Color.White.copy(alpha = 0.18f))
             ) {
                 Row(
-                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
+                    modifier = Modifier
+                        .horizontalScroll(rememberScrollState())
+                        .padding(horizontal = m.s(12f), vertical = m.s(7f)),
                     verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    horizontalArrangement = Arrangement.spacedBy(m.s(7f))
                 ) {
                     Text(
-                        text = "ОСМОТР ОРУЖИЯ:",
-                        style = MaterialTheme.typography.labelSmall,
+                        text = "3D ОСМОТР:",
+                        fontSize = m.sp(10f),
+                        fontWeight = FontWeight.Bold,
                         color = TextSecondary
                     )
                     val showcaseList = listOf(
                         WeaponType.KNIFE,
-                        WeaponType.GLOCK_18,
                         WeaponType.DESERT_EAGLE,
                         WeaponType.AK47,
                         WeaponType.M4A1_S,
-                        WeaponType.AWP
+                        WeaponType.AWP,
+                        WeaponType.C4_BOMB
                     )
                     showcaseList.forEach { w ->
                         val active = showcaseWeapon == w
                         Box(
                             modifier = Modifier
-                                .clip(RoundedCornerShape(6.dp))
-                                .background(if (active) RtxEmerald.copy(alpha = 0.24f) else ElevatedGunmetal.copy(alpha = 0.7f))
+                                .clip(RoundedCornerShape(m.s(6f)))
+                                .background(
+                                    if (active) RtxEmerald.copy(alpha = 0.25f) else ElevatedGunmetal.copy(alpha = 0.72f)
+                                )
                                 .border(
                                     1.dp,
                                     if (active) RtxEmerald else BorderSteel,
-                                    RoundedCornerShape(6.dp)
+                                    RoundedCornerShape(m.s(6f))
                                 )
                                 .clickable { showcaseWeapon = w }
-                                .padding(horizontal = 10.dp, vertical = 7.dp)
+                                .padding(horizontal = m.s(10f), vertical = m.s(6f))
                                 .testTag("showcase_weapon_${w.name.lowercase()}")
                         ) {
                             Text(
                                 text = w.shortLabel,
-                                style = MaterialTheme.typography.labelMedium,
+                                fontSize = m.sp(10.5f),
+                                fontWeight = FontWeight.Bold,
                                 color = if (active) RtxEmerald else TextPrimary
                             )
                         }
@@ -435,7 +479,7 @@ fun MainMenuScreen(
             }
         }
 
-        // 5. PLAY Match Configuration Side Drawer (Slides neatly from the right, keeping 3D Mirage operative visible on left!)
+        // 5. PLAY Match Configuration Side Drawer (Adaptive width across all phones/tablets)
         AnimatedVisibility(
             visible = activeTab == MenuTab.PLAY,
             enter = slideInHorizontally(initialOffsetX = { it }) + fadeIn(),
@@ -443,7 +487,7 @@ fun MainMenuScreen(
             modifier = Modifier
                 .align(Alignment.CenterEnd)
                 .safeDrawingPadding()
-                .padding(top = 52.dp, bottom = 10.dp, end = 12.dp)
+                .padding(top = m.s(48f), bottom = m.s(8f), end = m.s(10f))
         ) {
             MatchSetupDrawer(
                 config = matchConfig,
@@ -462,18 +506,21 @@ private fun MatchSetupDrawer(
     onStartMatch: () -> Unit,
     onClose: () -> Unit
 ) {
+    val m = LocalUiMetrics.current
+    val drawerWidth = minOf(m.widthDp * 0.48f, m.s(395f)).coerceAtLeast(m.s(300f))
+
     Surface(
-        color = Color(0xE00C121D),
-        shape = CutCornerShape(topStart = 14.dp, bottomEnd = 14.dp),
-        border = BorderStroke(1.dp, RtxEmerald.copy(alpha = 0.45f)),
+        color = Color(0xE60C121D),
+        shape = CutCornerShape(topStart = m.s(14f), bottomEnd = m.s(14f)),
+        border = BorderStroke(1.1.dp, RtxEmerald.copy(alpha = 0.50f)),
         modifier = Modifier
-            .width(385.dp)
+            .width(drawerWidth)
             .fillMaxHeight()
     ) {
         Column(
             modifier = Modifier
                 .fillMaxSize()
-                .padding(14.dp),
+                .padding(m.s(12f)),
             verticalArrangement = Arrangement.SpaceBetween
         ) {
             // Drawer Header
@@ -482,23 +529,31 @@ private fun MatchSetupDrawer(
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                Column {
+                Column(modifier = Modifier.weight(1f)) {
                     Text(
                         text = "НАСТРОЙКА МАТЧА",
-                        style = MaterialTheme.typography.titleMedium,
+                        fontSize = m.sp(13.5f),
+                        fontWeight = FontWeight.Black,
                         color = TextPrimary
                     )
                     Text(
-                        text = "Выберите режим, карту и состав команд",
-                        style = MaterialTheme.typography.labelSmall,
-                        color = TextSecondary
+                        text = "Режим, карта CS2 и состав команд",
+                        fontSize = m.sp(9.5f),
+                        color = TextSecondary,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
                     )
                 }
                 IconButton(
                     onClick = onClose,
-                    modifier = Modifier.size(34.dp)
+                    modifier = Modifier.size(m.s(32f))
                 ) {
-                    Icon(Icons.Default.Close, contentDescription = "Закрыть", tint = TextSecondary)
+                    Icon(
+                        Icons.Default.Close,
+                        contentDescription = "Закрыть",
+                        tint = TextSecondary,
+                        modifier = Modifier.size(m.s(18f))
+                    )
                 }
             }
 
@@ -507,20 +562,18 @@ private fun MatchSetupDrawer(
                 modifier = Modifier
                     .weight(1f)
                     .verticalScroll(rememberScrollState())
-                    .padding(vertical = 8.dp),
-                verticalArrangement = Arrangement.spacedBy(10.dp)
+                    .padding(vertical = m.s(6f)),
+                verticalArrangement = Arrangement.spacedBy(m.s(8f))
             ) {
-                // Mode Selector
                 DrawerSectionLabel("РЕЖИМ ИГРЫ")
                 Row(
                     modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                    horizontalArrangement = Arrangement.spacedBy(m.s(6f))
                 ) {
                     GameMode.entries.forEach { mode ->
-                        val active = config.mode == mode
                         DrawerChip(
                             title = mode.titleRu,
-                            selected = active,
+                            selected = config.mode == mode,
                             accent = RtxEmerald,
                             onClick = { onUpdate { it.copy(mode = mode) } },
                             modifier = Modifier.weight(1f),
@@ -529,17 +582,15 @@ private fun MatchSetupDrawer(
                     }
                 }
 
-                // Map Selector
-                DrawerSectionLabel("КАРТА")
+                DrawerSectionLabel("КАРТА (CS2 .GLB)")
                 Row(
                     modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                    horizontalArrangement = Arrangement.spacedBy(m.s(6f))
                 ) {
                     ArenaMapId.entries.forEach { map ->
-                        val active = config.map == map
                         DrawerChip(
                             title = map.titleRu,
-                            selected = active,
+                            selected = config.map == map,
                             accent = TacticalAmber,
                             onClick = { onUpdate { it.copy(map = map) } },
                             modifier = Modifier.weight(1f),
@@ -548,11 +599,10 @@ private fun MatchSetupDrawer(
                     }
                 }
 
-                // Side Selector (Террористы / Спецназ)
-                DrawerSectionLabel("СТОРОНА (МОДЕЛЬ ПЕРСОНАЖА)")
+                DrawerSectionLabel("СТОРОНА (МОДЕЛЬ БОЙЦА)")
                 Row(
                     modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                    horizontalArrangement = Arrangement.spacedBy(m.s(6f))
                 ) {
                     DrawerChip(
                         title = "ТЕРРОРИСТЫ (T)",
@@ -572,11 +622,10 @@ private fun MatchSetupDrawer(
                     )
                 }
 
-                // Team Size Steppers (1..5 vs 1..5) + Quick Presets (5v5, 1v2, 3v3, 1v5)
                 DrawerSectionLabel("КОЛИЧЕСТВО ИГРОКОВ (${config.playerTeamSize} vs ${config.enemyTeamSize})")
                 Row(
                     modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    horizontalArrangement = Arrangement.spacedBy(m.s(7f))
                 ) {
                     TeamCountStepper(
                         label = "ВАША КОМАНДА",
@@ -598,7 +647,7 @@ private fun MatchSetupDrawer(
 
                 Row(
                     modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                    horizontalArrangement = Arrangement.spacedBy(m.s(5f))
                 ) {
                     val presets = listOf(5 to 5, 1 to 2, 3 to 3, 1 to 5)
                     presets.forEach { (ally, enemy) ->
@@ -614,12 +663,11 @@ private fun MatchSetupDrawer(
                     }
                 }
 
-                // Rounds to win (default 8)
                 if (config.mode == GameMode.BOMB_DEFUSAL) {
                     DrawerSectionLabel("ПОБЕДА ДО РАУНДОВ")
                     Row(
                         modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.spacedBy(6.dp)
+                        horizontalArrangement = Arrangement.spacedBy(m.s(6f))
                     ) {
                         listOf(5, 8, 13).forEach { rounds ->
                             DrawerChip(
@@ -635,24 +683,23 @@ private fun MatchSetupDrawer(
                 }
             }
 
-            // Launch Button
             Button(
                 onClick = onStartMatch,
-                shape = CutCornerShape(topStart = 10.dp, bottomEnd = 10.dp),
+                shape = CutCornerShape(topStart = m.s(10f), bottomEnd = m.s(10f)),
                 colors = ButtonDefaults.buttonColors(
                     containerColor = RtxEmerald,
                     contentColor = ObsidianVoid
                 ),
                 modifier = Modifier
                     .fillMaxWidth()
-                    .height(48.dp)
+                    .height(m.s(44f).coerceAtLeast(48.dp))
                     .testTag("drawer_start_match_button")
             ) {
-                Icon(Icons.Default.PlayArrow, contentDescription = null, modifier = Modifier.size(22.dp))
-                Spacer(modifier = Modifier.width(6.dp))
+                Icon(Icons.Default.PlayArrow, contentDescription = null, modifier = Modifier.size(m.s(20f)))
+                Spacer(modifier = Modifier.width(m.s(5f)))
                 Text(
                     text = "НАЧАТЬ МАТЧ (${config.playerTeamSize}v${config.enemyTeamSize})",
-                    style = MaterialTheme.typography.titleSmall,
+                    fontSize = m.sp(12.5f),
                     fontWeight = FontWeight.Black
                 )
             }
@@ -665,35 +712,41 @@ private fun Cs2NavTab(
     label: String,
     selected: Boolean,
     highlight: Boolean = false,
+    accentOverride: Color? = null,
     onClick: () -> Unit,
     tag: String
 ) {
+    val m = LocalUiMetrics.current
+    val baseAccent = accentOverride ?: RtxEmerald
     val textColor = when {
-        selected -> RtxEmerald
+        selected -> baseAccent
+        accentOverride != null -> accentOverride
         highlight -> Color(0xFFB5FFCC)
-        else -> Color.White.copy(alpha = 0.85f)
+        else -> Color.White.copy(alpha = 0.88f)
     }
     Box(
         modifier = Modifier
-            .clip(RoundedCornerShape(6.dp))
+            .clip(RoundedCornerShape(m.s(6f)))
             .background(
                 when {
-                    selected -> RtxEmerald.copy(alpha = 0.18f)
-                    highlight -> RtxEmerald.copy(alpha = 0.10f)
+                    selected -> baseAccent.copy(alpha = 0.20f)
+                    accentOverride != null -> accentOverride.copy(alpha = 0.12f)
+                    highlight -> RtxEmerald.copy(alpha = 0.12f)
                     else -> Color.Transparent
                 }
             )
             .clickable(onClick = onClick)
-            .padding(horizontal = 13.dp, vertical = 8.dp)
+            .padding(horizontal = m.s(10f), vertical = m.s(6f))
             .testTag(tag),
         contentAlignment = Alignment.Center
     ) {
         Text(
             text = label,
-            style = MaterialTheme.typography.labelLarge,
-            fontWeight = if (selected || highlight) FontWeight.ExtraBold else FontWeight.SemiBold,
-            letterSpacing = 1.1.sp,
-            color = textColor
+            fontSize = m.sp(11f),
+            fontWeight = if (selected || highlight || accentOverride != null) FontWeight.ExtraBold else FontWeight.SemiBold,
+            letterSpacing = m.sp(0.9f),
+            color = textColor,
+            maxLines = 1
         )
     }
 }
@@ -706,19 +759,20 @@ private fun FactionMiniChip(
     onClick: () -> Unit,
     tag: String
 ) {
+    val m = LocalUiMetrics.current
     Box(
         modifier = Modifier
-            .clip(RoundedCornerShape(4.dp))
+            .clip(RoundedCornerShape(m.s(4f)))
             .background(if (selected) accent.copy(alpha = 0.28f) else Color.Transparent)
             .clickable(onClick = onClick)
-            .padding(horizontal = 10.dp, vertical = 5.dp)
+            .padding(horizontal = m.s(9f), vertical = m.s(4f))
             .testTag(tag),
         contentAlignment = Alignment.Center
     ) {
         Text(
             text = label,
-            style = MaterialTheme.typography.labelMedium,
-            fontWeight = FontWeight.Bold,
+            fontSize = m.sp(10.5f),
+            fontWeight = FontWeight.ExtraBold,
             color = if (selected) accent else TextSecondary
         )
     }
@@ -726,11 +780,13 @@ private fun FactionMiniChip(
 
 @Composable
 private fun DrawerSectionLabel(text: String) {
+    val m = LocalUiMetrics.current
     Text(
         text = text,
-        style = MaterialTheme.typography.labelSmall,
+        fontSize = m.sp(9.5f),
+        fontWeight = FontWeight.Bold,
         color = TextSecondary,
-        letterSpacing = 0.9.sp
+        letterSpacing = m.sp(0.8f)
     )
 }
 
@@ -743,7 +799,8 @@ private fun DrawerChip(
     modifier: Modifier = Modifier,
     tag: String
 ) {
-    val shape = RoundedCornerShape(6.dp)
+    val m = LocalUiMetrics.current
+    val shape = RoundedCornerShape(m.s(6f))
     Box(
         modifier = modifier
             .clip(shape)
@@ -754,16 +811,17 @@ private fun DrawerChip(
                 shape = shape
             )
             .clickable(onClick = onClick)
-            .padding(horizontal = 6.dp, vertical = 8.dp)
+            .padding(horizontal = m.s(6f), vertical = m.s(7f))
             .testTag(tag),
         contentAlignment = Alignment.Center
     ) {
         Text(
             text = title,
-            style = MaterialTheme.typography.labelSmall,
+            fontSize = m.sp(10f),
             fontWeight = if (selected) FontWeight.Bold else FontWeight.Medium,
             color = if (selected) accent else TextPrimary,
-            maxLines = 1
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis
         )
     }
 }
@@ -777,52 +835,53 @@ private fun TeamCountStepper(
     onInc: () -> Unit,
     modifier: Modifier = Modifier
 ) {
+    val m = LocalUiMetrics.current
     Surface(
         color = ElevatedGunmetal.copy(alpha = 0.72f),
-        shape = RoundedCornerShape(8.dp),
+        shape = RoundedCornerShape(m.s(8f)),
         border = BorderStroke(1.dp, BorderSteel),
         modifier = modifier
     ) {
         Column(
-            modifier = Modifier.padding(horizontal = 8.dp, vertical = 6.dp),
+            modifier = Modifier.padding(horizontal = m.s(7f), vertical = m.s(5f)),
             horizontalAlignment = Alignment.CenterHorizontally,
-            verticalArrangement = Arrangement.spacedBy(4.dp)
+            verticalArrangement = Arrangement.spacedBy(m.s(3f))
         ) {
             Text(
                 text = label,
-                style = MaterialTheme.typography.labelSmall,
+                fontSize = m.sp(8.5f),
                 color = TextSecondary,
-                fontSize = 9.sp
+                maxLines = 1
             )
             Row(
                 verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(10.dp)
+                horizontalArrangement = Arrangement.spacedBy(m.s(9f))
             ) {
                 Box(
                     modifier = Modifier
-                        .size(30.dp)
+                        .size(m.s(28f))
                         .clip(CircleShape)
-                        .background(Color.White.copy(alpha = 0.10f))
+                        .background(Color.White.copy(alpha = 0.11f))
                         .clickable(onClick = onDec),
                     contentAlignment = Alignment.Center
                 ) {
-                    Icon(Icons.Default.Remove, contentDescription = "Меньше", tint = TextPrimary, modifier = Modifier.size(16.dp))
+                    Icon(Icons.Default.Remove, contentDescription = "Меньше", tint = TextPrimary, modifier = Modifier.size(m.s(15f)))
                 }
                 Text(
                     text = "$count",
-                    style = MaterialTheme.typography.titleMedium,
+                    fontSize = m.sp(14f),
                     fontWeight = FontWeight.Black,
                     color = accent
                 )
                 Box(
                     modifier = Modifier
-                        .size(30.dp)
+                        .size(m.s(28f))
                         .clip(CircleShape)
-                        .background(Color.White.copy(alpha = 0.10f))
+                        .background(Color.White.copy(alpha = 0.11f))
                         .clickable(onClick = onInc),
                     contentAlignment = Alignment.Center
                 ) {
-                    Icon(Icons.Default.Add, contentDescription = "Больше", tint = TextPrimary, modifier = Modifier.size(16.dp))
+                    Icon(Icons.Default.Add, contentDescription = "Больше", tint = TextPrimary, modifier = Modifier.size(m.s(15f)))
                 }
             }
         }

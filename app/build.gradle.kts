@@ -63,6 +63,9 @@ android {
     compose = true
     buildConfig = true
   }
+  androidResources {
+    noCompress += listOf("glb", "gltf", "ktx", "filamat")
+  }
   testOptions { unitTests { isIncludeAndroidResources = true } }
   dependenciesInfo {
     includeInApk = false
@@ -117,6 +120,9 @@ dependencies {
   // implementation(libs.firebase.appcheck.debug)
   implementation(libs.kotlinx.coroutines.android)
   implementation(libs.kotlinx.coroutines.core)
+  implementation(libs.filament.android)
+  implementation(libs.filament.gltfio.android)
+  implementation(libs.filament.utils.android)
   // implementation(libs.logging.interceptor)
   // implementation(libs.moshi.kotlin)
   // implementation(libs.okhttp)

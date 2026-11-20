@@ -1,5 +1,6 @@
 package com.example.engine
 
+import android.content.Context
 import com.example.audio.SoundEngine
 import com.example.model.ArenaMapId
 import com.example.model.BombState
@@ -14,25 +15,31 @@ import com.example.model.WeaponType
 import kotlin.math.abs
 import kotlin.math.atan2
 import kotlin.math.cos
+import kotlin.math.exp
 import kotlin.math.sin
 import kotlin.math.sqrt
 import kotlin.random.Random
 
-data class TracerEffect(
-    val x: Float,
-    val y: Float,
-    val z: Float,
-    val isEnemy: Boolean,
-    var life: Float
-)
+data class ExplosionState(
+    var active: Boolean = false,
+    var x: Float = 0f,
+    var y: Float = 0f,
+    var z: Float = 0f,
+    var elapsedSec: Float = 0f,
+    var durationSec: Float = 4.2f
+) {
+    val progress: Float
+        get() = if (!active || durationSec <= 0f) 0f else (elapsedSec / durationSec).coerceIn(0f, 1f)
+}
 
 class GameEngine(
+    private val appContext: Context,
     private val soundEngine: SoundEngine,
     private val onHapticPulse: (isHeavy: Boolean) -> Unit,
     private val onMatchFinished: (score: Int, kills: Int, headshots: Int) -> Unit
 ) {
     @Volatile
-    var world: ArenaWorld = ArenaWorld(ArenaMapId.MIRAGE)
+    var world: ArenaWorld = ArenaWorld(appContext, ArenaMapId.MIRAGE)
         private set
 
     private val rng = Random(System.currentTimeMillis())
@@ -51,7 +58,7 @@ class GameEngine(
     var matchConfig: MatchConfig = MatchConfig()
         private set
 
-    // Input state (UI thread -> GL thread)
+    // Input state (UI thread -> Render/Sim thread)
     @Volatile var moveInputX: Float = 0f
     @Volatile var moveInputY: Float = 0f
     @Volatile var isFiring: Boolean = false
@@ -71,12 +78,13 @@ class GameEngine(
     @Volatile private var pendingBuyArmor: Boolean = false
     @Volatile private var pendingBuyKit: Boolean = false
 
-    // Player physical state (1:1 human scale)
-    var playerX: Float = 0f
-    var playerZ: Float = 28f
-    var playerY: Float = 0f
+    // Player physical state (1:1 human scale on real 3D heightmap)
+    var playerX: Float = 39.1f
+    var playerY: Float = -0.16f
+    var playerZ: Float = -4.6f
+    var playerFloorY: Float = -0.16f
     var playerVelY: Float = 0f
-    var eyeHeight: Float = 1.65f
+    var eyeHeight: Float = 1.66f
     var playerYawRad: Float = 0f
     var playerPitchRad: Float = 0f
 
@@ -91,7 +99,7 @@ class GameEngine(
     private val reserveAmmoMap = mutableMapOf<WeaponType, Int>()
     private var lastTriggerPressed: Boolean = false
 
-    // Viewmodel animation & microsecond fire flash state
+    // Viewmodel animation, muzzle flash & C4 detonation VFX state
     var adsBlend: Float = 0f
     var walkBobPhase: Float = 0f
     var moveSpeedRatio: Float = 0f
@@ -101,7 +109,11 @@ class GameEngine(
     var boltProgress: Float = 0f
     var knifeSwingProgress: Float = 0f
     var bombPlantProgress: Float = 0f
+    var cameraShake: Float = 0f
+    var explosionFlashAlpha: Float = 0f
     var timeSec: Float = 0f
+
+    val explosion = ExplosionState()
 
     private var isReloading: Boolean = false
     private var reloadTimer: Float = 0f
@@ -119,7 +131,7 @@ class GameEngine(
     private var tScore: Int = 0
     private var roundNumber: Int = 1
     private var roundTimeSec: Float = 105f
-    private var buyTimeRemaining: Float = 20f
+    private var buyTimeRemaining: Float = 25f
     private var roundOverTimer: Float = 0f
     private var isRoundOver: Boolean = false
     private var isMatchFinished: Boolean = false
@@ -129,6 +141,8 @@ class GameEngine(
     @Volatile var bombState: BombState = BombState.CARRIED
         private set
     @Volatile var plantedBombX: Float = 0f
+        private set
+    @Volatile var plantedBombY: Float = 0f
         private set
     @Volatile var plantedBombZ: Float = 0f
         private set
@@ -154,7 +168,6 @@ class GameEngine(
     private var nextBotId: Int = 1
 
     val bots = mutableListOf<BotOperative>()
-    val impacts = mutableListOf<TracerEffect>()
 
     private var fpsFrameCount: Int = 0
     private var fpsAccumTime: Float = 0f
@@ -179,25 +192,11 @@ class GameEngine(
         pendingReset = true
     }
 
-    fun selectSlot(slot: WeaponSlot) {
-        pendingSlotSwitch = slot
-    }
-
-    fun quickSwitchWeapon() {
-        pendingQuickSwitch = true
-    }
-
-    fun buyWeapon(weapon: WeaponType) {
-        pendingBuyWeapon = weapon
-    }
-
-    fun buyArmor() {
-        pendingBuyArmor = true
-    }
-
-    fun buyDefuseKit() {
-        pendingBuyKit = true
-    }
+    fun selectSlot(slot: WeaponSlot) { pendingSlotSwitch = slot }
+    fun quickSwitchWeapon() { pendingQuickSwitch = true }
+    fun buyWeapon(weapon: WeaponType) { pendingBuyWeapon = weapon }
+    fun buyArmor() { pendingBuyArmor = true }
+    fun buyDefuseKit() { pendingBuyKit = true }
 
     fun addLookDelta(dxPixels: Float, dyPixels: Float) {
         synchronized(lookLock) {
@@ -246,303 +245,422 @@ class GameEngine(
             if (killFeedTimer <= 0f) killFeedText = ""
         }
 
+        // Update active C4 explosion animation & camera shake!
+        if (explosion.active) {
+            explosion.elapsedSec += dt
+            if (explosion.elapsedSec >= explosion.durationSec) {
+                explosion.active = false
+            }
+        }
+        cameraShake = (cameraShake - dt * 1.65f).coerceAtLeast(0f)
+        explosionFlashAlpha = (explosionFlashAlpha - dt * 1.15f).coerceAtLeast(0f)
+
         if (isMatchFinished) {
             muzzleFlashTimer = (muzzleFlashTimer - dt * 22f).coerceAtLeast(0f)
-            recoilKick = (recoilKick - dt * 6f).coerceAtLeast(0f)
-            updateDeadBodies(dt)
             publishHud()
             return
         }
 
-        // Process pending Buy Menu purchases
-        processPurchases()
-
-        // Process round transition
         if (isRoundOver) {
             roundOverTimer -= dt
+            // Keep dead bots falling smoothly during explosion / round transition!
+            for (b in bots) {
+                if (b.isDead) b.deathProgress = (b.deathProgress + dt * 2.2f).coerceAtMost(1f)
+            }
+            hitMarkerAlpha = (hitMarkerAlpha - dt * 3.5f).coerceAtLeast(0f)
+            damageFlashAlpha = (damageFlashAlpha - dt * 2.4f).coerceAtLeast(0f)
             muzzleFlashTimer = (muzzleFlashTimer - dt * 22f).coerceAtLeast(0f)
-            updateDeadBodies(dt)
             if (roundOverTimer <= 0f) {
-                val target = matchConfig.roundsToWin
-                if (ctScore >= target || tScore >= target) {
-                    isMatchFinished = true
-                    isPlayerTeamWinner = (matchConfig.playerSide == TeamSide.CT && ctScore >= target) ||
-                        (matchConfig.playerSide == TeamSide.T && tScore >= target)
-                    bannerText = if (isPlayerTeamWinner) "ПОБЕДА В МАТЧЕ!" else "ПОРАЖЕНИЕ В МАТЧЕ"
-                    recordMatchOnce()
+                if (ctScore >= matchConfig.roundsToWin || tScore >= matchConfig.roundsToWin) {
+                    finishMatch()
                 } else {
                     roundNumber++
-                    startRoundInternal(resetEconomy = false)
+                    startNewRound(keepPlayerGear = !isPlayerDead)
                 }
             }
             publishHud()
             return
         }
 
-        // Handle slot swipe switches
-        val reqSlot = pendingSlotSwitch
-        if (reqSlot != null) {
-            pendingSlotSwitch = null
-            switchToSlotInternal(reqSlot)
-        } else if (pendingQuickSwitch) {
-            pendingQuickSwitch = false
-            val candidate = if (lastWeapon != activeWeapon && ownsWeapon(lastWeapon)) {
-                lastWeapon
-            } else {
-                primaryWeapon ?: if (activeWeapon != pistolWeapon) pistolWeapon else WeaponType.KNIFE
-            }
-            switchWeaponInternal(candidate)
-        }
-
-        // Update buy time window
         if (buyTimeRemaining > 0f) {
             buyTimeRemaining = (buyTimeRemaining - dt).coerceAtLeast(0f)
         }
 
-        // Player camera look (100% raw manual skill — NO aim assist!)
-        var dx = 0f
-        var dy = 0f
-        synchronized(lookLock) {
-            dx = pendingLookDx
-            dy = pendingLookDy
-            pendingLookDx = 0f
-            pendingLookDy = 0f
-        }
-        val sens = settings.sensitivity
-        val scopeFactor = if (isAdsToggle) {
-            if (activeWeapon.hasSniperScope) sens.adsSensitivity * 0.44f else sens.adsSensitivity
-        } else 1f
-        val baseSens = sens.lookSensitivity * scopeFactor * 0.0036f
-        playerYawRad -= dx * baseSens * sens.xAxisMultiplier
-        val ySign = if (sens.invertY) 1f else -1f
-        playerPitchRad = (playerPitchRad + dy * baseSens * sens.yAxisMultiplier * ySign)
-            .coerceIn(-1.24f, 1.24f)
-
-        // Update Player Movement, Combat, Bomb Plant/Defuse
-        if (!isPlayerDead) {
-            updatePlayerMovement(dt)
-            updatePlayerCombat(dt)
-            updatePlayerBombActions(dt)
-        } else {
-            isFiring = false
-            isAdsToggle = false
-            adsBlend = 0f
-            muzzleFlashTimer = (muzzleFlashTimer - dt * 22f).coerceAtLeast(0f)
-            if (matchConfig.mode == GameMode.TEAM_DEATHMATCH) {
-                tdmRespawnTimer -= dt
-                if (tdmRespawnTimer <= 0f) {
-                    respawnPlayerTdm()
-                }
-            }
-        }
-
-        // Update Tactical Bots (CT & T teams!)
+        processShopRequests()
+        processWeaponSwitching()
+        updatePlayerLookAndMovement(dt)
+        updateWeaponsAndFiring(dt)
+        updateBombInteractions(dt)
         updateBots(dt)
 
-        // Update Planted C4 Countdown & Round Timers
         if (matchConfig.mode == GameMode.BOMB_DEFUSAL) {
             updateBombAndRoundTimers(dt)
+        } else {
+            updateTeamDeathmatchRules(dt)
         }
 
-        // Decay impact sparks
-        val iter = impacts.iterator()
-        while (iter.hasNext()) {
-            val fx = iter.next()
-            fx.life -= dt
-            if (fx.life <= 0f) iter.remove()
+        hitMarkerAlpha = (hitMarkerAlpha - dt * 3.8f).coerceAtLeast(0f)
+        damageFlashAlpha = (damageFlashAlpha - dt * 2.6f).coerceAtLeast(0f)
+        muzzleFlashTimer = (muzzleFlashTimer - dt * 22f).coerceAtLeast(0f)
+        recoilKick = (recoilKick - dt * 5.6f).coerceAtLeast(0f)
+        if (boltProgress > 0f) boltProgress = (boltProgress - dt * 1.35f).coerceAtLeast(0f)
+        if (knifeSwingProgress > 0f) {
+            knifeSwingProgress += dt * 3.8f
+            if (knifeSwingProgress >= 1f) knifeSwingProgress = 0f
         }
 
         publishHud()
     }
 
-    private fun processPurchases() {
-        val canShop = isBuyAllowed()
-        val buyW = pendingBuyWeapon
-        if (buyW != null) {
+    private fun resetMatchInternal() {
+        if (world.mapId != matchConfig.map) {
+            world = ArenaWorld(appContext, matchConfig.map)
+        }
+        ctScore = 0
+        tScore = 0
+        roundNumber = 1
+        score = 0
+        kills = 0
+        deaths = 0
+        headshots = 0
+        shotsFired = 0
+        shotsHit = 0
+        isMatchFinished = false
+        isPlayerTeamWinner = false
+        matchRecorded = false
+        money = if (matchConfig.mode == GameMode.TEAM_DEATHMATCH) 16000 else 800
+        primaryWeapon = if (matchConfig.mode == GameMode.TEAM_DEATHMATCH) WeaponType.AK47 else null
+        pistolWeapon = if (matchConfig.playerSide == TeamSide.CT) WeaponType.USP_S else WeaponType.GLOCK_18
+        armor = if (matchConfig.mode == GameMode.TEAM_DEATHMATCH) 100f else 0f
+        hasDefuseKit = false
+        startNewRound(keepPlayerGear = false)
+    }
+
+    private fun startNewRound(keepPlayerGear: Boolean) {
+        isRoundOver = false
+        roundOverTimer = 0f
+        roundTimeSec = if (matchConfig.mode == GameMode.BOMB_DEFUSAL) 105f else 300f
+        buyTimeRemaining = if (matchConfig.mode == GameMode.BOMB_DEFUSAL) 25f else 999f
+        explosion.active = false
+        explosionFlashAlpha = 0f
+        cameraShake = 0f
+
+        bombState = BombState.CARRIED
+        plantedSiteLabel = ""
+        bombCountdownSec = 35f
+        bombPlantProgress = 0f
+        isBombActionHeld = false
+
+        hp = 100f
+        isPlayerDead = false
+        tdmRespawnTimer = 0f
+        if (!keepPlayerGear && matchConfig.mode == GameMode.BOMB_DEFUSAL) {
+            primaryWeapon = null
+            pistolWeapon = if (matchConfig.playerSide == TeamSide.CT) WeaponType.USP_S else WeaponType.GLOCK_18
+            armor = 0f
+            hasDefuseKit = false
+        }
+
+        refillAmmoForOwnedWeapons()
+        playerHasBomb = (matchConfig.mode == GameMode.BOMB_DEFUSAL && matchConfig.playerSide == TeamSide.T)
+        activeWeapon = primaryWeapon ?: pistolWeapon
+        lastWeapon = WeaponType.KNIFE
+        isReloading = false
+        reloadTimer = 0f
+        isAdsToggle = false
+        adsBlend = 0f
+        isCrouching = false
+        recoilKick = 0f
+        muzzleFlashTimer = 0f
+        fireTimer = 0f
+
+        // Spawn Player on real CS2 spawn coordinates facing map center!
+        val (sx, sy, sz) = world.getSpawnPoint(matchConfig.playerSide, 0)
+        playerX = sx
+        playerY = sy
+        playerFloorY = sy
+        playerZ = sz
+        playerVelY = 0f
+        playerPitchRad = 0f
+        // Orient player toward map center (0, 0)
+        playerYawRad = atan2(sx.toDouble(), sz.toDouble()).toFloat()
+
+        // Spawn CT & T Bots (customizable 1..5 vs 1..5)
+        bots.clear()
+        val allyBotsCount = (matchConfig.playerTeamSize - 1).coerceIn(0, 4)
+        val enemyBotsCount = matchConfig.enemyTeamSize.coerceIn(1, 5)
+        val enemySide = if (matchConfig.playerSide == TeamSide.T) TeamSide.CT else TeamSide.T
+
+        for (i in 0 until allyBotsCount) {
+            bots.add(createBot(matchConfig.playerSide, i + 1, assignBomb = false))
+        }
+        for (i in 0 until enemyBotsCount) {
+            val giveBombToBot = (matchConfig.mode == GameMode.BOMB_DEFUSAL && enemySide == TeamSide.T && i == 0)
+            bots.add(createBot(enemySide, i, assignBomb = giveBombToBot))
+        }
+
+        bannerText = if (matchConfig.mode == GameMode.BOMB_DEFUSAL) {
+            "РАУНД $roundNumber • ${matchConfig.map.titleRu} • ${matchConfig.playerSide.shortRu}"
+        } else {
+            "БОЙ НАСМЕРТЬ • ${matchConfig.map.titleRu}"
+        }
+        bannerTimer = 2.8f
+        publishHud()
+    }
+
+    private fun createBot(side: TeamSide, spawnIdx: Int, assignBomb: Boolean): BotOperative {
+        val (sx, sy, sz) = world.getSpawnPoint(side, spawnIdx)
+        val botWeapon = if (roundNumber == 1 && matchConfig.mode == GameMode.BOMB_DEFUSAL) {
+            if (side == TeamSide.CT) WeaponType.USP_S else WeaponType.GLOCK_18
+        } else {
+            when (rng.nextInt(4)) {
+                0 -> if (side == TeamSide.CT) WeaponType.M4A1_S else WeaponType.AK47
+                1 -> WeaponType.P90
+                2 -> if (side == TeamSide.CT) WeaponType.M4A1_S else WeaponType.AK47
+                else -> WeaponType.MP9
+            }
+        }
+        val routes = if (side == TeamSide.T) world.tAttackRoutes else world.ctDefenseRoutes
+        val yaw = Math.toDegrees(atan2(-sx.toDouble(), -sz.toDouble())).toFloat()
+        return BotOperative(
+            id = nextBotId++,
+            team = side,
+            weapon = botWeapon,
+            x = sx,
+            y = sy,
+            z = sz,
+            yawDeg = yaw,
+            hp = 100f,
+            maxHp = 100f,
+            hasBomb = assignBomb,
+            targetSiteIndex = rng.nextInt(routes.size),
+            waypointIndex = 0,
+            fireCooldown = 0.8f + rng.nextFloat() * 0.7f
+        )
+    }
+
+    private fun refillAmmoForOwnedWeapons() {
+        for (w in WeaponType.entries) {
+            if (w.magSize > 0) {
+                magAmmoMap[w] = w.magSize
+                reserveAmmoMap[w] = w.initialReserve
+            }
+        }
+    }
+
+    private fun canPlayerBuyNow(): Boolean {
+        if (isPlayerDead || isRoundOver) return false
+        if (matchConfig.mode == GameMode.TEAM_DEATHMATCH) return true
+        return buyTimeRemaining > 0f
+    }
+
+    private fun processShopRequests() {
+        val wantWeapon = pendingBuyWeapon
+        if (wantWeapon != null) {
             pendingBuyWeapon = null
-            val cost = if (matchConfig.mode == GameMode.TEAM_DEATHMATCH) 0 else buyW.price
-            if (canShop && money >= cost) {
-                money -= cost
-                when (buyW.slot) {
-                    WeaponSlot.PRIMARY -> primaryWeapon = buyW
-                    WeaponSlot.PISTOL -> pistolWeapon = buyW
-                    else -> Unit
+            if (canPlayerBuyNow() && wantWeapon.category != null) {
+                val cost = if (matchConfig.mode == GameMode.TEAM_DEATHMATCH) 0 else wantWeapon.price
+                if (money >= cost) {
+                    money -= cost
+                    when (wantWeapon.slot) {
+                        WeaponSlot.PRIMARY -> primaryWeapon = wantWeapon
+                        WeaponSlot.PISTOL -> pistolWeapon = wantWeapon
+                        else -> Unit
+                    }
+                    magAmmoMap[wantWeapon] = wantWeapon.magSize
+                    reserveAmmoMap[wantWeapon] = wantWeapon.initialReserve
+                    switchWeaponInternal(wantWeapon)
+                    soundEngine.playReload()
                 }
-                magAmmoMap[buyW] = buyW.magSize
-                reserveAmmoMap[buyW] = buyW.initialReserve
-                switchWeaponInternal(buyW)
-                soundEngine.playWeaponSwitch()
             }
         }
         if (pendingBuyArmor) {
             pendingBuyArmor = false
             val cost = if (matchConfig.mode == GameMode.TEAM_DEATHMATCH) 0 else 1000
-            if (canShop && money >= cost && armor < 100f) {
+            if (canPlayerBuyNow() && armor < 100f && money >= cost) {
                 money -= cost
                 armor = 100f
-                soundEngine.playWeaponSwitch()
+                soundEngine.playReload()
             }
         }
         if (pendingBuyKit) {
             pendingBuyKit = false
             val cost = 400
-            if (canShop && matchConfig.playerSide == TeamSide.CT && !hasDefuseKit && money >= cost) {
+            if (canPlayerBuyNow() && matchConfig.playerSide == TeamSide.CT && !hasDefuseKit && money >= cost) {
                 money -= cost
                 hasDefuseKit = true
-                soundEngine.playWeaponSwitch()
+                soundEngine.playReload()
             }
         }
     }
 
-    private fun isBuyAllowed(): Boolean {
-        if (isPlayerDead || isRoundOver || isMatchFinished) return false
-        if (matchConfig.mode == GameMode.TEAM_DEATHMATCH) return true
-        return buyTimeRemaining > 0f
+    private fun processWeaponSwitching() {
+        val reqSlot = pendingSlotSwitch
+        if (reqSlot != null) {
+            pendingSlotSwitch = null
+            val target = when (reqSlot) {
+                WeaponSlot.KNIFE -> WeaponType.KNIFE
+                WeaponSlot.PISTOL -> pistolWeapon
+                WeaponSlot.PRIMARY -> primaryWeapon
+                WeaponSlot.BOMB -> if (matchConfig.mode == GameMode.BOMB_DEFUSAL && playerHasBomb) WeaponType.C4_BOMB else null
+            }
+            if (target != null && target != activeWeapon) {
+                switchWeaponInternal(target)
+            }
+        }
+        if (pendingQuickSwitch) {
+            pendingQuickSwitch = false
+            val candidate = when {
+                lastWeapon != activeWeapon && isWeaponAvailable(lastWeapon) -> lastWeapon
+                activeWeapon != WeaponType.KNIFE -> WeaponType.KNIFE
+                primaryWeapon != null -> primaryWeapon!!
+                else -> pistolWeapon
+            }
+            if (candidate != activeWeapon) switchWeaponInternal(candidate)
+        }
     }
 
-    private fun ownsWeapon(w: WeaponType): Boolean = when (w.slot) {
+    private fun isWeaponAvailable(w: WeaponType): Boolean = when (w.slot) {
         WeaponSlot.KNIFE -> true
-        WeaponSlot.BOMB -> playerHasBomb && matchConfig.mode == GameMode.BOMB_DEFUSAL
         WeaponSlot.PISTOL -> w == pistolWeapon
         WeaponSlot.PRIMARY -> w == primaryWeapon
+        WeaponSlot.BOMB -> matchConfig.mode == GameMode.BOMB_DEFUSAL && playerHasBomb
     }
 
-    private fun switchToSlotInternal(slot: WeaponSlot) {
-        val target = when (slot) {
-            WeaponSlot.KNIFE -> WeaponType.KNIFE
-            WeaponSlot.PISTOL -> pistolWeapon
-            WeaponSlot.PRIMARY -> primaryWeapon ?: return
-            WeaponSlot.BOMB -> if (playerHasBomb && matchConfig.mode == GameMode.BOMB_DEFUSAL) WeaponType.C4_BOMB else return
-        }
-        switchWeaponInternal(target)
-    }
-
-    private fun switchWeaponInternal(target: WeaponType) {
-        if (target == activeWeapon) return
+    private fun switchWeaponInternal(next: WeaponType) {
         lastWeapon = activeWeapon
-        activeWeapon = target
+        activeWeapon = next
         isReloading = false
         reloadTimer = 0f
         isAdsToggle = false
-        adsBlend = 0f
-        bombPlantProgress = 0f
-        fireTimer = 0.20f
-        recoilKick = 0.20f
-        soundEngine.playWeaponSwitch()
+        boltProgress = 0f
+        knifeSwingProgress = 0f
     }
 
-    private fun updatePlayerMovement(dt: Float) {
-        val forwardX = -sin(playerYawRad)
-        val forwardZ = -cos(playerYawRad)
+    private fun updatePlayerLookAndMovement(dt: Float) {
+        if (isPlayerDead) return
+
+        var dx: Float
+        var dy: Float
+        synchronized(lookLock) {
+            dx = pendingLookDx; dy = pendingLookDy
+            pendingLookDx = 0f; pendingLookDy = 0f
+        }
+
+        // Pure raw skill aiming — zero aim assist!
+        val sens = settings.sensitivity
+        val adsMult = if (isAdsToggle) sens.adsSensitivity else 1.0f
+        val sniperExtra = if (activeWeapon.hasSniperScope && isAdsToggle) 0.42f else 1.0f
+        val baseRadPerPx = 0.0031f * sens.lookSensitivity * adsMult * sniperExtra
+        playerYawRad -= dx * baseRadPerPx * sens.xAxisMultiplier
+        val pitchSign = if (sens.invertY) 1f else -1f
+        playerPitchRad = (playerPitchRad + pitchSign * dy * baseRadPerPx * sens.yAxisMultiplier)
+            .coerceIn(-1.28f, 1.28f)
+
+        val fwdX = -sin(playerYawRad)
+        val fwdZ = -cos(playerYawRad)
         val rightX = cos(playerYawRad)
         val rightZ = -sin(playerYawRad)
 
-        val moveMag = sqrt(moveInputX * moveInputX + moveInputY * moveInputY).coerceAtMost(1f)
-        val maxSpeed = when {
-            bombPlantProgress > 0.02f -> 0.6f
+        val baseSpeed = when {
             isCrouching -> 2.8f
-            isAdsToggle -> 3.0f
-            else -> 5.7f * activeWeapon.moveSpeedMult
-        }
-        val wishX = (rightX * moveInputX + forwardX * moveInputY) * maxSpeed
-        val wishZ = (rightZ * moveInputX + forwardZ * moveInputY) * maxSpeed
+            isAdsToggle -> 3.4f
+            else -> 5.7f
+        } * activeWeapon.moveSpeedMult
 
-        val (nx, nz) = world.resolveHorizontalCollision(playerX + wishX * dt, playerZ + wishZ * dt, 0.46f)
-        playerX = nx
-        playerZ = nz
+        val mx = moveInputX.coerceIn(-1f, 1f)
+        val my = moveInputY.coerceIn(-1f, 1f)
+        val mag = sqrt(mx * mx + my * my)
+        val nx = if (mag > 1f) mx / mag else mx
+        val ny = if (mag > 1f) my / mag else my
+
+        val targetX = playerX + (fwdX * ny + rightX * nx) * baseSpeed * dt
+        val targetZ = playerZ + (fwdZ * ny + rightZ * nx) * baseSpeed * dt
+        val (resolvedX, floorY, resolvedZ) = world.resolveMovement(playerX, playerFloorY, playerZ, targetX, targetZ, 0.44f)
+        playerX = resolvedX
+        playerZ = resolvedZ
+        playerFloorY = floorY
 
         if (pendingJump) {
             pendingJump = false
-            if (playerY <= 0.01f) {
+            if (playerY <= playerFloorY + 0.08f) {
+                playerVelY = 4.9f
                 isCrouching = false
-                playerVelY = 5.3f
             }
         }
         playerVelY -= 14.5f * dt
         playerY += playerVelY * dt
-        if (playerY < 0f) {
-            playerY = 0f
+        if (playerY <= playerFloorY) {
+            playerY = playerFloorY
             playerVelY = 0f
         }
 
-        val targetEye = if (isCrouching) 1.12f else 1.65f
+        val targetEye = if (isCrouching) 1.15f else 1.66f
         eyeHeight += (targetEye - eyeHeight) * (dt * 11f).coerceAtMost(1f)
 
-        moveSpeedRatio += (moveMag - moveSpeedRatio) * (dt * 9f).coerceAtMost(1f)
-        if (moveMag > 0.08f && playerY <= 0.02f) {
-            walkBobPhase += dt * (if (isCrouching) 6.5f else 10.4f) * moveMag
+        moveSpeedRatio = mag.coerceIn(0f, 1f)
+        if (moveSpeedRatio > 0.08f && playerY <= playerFloorY + 0.08f) {
+            walkBobPhase += dt * (4.4f + moveSpeedRatio * 5.2f)
         }
+
+        val targetAds = if (isAdsToggle && !isReloading && activeWeapon != WeaponType.KNIFE && activeWeapon != WeaponType.C4_BOMB) 1f else 0f
+        adsBlend += (targetAds - adsBlend) * (dt * 13f).coerceAtMost(1f)
     }
 
-    private fun updatePlayerCombat(dt: Float) {
-        val adsTarget = if (isAdsToggle && !isReloading && activeWeapon != WeaponType.KNIFE && activeWeapon != WeaponType.C4_BOMB) 1f else 0f
-        adsBlend += (adsTarget - adsBlend) * (dt * 14f).coerceAtMost(1f)
-        recoilKick = (recoilKick - dt * 8.2f).coerceAtLeast(0f)
-        // Ultra-crisp ~45ms realistic fire muzzle flash decay!
-        muzzleFlashTimer = (muzzleFlashTimer - dt * 22f).coerceAtLeast(0f)
-        hitMarkerAlpha = (hitMarkerAlpha - dt * 4.2f).coerceAtLeast(0f)
-        damageFlashAlpha = (damageFlashAlpha - dt * 2.6f).coerceAtLeast(0f)
-
-        if (knifeSwingProgress > 0f) {
-            knifeSwingProgress = (knifeSwingProgress + dt * 4.5f)
-            if (knifeSwingProgress >= 1f) knifeSwingProgress = 0f
+    private fun updateWeaponsAndFiring(dt: Float) {
+        if (isPlayerDead) {
+            lastTriggerPressed = isFiring
+            return
         }
 
+        val w = activeWeapon
         if (pendingReload) {
             pendingReload = false
             beginReload()
         }
 
-        val curWeapon = activeWeapon
         if (isReloading) {
             reloadTimer += dt
-            if (reloadTimer >= curWeapon.reloadSec) {
-                val curMag = magAmmoMap[curWeapon] ?: 0
-                val curRes = reserveAmmoMap[curWeapon] ?: 0
-                val needed = curWeapon.magSize - curMag
-                val taken = minOf(needed, curRes)
-                magAmmoMap[curWeapon] = curMag + taken
-                reserveAmmoMap[curWeapon] = curRes - taken
+            if (reloadTimer >= w.reloadSec) {
+                val curMag = magAmmoMap[w] ?: 0
+                val curRes = reserveAmmoMap[w] ?: 0
+                val need = (w.magSize - curMag).coerceAtLeast(0)
+                val take = minOf(need, curRes)
+                magAmmoMap[w] = curMag + take
+                reserveAmmoMap[w] = curRes - take
                 isReloading = false
                 reloadTimer = 0f
             }
         }
 
-        fireTimer = (fireTimer - dt).coerceAtLeast(0f)
-        boltProgress = if (curWeapon == WeaponType.AWP && fireTimer > 0f) {
-            (1f - fireTimer / curWeapon.fireIntervalSec).coerceIn(0f, 1f)
-        } else 0f
+        if (fireTimer > 0f) fireTimer -= dt
 
-        val shouldFire = if (curWeapon.isAutomatic) {
-            isFiring
-        } else {
-            isFiring && !lastTriggerPressed
-        }
-        lastTriggerPressed = isFiring
+        val triggerJustPressed = isFiring && !lastTriggerPressed
+        val wantsFire = if (w.isAutomatic) isFiring else triggerJustPressed
 
-        if (curWeapon == WeaponType.C4_BOMB) return
-
-        if (shouldFire && !isReloading && fireTimer <= 0f) {
-            if (curWeapon == WeaponType.KNIFE) {
-                performKnifeSlash()
-            } else {
-                val curMag = magAmmoMap[curWeapon] ?: 0
-                if (curMag > 0) {
-                    firePlayerWeapon()
-                } else {
-                    beginReload()
+        if (wantsFire && fireTimer <= 0f && !isReloading) {
+            when (w) {
+                WeaponType.KNIFE -> performKnifeSlash()
+                WeaponType.C4_BOMB -> Unit
+                else -> {
+                    val curMag = magAmmoMap[w] ?: 0
+                    if (curMag > 0) {
+                        firePlayerWeapon()
+                    } else if ((reserveAmmoMap[w] ?: 0) > 0) {
+                        beginReload()
+                    }
                 }
             }
         }
+        lastTriggerPressed = isFiring
     }
 
-    private fun updatePlayerBombActions(dt: Float) {
-        if (matchConfig.mode != GameMode.BOMB_DEFUSAL) {
+    private fun updateBombInteractions(dt: Float) {
+        if (matchConfig.mode != GameMode.BOMB_DEFUSAL || isPlayerDead) {
             bombPlantProgress = 0f
             return
         }
 
-        // Terrorist planting C4 inside Site A or B (hold USE button OR hold Fire while holding C4)
         val site = world.bombsites.firstOrNull { it.contains(playerX, playerZ) }
         val wantsPlant = matchConfig.playerSide == TeamSide.T &&
             playerHasBomb &&
@@ -551,9 +669,7 @@ class GameEngine(
             (isBombActionHeld || (activeWeapon == WeaponType.C4_BOMB && isFiring))
 
         if (wantsPlant && site != null) {
-            if (activeWeapon != WeaponType.C4_BOMB) {
-                switchWeaponInternal(WeaponType.C4_BOMB)
-            }
+            if (activeWeapon != WeaponType.C4_BOMB) switchWeaponInternal(WeaponType.C4_BOMB)
             bombPlantProgress = (bombPlantProgress + dt / 3.0f).coerceAtMost(1f)
             plantBeepTimer -= dt
             if (plantBeepTimer <= 0f) {
@@ -561,16 +677,15 @@ class GameEngine(
                 plantBeepTimer = 0.55f
             }
             if (bombPlantProgress >= 1f) {
-                plantBombAt(playerX, playerZ, site.label, plantedByPlayer = true)
+                plantBombAt(playerX, playerFloorY, playerZ, site.label, plantedByPlayer = true)
             }
             return
         }
 
-        // CT defusing planted C4
-        val distToBomb = sqrt((playerX - plantedBombX) * (playerX - plantedBombX) + (playerZ - plantedBombZ) * (playerZ - plantedBombZ))
+        val distToBomb = world.distance2D(playerX, playerZ, plantedBombX, plantedBombZ)
         val wantsDefuse = matchConfig.playerSide == TeamSide.CT &&
             bombState == BombState.PLANTED &&
-            distToBomb <= 2.8f &&
+            distToBomb <= 3.0f &&
             isBombActionHeld
 
         if (wantsDefuse) {
@@ -587,7 +702,7 @@ class GameEngine(
                 money = (money + 300).coerceAtMost(16000)
                 score += 400
                 soundEngine.playBombPlanted()
-                endRound(TeamSide.CT, "БОМБА РАЗМИНИРОВАНА • ПОБЕДА СПЕЦНАЗА")
+                endRound(TeamSide.CT, "БОМБА РАЗМИНИРОВАНА • ПОБЕДА СПЕЦНАЗА", delaySec = 3.6f)
             }
             return
         }
@@ -595,9 +710,10 @@ class GameEngine(
         bombPlantProgress = (bombPlantProgress - dt * 3f).coerceAtLeast(0f)
     }
 
-    private fun plantBombAt(x: Float, z: Float, siteLabel: String, plantedByPlayer: Boolean) {
+    private fun plantBombAt(x: Float, y: Float, z: Float, siteLabel: String, plantedByPlayer: Boolean) {
         bombState = BombState.PLANTED
         plantedBombX = x
+        plantedBombY = y
         plantedBombZ = z
         plantedSiteLabel = siteLabel
         bombCountdownSec = 35f
@@ -615,6 +731,84 @@ class GameEngine(
         bannerTimer = 3.0f
     }
 
+    /**
+     * FULL CS2 C4 DETONATION:
+     * Triggers massive 3D fireball + shockwave + smoke + camera shake + blinding flash + LETHAL 26m blast radius!
+     */
+    private fun detonatePlantedBomb() {
+        bombState = BombState.EXPLODED
+        explosion.active = true
+        explosion.x = plantedBombX
+        explosion.y = plantedBombY
+        explosion.z = plantedBombZ
+        explosion.elapsedSec = 0f
+        explosion.durationSec = 4.4f
+
+        soundEngine.playBombExplode()
+        if (settings.audio.hapticsEnabled) onHapticPulse(true)
+
+        val blastRadius = 26.0f
+        var blastKills = 0
+
+        // 1. Blast damage / kills against ALL alive bots (both CT & T!)
+        for (b in bots) {
+            if (b.isDead) continue
+            val dx = b.x - plantedBombX
+            val dy = (b.y + 1.0f) - (plantedBombY + 0.4f)
+            val dz = b.z - plantedBombZ
+            val dist = sqrt(dx * dx + dy * dy + dz * dz).coerceAtLeast(0.1f)
+            if (dist <= blastRadius) {
+                val wallDist = world.raycastWalls(
+                    plantedBombX, plantedBombY + 0.5f, plantedBombZ,
+                    dx / dist, dy / dist, dz / dist, dist
+                )
+                val coverMult = if (wallDist < dist - 0.8f) 0.58f else 1.0f
+                val dmg = (540f * exp(-((dist / 11.5f) * (dist / 11.5f))) * coverMult)
+                if (dmg >= 4f) {
+                    b.hp -= dmg
+                    b.hitFlinch = 1.0f
+                    if (b.hp <= 0f) {
+                        b.hp = 0f
+                        b.isDead = true
+                        b.deathProgress = 0.05f
+                        blastKills++
+                    }
+                }
+            }
+        }
+
+        // 2. Blast damage / kill + camera shake + blinding flash for the Player!
+        val pdx = playerX - plantedBombX
+        val pdy = (playerY + 1.0f) - (plantedBombY + 0.4f)
+        val pdz = playerZ - plantedBombZ
+        val pDist = sqrt(pdx * pdx + pdy * pdy + pdz * pdz).coerceAtLeast(0.1f)
+
+        val shakeFactor = (1f - (pDist / 48f)).coerceIn(0.28f, 1.0f)
+        cameraShake = 1.0f * shakeFactor
+        explosionFlashAlpha = (1.0f - (pDist / 38f)).coerceIn(0.25f, 1.0f)
+
+        if (!isPlayerDead && pDist <= blastRadius) {
+            val wallDist = world.raycastWalls(
+                plantedBombX, plantedBombY + 0.5f, plantedBombZ,
+                pdx / pDist, pdy / pDist, pdz / pDist, pDist
+            )
+            val coverMult = if (wallDist < pDist - 0.8f) 0.58f else 1.0f
+            val pDmg = (540f * exp(-((pDist / 11.5f) * (pDist / 11.5f))) * coverMult)
+            if (pDmg >= 4f) {
+                applyPlayerDamage(pDmg, TeamSide.T, killedByBomb = true)
+                if (isPlayerDead) blastKills++
+            }
+        }
+
+        if (blastKills > 0) {
+            killFeedText = "ВЗРЫВ C4 • ПОГИБЛО В ЗОНЕ ПОРАЖЕНИЯ: $blastKills"
+            killFeedTimer = 4.4f
+        }
+
+        // Give 4.6s so player sees the full 3D fireball, rising smoke, shockwave & fallen bodies!
+        endRound(TeamSide.T, "ВЗРЫВ C4 • ПОБЕДА ТЕРРОРИСТОВ", delaySec = 4.6f)
+    }
+
     private fun updateBombAndRoundTimers(dt: Float) {
         if (bombState == BombState.PLANTED) {
             bombCountdownSec -= dt
@@ -625,40 +819,35 @@ class GameEngine(
                 bombBeepTimer = beepInterval
             }
             if (bombCountdownSec <= 0f) {
-                bombState = BombState.EXPLODED
-                soundEngine.playBombExplode()
-                if (settings.audio.hapticsEnabled) onHapticPulse(true)
-                endRound(TeamSide.T, "ВЗРЫВ C4 • ПОБЕДА ТЕРРОРИСТОВ")
+                detonatePlantedBomb()
                 return
             }
         } else if (bombState == BombState.CARRIED) {
             roundTimeSec -= dt
             if (roundTimeSec <= 0f) {
-                endRound(TeamSide.CT, "ВРЕМЯ ВЫШЛО • ПОБЕДА СПЕЦНАЗА")
+                endRound(TeamSide.CT, "ВРЕМЯ ВЫШЛО • ПОБЕДА СПЕЦНАЗА", delaySec = 3.6f)
                 return
             }
         }
 
-        // Check team elimination
         val ctAlive = countAlive(TeamSide.CT)
         val tAlive = countAlive(TeamSide.T)
-
         if (ctAlive == 0 && bombState != BombState.DEFUSED) {
-            endRound(TeamSide.T, "СПЕЦНАЗ УНИЧТОЖЕН • ПОБЕДА ТЕРРОРИСТОВ")
+            endRound(TeamSide.T, "СПЕЦНАЗ УНИЧТОЖЕН • ПОБЕДА ТЕРРОРИСТОВ", delaySec = 3.6f)
         } else if (tAlive == 0 && bombState == BombState.CARRIED) {
-            endRound(TeamSide.CT, "ТЕРРОРИСТЫ УНИЧТОЖЕНЫ • ПОБЕДА СПЕЦНАЗА")
+            endRound(TeamSide.CT, "ТЕРРОРИСТЫ УНИЧТОЖЕНЫ • ПОБЕДА СПЕЦНАЗА", delaySec = 3.6f)
         }
     }
 
-    private fun endRound(winner: TeamSide, reason: String) {
+    private fun endRound(winner: TeamSide, reason: String, delaySec: Float) {
         if (isRoundOver) return
         isRoundOver = true
-        roundOverTimer = 3.6f
+        roundOverTimer = delaySec
         if (winner == TeamSide.CT) ctScore++ else tScore++
         val playerWon = winner == matchConfig.playerSide
         money = (money + if (playerWon) 3250 else 2150).coerceAtMost(16000)
         bannerText = "$reason (CT $ctScore : $tScore T)"
-        bannerTimer = 3.6f
+        bannerTimer = delaySec
     }
 
     private fun beginReload() {
@@ -685,10 +874,10 @@ class GameEngine(
         val dirZ = -cos(playerYawRad) * cosP
 
         var bestBot: BotOperative? = null
-        var bestDist = 2.4f
+        var bestDist = 2.6f
         for (b in bots) {
             if (b.isDead || b.team == matchConfig.playerSide) continue
-            val t = intersectRaySphere(playerX, camY, playerZ, dirX, dirY, dirZ, b.x, 1.25f, b.z, 0.55f)
+            val t = intersectRaySphere(playerX, camY, playerZ, dirX, dirY, dirZ, b.x, b.y + 1.25f, b.z, 0.58f)
             if (t < bestDist) {
                 bestDist = t; bestBot = b
             }
@@ -708,94 +897,76 @@ class GameEngine(
         muzzleFlashTimer = 1.0f
         muzzleFlashRoll = rng.nextFloat() * 360f
         playerPitchRad = (playerPitchRad + (if (isAdsToggle) w.recoilPitch * 0.68f else w.recoilPitch))
-            .coerceIn(-1.24f, 1.24f)
+            .coerceIn(-1.28f, 1.28f)
+        if (w.hasSniperScope) boltProgress = 1.0f
 
         soundEngine.playWeaponShot(w)
-        if (settings.audio.hapticsEnabled) onHapticPulse(w == WeaponType.AWP || w == WeaponType.AK47 || w == WeaponType.DESERT_EAGLE)
+        if (settings.audio.hapticsEnabled) onHapticPulse(w == WeaponType.AWP || w == WeaponType.DESERT_EAGLE)
 
+        val camX = playerX
         val camY = playerY + eyeHeight
-        val spread = if (isAdsToggle) w.adsSpread else (w.hipSpread + moveSpeedRatio * 0.016f)
-        val yaw = playerYawRad + (rng.nextFloat() - 0.5f) * spread
-        val pitch = playerPitchRad + (rng.nextFloat() - 0.5f) * spread
-        val cosP = cos(pitch)
-        val dirX = -sin(yaw) * cosP
-        val dirY = sin(pitch)
-        val dirZ = -cos(yaw) * cosP
+        val camZ = playerZ
+        val cosP = cos(playerPitchRad)
+        var dirX = -sin(playerYawRad) * cosP
+        var dirY = sin(playerPitchRad)
+        var dirZ = -cos(playerYawRad) * cosP
 
-        val wallDist = world.raycastWalls(playerX, camY, playerZ, dirX, dirY, dirZ, 110f)
+        val spread = (if (isAdsToggle) w.adsSpread else w.hipSpread) + moveSpeedRatio * 0.010f
+        dirX += (rng.nextFloat() * 2f - 1f) * spread
+        dirY += (rng.nextFloat() * 2f - 1f) * spread
+        dirZ += (rng.nextFloat() * 2f - 1f) * spread
+        val inv = 1f / sqrt(dirX * dirX + dirY * dirY + dirZ * dirZ).coerceAtLeast(0.0001f)
+        dirX *= inv; dirY *= inv; dirZ *= inv
 
-        var bestBot: BotOperative? = null
-        var bestDist = wallDist
-        var bestHeadshot = false
+        val wallDist = world.raycastWalls(camX, camY, camZ, dirX, dirY, dirZ, 110f)
+
+        var hitBot: BotOperative? = null
+        var hitDist = wallDist
+        var headshot = false
 
         for (b in bots) {
             if (b.isDead || b.team == matchConfig.playerSide) continue
-            val headT = intersectRaySphere(playerX, camY, playerZ, dirX, dirY, dirZ, b.x, 1.67f, b.z, 0.21f)
-            if (headT < bestDist) {
-                bestDist = headT; bestBot = b; bestHeadshot = true
+            val tHead = intersectRaySphere(camX, camY, camZ, dirX, dirY, dirZ, b.x, b.y + 1.66f, b.z, 0.24f)
+            if (tHead < hitDist) {
+                hitDist = tHead; hitBot = b; headshot = true
             }
-            val chestT = intersectRaySphere(playerX, camY, playerZ, dirX, dirY, dirZ, b.x, 1.20f, b.z, 0.34f)
-            if (chestT < bestDist) {
-                bestDist = chestT; bestBot = b; bestHeadshot = false
+            val tChest = intersectRaySphere(camX, camY, camZ, dirX, dirY, dirZ, b.x, b.y + 1.18f, b.z, 0.40f)
+            if (tChest < hitDist) {
+                hitDist = tChest; hitBot = b; headshot = false
             }
-            val lowerT = intersectRaySphere(playerX, camY, playerZ, dirX, dirY, dirZ, b.x, 0.60f, b.z, 0.30f)
-            if (lowerT < bestDist) {
-                bestDist = lowerT; bestBot = b; bestHeadshot = false
+            val tLegs = intersectRaySphere(camX, camY, camZ, dirX, dirY, dirZ, b.x, b.y + 0.56f, b.z, 0.36f)
+            if (tLegs < hitDist) {
+                hitDist = tLegs; hitBot = b; headshot = false
             }
         }
 
-        if (bestBot != null) {
+        if (hitBot != null) {
             shotsHit++
-            val hitX = playerX + dirX * bestDist
-            val hitY = camY + dirY * bestDist
-            val hitZ = playerZ + dirZ * bestDist
-            impacts.add(TracerEffect(hitX, hitY, hitZ, isEnemy = false, life = 0.18f))
-
-            val dmg = if (bestHeadshot) w.headDamage else w.bodyDamage
-            applyBotDamage(bestBot, dmg, bestHeadshot, killerIsPlayer = true, weaponUsed = w)
-        } else if (wallDist < 109f) {
-            val hitX = playerX + dirX * (wallDist - 0.05f)
-            val hitY = camY + dirY * (wallDist - 0.05f)
-            val hitZ = playerZ + dirZ * (wallDist - 0.05f)
-            impacts.add(TracerEffect(hitX, hitY, hitZ, isEnemy = false, life = 0.16f))
+            hitMarkerAlpha = 1.0f
+            isHeadshotHit = headshot
+            val dmg = if (headshot) w.headDamage else w.bodyDamage
+            applyBotDamage(hitBot, dmg, headshot, killerIsPlayer = true, weaponUsed = w)
+            if (headshot) soundEngine.playHeadshot() else soundEngine.playHitMarker()
+            if (headshot && settings.audio.hapticsEnabled) onHapticPulse(true)
         }
 
-        if (w == WeaponType.AWP && isAdsToggle) {
-            isAdsToggle = false
-        }
-
-        if (nextMag == 0 && (reserveAmmoMap[w] ?: 0) > 0) {
-            beginReload()
-        }
+        if (nextMag == 0 && (reserveAmmoMap[w] ?: 0) > 0) beginReload()
     }
 
     private fun applyBotDamage(
         target: BotOperative,
-        rawDmg: Float,
+        dmg: Float,
         isHeadshot: Boolean,
         killerIsPlayer: Boolean,
         weaponUsed: WeaponType
     ) {
-        val absorbed = minOf(target.armor, rawDmg * 0.35f)
-        target.armor -= absorbed
-        target.hp -= (rawDmg - absorbed * 0.5f)
+        if (target.isDead) return
+        target.hp -= dmg
         target.hitFlinch = 1.0f
-
-        if (killerIsPlayer) {
-            hitMarkerAlpha = 1.0f
-            isHeadshotHit = isHeadshot
-            if (isHeadshot) {
-                soundEngine.playHeadshot()
-                if (settings.audio.hapticsEnabled) onHapticPulse(true)
-            } else {
-                soundEngine.playHitMarker()
-            }
-        }
-
-        if (target.hp <= 0f && !target.isDead) {
+        if (target.hp <= 0f) {
+            target.hp = 0f
             target.isDead = true
-            target.deathProgress = 0f
-            target.deathFallDir = if (rng.nextBoolean()) 1f else -1f
+            target.deathProgress = 0.01f
             if (killerIsPlayer) {
                 kills++
                 if (isHeadshot) headshots++
@@ -809,8 +980,6 @@ class GameEngine(
                 killFeedText = "${killerTeam.shortRu} → ${target.team.shortRu}"
                 killFeedTimer = 2.6f
             }
-
-            // If Terrorist bot carrying C4 dies, pass C4 to another alive T so round never stalls
             if (target.hasBomb && bombState == BombState.CARRIED) {
                 target.hasBomb = false
                 if (matchConfig.playerSide == TeamSide.T && !isPlayerDead) {
@@ -839,41 +1008,40 @@ class GameEngine(
             b.muzzleFlashTimer = (b.muzzleFlashTimer - dt * 20f).coerceAtLeast(0f)
             b.fireCooldown -= dt
 
-            // 1. Find nearest visible enemy target (opposing bot OR player if opposing side)
             var targetX = 0f
+            var targetY = 0f
             var targetZ = 0f
-            var targetY = 1.42f
             var targetBot: BotOperative? = null
             var targetIsPlayer = false
             var bestTargetDist = Float.MAX_VALUE
             var hasLos = false
 
-            // Check player as target if bot is on opposing team
             if (b.team != matchConfig.playerSide && !isPlayerDead) {
                 val pdx = playerX - b.x
+                val pdy = camY - (b.y + 1.50f)
                 val pdz = playerZ - b.z
-                val pDist = sqrt(pdx * pdx + pdz * pdz).coerceAtLeast(0.01f)
-                if (pDist < 54f) {
-                    val wt = world.raycastWalls(b.x, 1.46f, b.z, pdx / pDist, (camY - 1.46f) / pDist, pdz / pDist, pDist)
-                    if (wt >= pDist - 0.55f) {
+                val pDist = sqrt(pdx * pdx + pdy * pdy + pdz * pdz).coerceAtLeast(0.01f)
+                if (pDist < 55f) {
+                    val wt = world.raycastWalls(b.x, b.y + 1.50f, b.z, pdx / pDist, pdy / pDist, pdz / pDist, pDist)
+                    if (wt >= pDist - 0.7f) {
                         bestTargetDist = pDist
-                        targetX = playerX; targetZ = playerZ; targetY = camY
+                        targetX = playerX; targetY = camY; targetZ = playerZ
                         targetIsPlayer = true; hasLos = true
                     }
                 }
             }
 
-            // Check opposing bots
             for (other in bots) {
                 if (other.isDead || other.team == b.team) continue
                 val odx = other.x - b.x
+                val ody = (other.y + 1.45f) - (b.y + 1.50f)
                 val odz = other.z - b.z
-                val oDist = sqrt(odx * odx + odz * odz).coerceAtLeast(0.01f)
+                val oDist = sqrt(odx * odx + ody * ody + odz * odz).coerceAtLeast(0.01f)
                 if (oDist < bestTargetDist && oDist < 52f) {
-                    val wt = world.raycastWalls(b.x, 1.46f, b.z, odx / oDist, 0f, odz / oDist, oDist)
-                    if (wt >= oDist - 0.55f) {
+                    val wt = world.raycastWalls(b.x, b.y + 1.50f, b.z, odx / oDist, ody / oDist, odz / oDist, oDist)
+                    if (wt >= oDist - 0.7f) {
                         bestTargetDist = oDist
-                        targetX = other.x; targetZ = other.z; targetY = 1.42f
+                        targetX = other.x; targetY = other.y + 1.45f; targetZ = other.z
                         targetBot = other; targetIsPlayer = false; hasLos = true
                     }
                 }
@@ -881,9 +1049,8 @@ class GameEngine(
 
             val prevX = b.x
             val prevZ = b.z
-            val moveSpeed = 3.2f
+            val moveSpeed = 3.5f
 
-            // 2. Bomb Defusal AI Objective: T carrier plants on site; CT rushes planted C4 to defuse!
             var isDoingBombTask = false
             if (matchConfig.mode == GameMode.BOMB_DEFUSAL) {
                 if (b.team == TeamSide.T && b.hasBomb && bombState == BombState.CARRIED) {
@@ -893,19 +1060,19 @@ class GameEngine(
                         b.plantProgress += dt / 3.2f
                         if (b.plantProgress >= 1f) {
                             b.plantProgress = 0f
-                            plantBombAt(b.x, b.z, site.label, plantedByPlayer = false)
+                            plantBombAt(b.x, b.y, b.z, site.label, plantedByPlayer = false)
                         }
                     }
                 } else if (b.team == TeamSide.CT && bombState == BombState.PLANTED) {
-                    val distBomb = sqrt((b.x - plantedBombX) * (b.x - plantedBombX) + (b.z - plantedBombZ) * (b.z - plantedBombZ))
-                    if (distBomb < 2.2f && !hasLos) {
+                    val distBomb = world.distance2D(b.x, b.z, plantedBombX, plantedBombZ)
+                    if (distBomb < 2.4f && !hasLos) {
                         isDoingBombTask = true
                         b.defuseProgress += dt / 4.8f
                         if (b.defuseProgress >= 1f) {
                             b.defuseProgress = 0f
                             bombState = BombState.DEFUSED
                             soundEngine.playBombPlanted()
-                            endRound(TeamSide.CT, "СПЕЦНАЗ РАЗМИНИРОВАЛ C4!")
+                            endRound(TeamSide.CT, "СПЕЦНАЗ РАЗМИНИРОВАЛ C4!", delaySec = 3.6f)
                             return
                         }
                     }
@@ -917,7 +1084,6 @@ class GameEngine(
                 continue
             }
 
-            // 3. Movement & Tactical Engagement
             var faceX: Float
             var faceZ: Float
             var vx = 0f
@@ -926,9 +1092,9 @@ class GameEngine(
             if (hasLos) {
                 val dx = targetX - b.x
                 val dz = targetZ - b.z
-                val dist = bestTargetDist.coerceAtLeast(0.01f)
-                faceX = dx / dist
-                faceZ = dz / dist
+                val dist2d = sqrt(dx * dx + dz * dz).coerceAtLeast(0.01f)
+                faceX = dx / dist2d
+                faceZ = dz / dist2d
                 val rightX = faceZ
                 val rightZ = -faceX
                 b.yawDeg = Math.toDegrees(atan2(dx.toDouble(), dz.toDouble())).toFloat()
@@ -939,40 +1105,29 @@ class GameEngine(
                     b.strafeTimer = 1.2f + rng.nextFloat() * 1.4f
                 }
 
-                if (dist > 15f) {
+                if (dist2d > 15f) {
                     vx += faceX * moveSpeed * 0.85f; vz += faceZ * moveSpeed * 0.85f
-                } else if (dist < 7.5f) {
+                } else if (dist2d < 7.5f) {
                     vx -= faceX * moveSpeed * 0.65f; vz -= faceZ * moveSpeed * 0.65f
                 }
                 vx += rightX * b.strafeDir * moveSpeed * 0.68f
                 vz += rightZ * b.strafeDir * moveSpeed * 0.68f
 
-                // Fire with realistic burst cooldown
                 if (b.fireCooldown <= 0f) {
                     b.muzzleFlashTimer = 1.0f
                     b.muzzleFlashRoll = rng.nextFloat() * 360f
-                    b.fireCooldown = 0.62f + rng.nextFloat() * 0.52f
-                    impacts.add(
-                        TracerEffect(
-                            x = b.x + faceX * minOf(dist * 0.45f, 6f),
-                            y = 1.42f + ((targetY - 1.42f) / dist) * minOf(dist * 0.45f, 6f),
-                            z = b.z + faceZ * minOf(dist * 0.45f, 6f),
-                            isEnemy = (b.team != matchConfig.playerSide),
-                            life = 0.12f
-                        )
-                    )
-                    val hitChance = (0.50f - dist * 0.0085f).coerceIn(0.12f, 0.50f)
+                    b.fireCooldown = 0.64f + rng.nextFloat() * 0.54f
+                    val hitChance = (0.48f - bestTargetDist * 0.008f).coerceIn(0.10f, 0.48f)
                     if (rng.nextFloat() < hitChance) {
                         val dmg = if (b.weapon == WeaponType.AK47) 14f else 11f
                         if (targetIsPlayer) {
-                            applyPlayerDamage(dmg, b.team)
+                            applyPlayerDamage(dmg, b.team, killedByBomb = false)
                         } else if (targetBot != null) {
-                            applyBotDamage(targetBot, dmg * 1.45f, isHeadshot = rng.nextFloat() < 0.18f, killerIsPlayer = false, weaponUsed = b.weapon)
+                            applyBotDamage(targetBot, dmg * 1.4f, isHeadshot = rng.nextFloat() < 0.18f, killerIsPlayer = false, weaponUsed = b.weapon)
                         }
                     }
                 }
             } else {
-                // Follow Mirage lane waypoints (or rush planted bomb!)
                 val goal = getBotObjectiveGoal(b)
                 val dx = goal.first - b.x
                 val dz = goal.second - b.z
@@ -981,11 +1136,10 @@ class GameEngine(
                 faceZ = dz / dist
                 b.yawDeg = Math.toDegrees(atan2(dx.toDouble(), dz.toDouble())).toFloat()
 
-                if (dist > 1.8f) {
+                if (dist > 2.0f) {
                     vx = faceX * moveSpeed
                     vz = faceZ * moveSpeed
                 } else {
-                    // Advance waypoint along lane
                     val routes = if (b.team == TeamSide.T) world.tAttackRoutes else world.ctDefenseRoutes
                     val route = routes[b.targetSiteIndex % routes.size]
                     if (b.waypointIndex < route.size - 1) {
@@ -997,8 +1151,8 @@ class GameEngine(
                 }
             }
 
-            val (nx, nz) = world.resolveHorizontalCollision(b.x + vx * dt, b.z + vz * dt, 0.48f)
-            b.x = nx; b.z = nz
+            val (nx, ny, nz) = world.resolveMovement(b.x, b.y, b.z, b.x + vx * dt, b.z + vz * dt, 0.46f)
+            b.x = nx; b.y = ny; b.z = nz
             updateDirectionalLocomotion(b, prevX, prevZ, faceX, faceZ, moveSpeed, dt)
         }
     }
@@ -1024,24 +1178,18 @@ class GameEngine(
         val velZ = (b.z - prevZ) / dt
         val localFwd = ((velX * faceX + velZ * faceZ) / refSpeed).coerceIn(-1f, 1f)
         val localStrafe = ((velX * rightX + velZ * rightZ) / refSpeed).coerceIn(-1f, 1f)
-
         val smooth = (dt * 10f).coerceAtMost(1f)
         b.moveForwardRatio += (localFwd - b.moveForwardRatio) * smooth
         b.moveStrafeRatio += (localStrafe - b.moveStrafeRatio) * smooth
-
         val totalSpeed = sqrt(velX * velX + velZ * velZ)
         b.isMoving = totalSpeed > 0.14f
-        if (abs(b.moveForwardRatio) > 0.05f) {
-            b.walkPhase += dt * (2.6f + abs(b.moveForwardRatio) * 5.8f)
-        }
-        if (abs(b.moveStrafeRatio) > 0.05f) {
-            b.strafePhase += dt * (2.8f + abs(b.moveStrafeRatio) * 5.2f)
-        }
+        if (abs(b.moveForwardRatio) > 0.05f) b.walkPhase += dt * (2.6f + abs(b.moveForwardRatio) * 5.8f)
+        if (abs(b.moveStrafeRatio) > 0.05f) b.strafePhase += dt * (2.8f + abs(b.moveStrafeRatio) * 5.2f)
     }
 
-    private fun applyPlayerDamage(amount: Float, attackerSide: TeamSide) {
-        damageFlashAlpha = 0.85f
-        soundEngine.playDamage()
+    private fun applyPlayerDamage(amount: Float, attackerSide: TeamSide, killedByBomb: Boolean) {
+        damageFlashAlpha = if (killedByBomb) 1.0f else 0.85f
+        if (!killedByBomb) soundEngine.playDamage()
         if (settings.audio.hapticsEnabled) onHapticPulse(true)
 
         val absorbed = minOf(armor, amount * 0.55f)
@@ -1049,241 +1197,125 @@ class GameEngine(
         hp -= (amount - absorbed * 0.5f)
         if (hp <= 0f) {
             hp = 0f
-            deaths++
             isPlayerDead = true
-            isFiring = false
             isAdsToggle = false
-            bombPlantProgress = 0f
-            tdmRespawnTimer = 2.6f
-            killFeedText = "${attackerSide.shortRu} → ВЫ"
-            killFeedTimer = 3.2f
-            // Drop C4 to surviving Terrorist teammate if player died carrying it
+            isFiring = false
+            isBombActionHeld = false
+            deaths++
+            killFeedText = if (killedByBomb) {
+                "ВЫ ПОГИБЛИ ОТ ВЗРЫВА C4!"
+            } else {
+                "${attackerSide.shortRu} → ВЫ"
+            }
+            killFeedTimer = 3.6f
+
             if (playerHasBomb && bombState == BombState.CARRIED) {
                 playerHasBomb = false
                 bots.firstOrNull { !it.isDead && it.team == TeamSide.T }?.hasBomb = true
             }
+            if (matchConfig.mode == GameMode.TEAM_DEATHMATCH) {
+                tdmRespawnTimer = 2.5f
+            }
         }
     }
 
-    private fun resetMatchInternal() {
-        world = ArenaWorld(matchConfig.map)
-        ctScore = 0
-        tScore = 0
-        roundNumber = 1
-        score = 0
-        kills = 0
-        deaths = 0
-        headshots = 0
-        shotsFired = 0
-        shotsHit = 0
-        isMatchFinished = false
-        isPlayerTeamWinner = false
-        matchRecorded = false
-        startRoundInternal(resetEconomy = true)
-    }
-
-    private fun startRoundInternal(resetEconomy: Boolean) {
-        val side = matchConfig.playerSide
-        val isTdm = matchConfig.mode == GameMode.TEAM_DEATHMATCH
-
-        if (resetEconomy) {
-            money = if (isTdm) 16000 else 800
-            armor = if (isTdm) 100f else 0f
-            hasDefuseKit = false
-            pistolWeapon = if (side == TeamSide.CT) WeaponType.USP_S else WeaponType.GLOCK_18
-            primaryWeapon = if (isTdm) (if (side == TeamSide.CT) WeaponType.M4A1_S else WeaponType.AK47) else null
-        } else if (isPlayerDead) {
-            // Lost weapon on death in Bomb Defusal (classic CS2 economy!)
-            armor = 0f
-            hasDefuseKit = false
-            primaryWeapon = null
-            pistolWeapon = if (side == TeamSide.CT) WeaponType.USP_S else WeaponType.GLOCK_18
+    private fun updateTeamDeathmatchRules(dt: Float) {
+        roundTimeSec -= dt
+        if (isPlayerDead) {
+            tdmRespawnTimer -= dt
+            if (tdmRespawnTimer <= 0f) {
+                hp = 100f
+                armor = 100f
+                isPlayerDead = false
+                val (sx, sy, sz) = world.getSpawnPoint(matchConfig.playerSide, rng.nextInt(5))
+                playerX = sx; playerY = sy; playerFloorY = sy; playerZ = sz
+                refillAmmoForOwnedWeapons()
+            }
         }
-
-        // Refill ammo for owned weapons
-        for (w in WeaponType.entries) {
-            magAmmoMap[w] = w.magSize
-            reserveAmmoMap[w] = w.initialReserve
-        }
-
-        activeWeapon = primaryWeapon ?: pistolWeapon
-        lastWeapon = WeaponType.KNIFE
-        hp = 100f
-        isPlayerDead = false
-        isReloading = false
-        reloadTimer = 0f
-        fireTimer = 0f
-        isAdsToggle = false
-        adsBlend = 0f
-        isCrouching = false
-        isFiring = false
-        recoilKick = 0f
-        muzzleFlashTimer = 0f
-        boltProgress = 0f
-        knifeSwingProgress = 0f
-        bombPlantProgress = 0f
-        hitMarkerAlpha = 0f
-        damageFlashAlpha = 0f
-
-        roundTimeSec = 105f
-        buyTimeRemaining = 22f
-        isRoundOver = false
-        roundOverTimer = 0f
-        bombState = BombState.CARRIED
-        plantedSiteLabel = ""
-        bombCountdownSec = 35f
-        playerHasBomb = (!isTdm && side == TeamSide.T)
-
-        // Position Player at CT or T Spawn facing the arena center
-        val playerSpawns = if (side == TeamSide.CT) world.ctSpawns else world.tSpawns
-        val pSp = playerSpawns[0]
-        playerX = pSp.first
-        playerZ = pSp.second
-        playerY = 0f
-        playerVelY = 0f
-        eyeHeight = 1.65f
-        playerYawRad = if (side == TeamSide.CT) Math.PI.toFloat() else 0f
-        playerPitchRad = 0f
-
-        // Spawn Allied & Enemy Bots according to user's chosen team sizes (e.g. 5v5, 1v2, 1v5)
-        bots.clear()
-        impacts.clear()
-        val ctCount = if (side == TeamSide.CT) (matchConfig.playerTeamSize - 1).coerceAtLeast(0) else matchConfig.enemyTeamSize
-        val tCount = if (side == TeamSide.T) (matchConfig.playerTeamSize - 1).coerceAtLeast(0) else matchConfig.enemyTeamSize
-
-        val ctStartIdx = if (side == TeamSide.CT) 1 else 0
-        for (i in 0 until ctCount) {
-            val sp = world.ctSpawns[(ctStartIdx + i) % world.ctSpawns.size]
-            val (bx, bz) = world.resolveHorizontalCollision(sp.first + (rng.nextFloat() - 0.5f) * 1.4f, sp.second + (rng.nextFloat() - 0.5f) * 1.4f, 0.5f)
-            val botWeapon = if (roundNumber == 1 && !isTdm) WeaponType.USP_S else WeaponType.M4A1_S
-            bots += BotOperative(
-                id = nextBotId++,
-                team = TeamSide.CT,
-                weapon = botWeapon,
-                hasBomb = false,
-                x = bx, z = bz, yawDeg = 0f,
-                targetSiteIndex = i % world.ctDefenseRoutes.size,
-                fireCooldown = 0.8f + rng.nextFloat() * 0.9f
-            )
-        }
-
-        val tStartIdx = if (side == TeamSide.T) 1 else 0
-        for (i in 0 until tCount) {
-            val sp = world.tSpawns[(tStartIdx + i) % world.tSpawns.size]
-            val (bx, bz) = world.resolveHorizontalCollision(sp.first + (rng.nextFloat() - 0.5f) * 1.4f, sp.second + (rng.nextFloat() - 0.5f) * 1.4f, 0.5f)
-            val botWeapon = if (roundNumber == 1 && !isTdm) WeaponType.GLOCK_18 else WeaponType.AK47
-            val carriesBomb = (!isTdm && side == TeamSide.CT && i == 0)
-            bots += BotOperative(
-                id = nextBotId++,
-                team = TeamSide.T,
-                weapon = botWeapon,
-                hasBomb = carriesBomb,
-                x = bx, z = bz, yawDeg = 180f,
-                targetSiteIndex = rng.nextInt(world.tAttackRoutes.size),
-                fireCooldown = 0.8f + rng.nextFloat() * 0.9f
-            )
-        }
-
-        bannerText = if (isTdm) {
-            "${matchConfig.map.titleRu} • БОЙ НАСМЕРТЬ"
-        } else {
-            "РАУНД $roundNumber • ${matchConfig.map.titleRu} (${matchConfig.playerTeamSize}v${matchConfig.enemyTeamSize})"
-        }
-        bannerTimer = 2.6f
-        publishHud()
-    }
-
-    private fun respawnPlayerTdm() {
-        val side = matchConfig.playerSide
-        val sp = (if (side == TeamSide.CT) world.ctSpawns else world.tSpawns).random(rng)
-        playerX = sp.first; playerZ = sp.second; playerY = 0f
-        playerYawRad = if (side == TeamSide.CT) Math.PI.toFloat() else 0f
-        hp = 100f; armor = 100f; isPlayerDead = false
-        for (w in WeaponType.entries) {
-            magAmmoMap[w] = w.magSize
-            reserveAmmoMap[w] = w.initialReserve
+        if (kills >= 25 || roundTimeSec <= 0f) {
+            isPlayerTeamWinner = kills >= deaths
+            finishMatch()
         }
     }
 
     private fun respawnBotTdm(b: BotOperative) {
-        val sp = (if (b.team == TeamSide.CT) world.ctSpawns else world.tSpawns).random(rng)
-        b.x = sp.first; b.z = sp.second; b.hp = b.maxHp; b.armor = 100f
-        b.isDead = false; b.deathProgress = 0f; b.waypointIndex = 0; b.fireCooldown = 0.8f
+        val (sx, sy, sz) = world.getSpawnPoint(b.team, rng.nextInt(5))
+        b.x = sx; b.y = sy; b.z = sz
+        b.hp = 100f
+        b.isDead = false
+        b.deathProgress = 0f
+        b.fireCooldown = 1.0f
+        b.waypointIndex = 0
     }
 
-    private fun countAlive(team: TeamSide): Int {
-        var c = bots.count { !it.isDead && it.team == team }
-        if (matchConfig.playerSide == team && !isPlayerDead) c++
-        return c
-    }
-
-    private fun updateDeadBodies(dt: Float) {
-        for (b in bots) {
-            if (b.isDead) b.deathProgress = (b.deathProgress + dt * 2.2f).coerceAtMost(1f)
+    private fun finishMatch() {
+        isMatchFinished = true
+        isPlayerTeamWinner = when (matchConfig.mode) {
+            GameMode.BOMB_DEFUSAL -> {
+                if (matchConfig.playerSide == TeamSide.CT) ctScore >= tScore else tScore >= ctScore
+            }
+            GameMode.TEAM_DEATHMATCH -> kills >= deaths
         }
-    }
-
-    private fun recordMatchOnce() {
         if (!matchRecorded) {
             matchRecorded = true
             onMatchFinished(score, kills, headshots)
         }
     }
 
+    private fun countAlive(side: TeamSide): Int {
+        var count = bots.count { !it.isDead && it.team == side }
+        if (matchConfig.playerSide == side && !isPlayerDead) count++
+        return count
+    }
+
+    private fun intersectRaySphere(
+        ox: Float, oy: Float, oz: Float,
+        dx: Float, dy: Float, dz: Float,
+        cx: Float, cy: Float, cz: Float,
+        radius: Float
+    ): Float {
+        val ocX = ox - cx; val ocY = oy - cy; val ocZ = oz - cz
+        val b = ocX * dx + ocY * dy + ocZ * dz
+        val c = ocX * ocX + ocY * ocY + ocZ * ocZ - radius * radius
+        val disc = b * b - c
+        if (disc < 0f) return Float.MAX_VALUE
+        val t = -b - sqrt(disc)
+        return if (t > 0.1f) t else Float.MAX_VALUE
+    }
+
     private fun publishHud() {
-        val blips = ArrayList<RadarBlip>(bots.size + 1)
-        val cosY = cos(playerYawRad)
-        val sinY = sin(playerYawRad)
-        val radarRange = if (matchConfig.map == ArenaMapId.MIRAGE) 44f else 30f
+        val w = activeWeapon
+        val inSite = world.bombsites.firstOrNull { it.contains(playerX, playerZ) }
+        val distBomb = world.distance2D(playerX, playerZ, plantedBombX, plantedBombZ)
 
-        for (b in bots) {
-            if (b.isDead) continue
-            val isAlly = b.team == matchConfig.playerSide
-            val dx = b.x - playerX
-            val dz = b.z - playerZ
-            val dist = sqrt(dx * dx + dz * dz)
-            // Show allies always; show enemies within radar awareness or when firing
-            if (!isAlly && dist > 28f && b.muzzleFlashTimer <= 0.05f) continue
-            val localRight = dx * cosY - dz * sinY
-            val localForward = -dx * sinY - dz * cosY
-            blips += RadarBlip(
-                relX = (localRight / radarRange).coerceIn(-1f, 1f),
-                relZ = (localForward / radarRange).coerceIn(-1f, 1f),
-                isAlly = isAlly
-            )
-        }
-        if (matchConfig.mode == GameMode.BOMB_DEFUSAL && bombState == BombState.PLANTED) {
-            val dx = plantedBombX - playerX
-            val dz = plantedBombZ - playerZ
-            val localRight = dx * cosY - dz * sinY
-            val localForward = -dx * sinY - dz * cosY
-            blips += RadarBlip(
-                relX = (localRight / radarRange).coerceIn(-1f, 1f),
-                relZ = (localForward / radarRange).coerceIn(-1f, 1f),
-                isAlly = false,
-                isBomb = true
-            )
-        }
-
-        val site = world.bombsites.firstOrNull { it.contains(playerX, playerZ) }
-        val distToBomb = sqrt((playerX - plantedBombX) * (playerX - plantedBombX) + (playerZ - plantedBombZ) * (playerZ - plantedBombZ))
         val canPlant = matchConfig.mode == GameMode.BOMB_DEFUSAL &&
             !isPlayerDead &&
             matchConfig.playerSide == TeamSide.T &&
             playerHasBomb &&
             bombState == BombState.CARRIED &&
-            site != null
+            inSite != null
+
         val canDefuse = matchConfig.mode == GameMode.BOMB_DEFUSAL &&
             !isPlayerDead &&
             matchConfig.playerSide == TeamSide.CT &&
             bombState == BombState.PLANTED &&
-            distToBomb <= 2.8f
+            distBomb <= 3.0f
 
-        val w = activeWeapon
+        val blips = ArrayList<RadarBlip>(bots.size + 1)
+        for (b in bots) {
+            if (!b.isDead) {
+                blips.add(RadarBlip(b.x - playerX, b.z - playerZ, isAlly = b.team == matchConfig.playerSide))
+            }
+        }
+        if (bombState == BombState.PLANTED) {
+            blips.add(RadarBlip(plantedBombX - playerX, plantedBombZ - playerZ, isAlly = false, isBomb = true))
+        }
+
         latestHud = HudSnapshot(
-            hp = hp.toInt().coerceIn(0, 100),
+            mapId = matchConfig.map,
+            hp = hp.toInt().coerceAtLeast(0),
             maxHp = 100,
-            armor = armor.toInt().coerceIn(0, 100),
+            armor = armor.toInt().coerceAtLeast(0),
             hasDefuseKit = hasDefuseKit,
             money = money,
             mode = matchConfig.mode,
@@ -1291,10 +1323,10 @@ class GameEngine(
             activeWeapon = w,
             primaryWeapon = primaryWeapon,
             pistolWeapon = pistolWeapon,
-            hasBomb = playerHasBomb && bombState == BombState.CARRIED && matchConfig.mode == GameMode.BOMB_DEFUSAL,
-            ammo = magAmmoMap[w] ?: w.magSize,
+            hasBomb = playerHasBomb,
+            ammo = magAmmoMap[w] ?: 0,
             magSize = w.magSize,
-            reserveAmmo = reserveAmmoMap[w] ?: w.initialReserve,
+            reserveAmmo = reserveAmmoMap[w] ?: 0,
             isReloading = isReloading,
             reloadProgress = if (isReloading && w.reloadSec > 0f) (reloadTimer / w.reloadSec).coerceIn(0f, 1f) else 0f,
             isAds = isAdsToggle,
@@ -1311,12 +1343,13 @@ class GameEngine(
             bombState = bombState,
             bombSiteLabel = plantedSiteLabel,
             bombCountdownSec = bombCountdownSec.coerceAtLeast(0f),
-            inPlantZoneLabel = site?.label ?: "",
+            inPlantZoneLabel = inSite?.label ?: "",
             canPlantBomb = canPlant,
             canDefuseBomb = canDefuse,
             bombActionProgress = bombPlantProgress,
-            canBuy = isBuyAllowed(),
-            calloutName = world.getCalloutRu(playerX, playerZ),
+            explosionFlashAlpha = explosionFlashAlpha,
+            canBuy = canPlayerBuyNow(),
+            calloutName = world.getCalloutName(playerX, playerZ),
             score = score,
             kills = kills,
             deaths = deaths,
@@ -1327,7 +1360,7 @@ class GameEngine(
             hitMarkerAlpha = hitMarkerAlpha,
             isHeadshotHit = isHeadshotHit,
             damageFlashAlpha = damageFlashAlpha,
-            crosshairSpread = (recoilKick * 12f + moveSpeedRatio * 8f) * (1f - adsBlend * 0.85f),
+            crosshairSpread = (recoilKick * 0.55f + moveSpeedRatio * 0.35f).coerceIn(0f, 1.4f),
             isMatchFinished = isMatchFinished,
             isPlayerTeamWinner = isPlayerTeamWinner,
             bannerText = bannerText,
@@ -1335,20 +1368,5 @@ class GameEngine(
             radarBlips = blips,
             playerYawDeg = Math.toDegrees(playerYawRad.toDouble()).toFloat()
         )
-    }
-
-    private fun intersectRaySphere(
-        ox: Float, oy: Float, oz: Float,
-        dx: Float, dy: Float, dz: Float,
-        cx: Float, cy: Float, cz: Float,
-        radius: Float
-    ): Float {
-        val lx = ox - cx; val ly = oy - cy; val lz = oz - cz
-        val b = lx * dx + ly * dy + lz * dz
-        val c = lx * lx + ly * ly + lz * lz - radius * radius
-        val disc = b * b - c
-        if (disc < 0f) return Float.MAX_VALUE
-        val t = -b - sqrt(disc)
-        return if (t > 0.05f) t else Float.MAX_VALUE
     }
 }

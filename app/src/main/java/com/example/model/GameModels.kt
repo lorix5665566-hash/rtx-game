@@ -5,10 +5,10 @@ enum class GraphicsPreset(
     val titleRu: String,
     val subtitleRu: String
 ) {
-    LOW(0, "НИЗКИЕ", "Максимум FPS • Упрощённый свет"),
-    MEDIUM(1, "СРЕДНИЕ", "Баланс • Базовый PBR"),
-    HIGH(2, "ВЫСОКИЕ", "Полный PBR • HD-текстуры"),
-    ULTRA_RTX(3, "УЛЬТРА RTX", "Полный PBR • Динамический свет и отражения")
+    LOW(0, "НИЗКИЕ", "Максимум FPS • Быстрый Filament PBR"),
+    MEDIUM(1, "СРЕДНИЕ", "Баланс • Filament PBR + FXAA"),
+    HIGH(2, "ВЫСОКИЕ", "Тени 2K • Bloom • ACES HDR"),
+    ULTRA_RTX(3, "УЛЬТРА RTX", "Максимум PBR • Тени • SSAO • IBL-отражения")
 }
 
 enum class TeamSide(val shortRu: String, val titleRu: String) {
@@ -20,18 +20,31 @@ enum class GameMode(
     val titleRu: String,
     val subtitleRu: String
 ) {
-    BOMB_DEFUSAL("ЗАКЛАДКА БОМБЫ", "Классический CS2 • Установка и разминирование C4"),
+    BOMB_DEFUSAL("ЗАКЛАДКА БОМБЫ", "Классический CS2 • Установка, взрыв и разминирование C4"),
     TEAM_DEATHMATCH("БОЙ НАСМЕРТЬ", "Мгновенное возрождение • Бесплатный магазин")
 }
 
 enum class ArenaMapId(
     val titleRu: String,
     val subtitleRu: String,
-    val envTagRu: String
+    val envTagRu: String,
+    val floorsAssetPath: String,
+    val radarAssetPath: String
 ) {
-    MIRAGE("MIRAGE", "Классическая карта CS2 • Точки A, B, Мид и Ковры", "CS2 • ДЕНЬ"),
-    INDUSTRIAL("ПРОМЗОНА", "Ночной комплекс • Мокрый асфальт RTX", "НОЧЬ • RTX"),
-    HARBOR("ПОРТ-СИТИ", "Контейнерный терминал • Плотные коридоры", "ТУМАН • ПОРТ")
+    MIRAGE(
+        titleRu = "MIRAGE",
+        subtitleRu = "Оригинальная 3D-карта CS2 Mirage (.GLB)",
+        envTagRu = "CS2 • .GLB",
+        floorsAssetPath = "models/mirage-floors.json",
+        radarAssetPath = "models/mirage-radar.png"
+    ),
+    DUST2(
+        titleRu = "DUST 2",
+        subtitleRu = "Оригинальная 3D-карта CS2 Dust 2 (.GLB)",
+        envTagRu = "CS2 • .GLB",
+        floorsAssetPath = "models/dust2-floors.json",
+        radarAssetPath = "models/dust2-radar.png"
+    )
 }
 
 data class MatchConfig(
@@ -354,7 +367,7 @@ data class GraphicsSettings(
     }
 }
 
-// Pure raw skill aiming — aim assist has been completely removed!
+// Pure manual aiming — aim assist completely removed!
 data class SensitivitySettings(
     val lookSensitivity: Float = 1.0f,
     val adsSensitivity: Float = 0.56f,
@@ -400,7 +413,6 @@ data class ControlLayout(
         copy(widgets = widgets + (config.id to config))
 
     companion object {
-        // Ergonomic landscape defaults
         fun defaultTwoFingerMap(): Map<ControlWidgetId, ControlWidgetConfig> = mapOf(
             ControlWidgetId.JOYSTICK to ControlWidgetConfig(ControlWidgetId.JOYSTICK, 0.13f, 0.72f, 1.0f, 0.80f, true),
             ControlWidgetId.FIRE_RIGHT to ControlWidgetConfig(ControlWidgetId.FIRE_RIGHT, 0.87f, 0.68f, 1.08f, 0.92f, true),
@@ -410,7 +422,7 @@ data class ControlLayout(
             ControlWidgetId.CROUCH to ControlWidgetConfig(ControlWidgetId.CROUCH, 0.76f, 0.56f, 0.88f, 0.82f, true),
             ControlWidgetId.JUMP to ControlWidgetConfig(ControlWidgetId.JUMP, 0.84f, 0.42f, 0.90f, 0.84f, true),
             ControlWidgetId.WEAPON_SWIPE to ControlWidgetConfig(ControlWidgetId.WEAPON_SWIPE, 0.86f, 0.88f, 1.0f, 0.92f, true),
-            ControlWidgetId.SHOP to ControlWidgetConfig(ControlWidgetId.SHOP, 0.91f, 0.14f, 0.95f, 0.92f, true),
+            ControlWidgetId.SHOP to ControlWidgetConfig(ControlWidgetId.SHOP, 0.90f, 0.14f, 0.95f, 0.92f, true),
             ControlWidgetId.PAUSE to ControlWidgetConfig(ControlWidgetId.PAUSE, 0.96f, 0.09f, 0.86f, 0.86f, true)
         )
 
@@ -461,6 +473,7 @@ data class RadarBlip(
 )
 
 data class HudSnapshot(
+    val mapId: ArenaMapId = ArenaMapId.MIRAGE,
     val hp: Int = 100,
     val maxHp: Int = 100,
     val armor: Int = 0,
@@ -495,6 +508,7 @@ data class HudSnapshot(
     val canPlantBomb: Boolean = false,
     val canDefuseBomb: Boolean = false,
     val bombActionProgress: Float = 0f,
+    val explosionFlashAlpha: Float = 0f,
     val canBuy: Boolean = true,
     val calloutName: String = "",
     val score: Int = 0,
