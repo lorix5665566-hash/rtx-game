@@ -23,9 +23,9 @@ import androidx.compose.foundation.shape.CutCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Gamepad
+import androidx.compose.material.icons.filled.Map
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Settings
-import androidx.compose.material.icons.filled.Shield
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Icon
@@ -48,11 +48,14 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.R
+import com.example.model.ArenaMapId
 import com.example.model.GameMode
 import com.example.model.GameSettings
 import com.example.model.PlayerStats
+import com.example.model.WeaponType
 import com.example.ui.theme.BorderSteel
 import com.example.ui.theme.ElevatedGunmetal
+import com.example.ui.theme.IceCyan
 import com.example.ui.theme.ObsidianVoid
 import com.example.ui.theme.RtxEmerald
 import com.example.ui.theme.TacticalAmber
@@ -65,7 +68,11 @@ fun MainMenuScreen(
     settings: GameSettings,
     stats: PlayerStats,
     selectedMode: GameMode,
+    selectedMap: ArenaMapId,
+    selectedWeapon: WeaponType,
     onSelectMode: (GameMode) -> Unit,
+    onSelectMap: (ArenaMapId) -> Unit,
+    onSelectWeapon: (WeaponType) -> Unit,
     onPlay: () -> Unit,
     onOpenSettings: () -> Unit,
     onOpenControls: () -> Unit
@@ -75,7 +82,6 @@ fun MainMenuScreen(
             .fillMaxSize()
             .background(ObsidianVoid)
     ) {
-        // Hyper-realistic RTX operative hero artwork
         Image(
             painter = painterResource(id = R.drawable.img_menu_hero),
             contentDescription = "Фон главного меню Vanguard RTX",
@@ -83,16 +89,15 @@ fun MainMenuScreen(
             contentScale = ContentScale.Crop
         )
 
-        // Cinematic dark gradient scrim for crisp AAA readability
         Box(
             modifier = Modifier
                 .fillMaxSize()
                 .background(
                     Brush.verticalGradient(
                         0.0f to ObsidianVoid.copy(alpha = 0.72f),
-                        0.32f to ObsidianVoid.copy(alpha = 0.25f),
-                        0.62f to ObsidianVoid.copy(alpha = 0.78f),
-                        1.0f to ObsidianVoid.copy(alpha = 0.96f)
+                        0.26f to ObsidianVoid.copy(alpha = 0.32f),
+                        0.52f to ObsidianVoid.copy(alpha = 0.84f),
+                        1.0f to ObsidianVoid.copy(alpha = 0.97f)
                     )
                 )
         )
@@ -101,21 +106,21 @@ fun MainMenuScreen(
             modifier = Modifier
                 .fillMaxSize()
                 .safeDrawingPadding()
-                .padding(horizontal = 20.dp, vertical = 16.dp)
-                .widthIn(max = 560.dp)
+                .padding(horizontal = 18.dp, vertical = 14.dp)
+                .widthIn(max = 580.dp)
                 .align(Alignment.Center)
                 .verticalScroll(rememberScrollState()),
             verticalArrangement = Arrangement.SpaceBetween
         ) {
             // Top Header: RTX Status Pill + Title Lockup
-            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.SpaceBetween,
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     Surface(
-                        color = ObsidianVoid.copy(alpha = 0.75f),
+                        color = ObsidianVoid.copy(alpha = 0.76f),
                         shape = CutCornerShape(topStart = 8.dp, bottomEnd = 8.dp),
                         border = BorderStroke(1.dp, RtxEmerald.copy(alpha = 0.75f))
                     ) {
@@ -138,7 +143,7 @@ fun MainMenuScreen(
                     }
 
                     Surface(
-                        color = ObsidianVoid.copy(alpha = 0.70f),
+                        color = ObsidianVoid.copy(alpha = 0.72f),
                         shape = CutCornerShape(topStart = 6.dp, bottomEnd = 6.dp),
                         border = BorderStroke(1.dp, BorderSteel)
                     ) {
@@ -151,13 +156,11 @@ fun MainMenuScreen(
                     }
                 }
 
-                Spacer(modifier = Modifier.height(6.dp))
-
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Box(
                         modifier = Modifier
                             .width(4.dp)
-                            .height(48.dp)
+                            .height(46.dp)
                             .background(RtxEmerald)
                     )
                     Spacer(modifier = Modifier.width(12.dp))
@@ -188,13 +191,13 @@ fun MainMenuScreen(
                 }
             }
 
-            Spacer(modifier = Modifier.height(140.dp))
+            Spacer(modifier = Modifier.height(64.dp))
 
-            // Bottom Tactical Command Deck
-            Column(verticalArrangement = Arrangement.spacedBy(14.dp)) {
+            // Main Tactical Command Deck
+            Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
                 // Combat Record Strip
                 Surface(
-                    color = TacticalSurface.copy(alpha = 0.84f),
+                    color = TacticalSurface.copy(alpha = 0.86f),
                     shape = CutCornerShape(topStart = 10.dp, bottomEnd = 10.dp),
                     border = BorderStroke(1.dp, BorderSteel.copy(alpha = 0.85f)),
                     modifier = Modifier.fillMaxWidth()
@@ -202,7 +205,7 @@ fun MainMenuScreen(
                     Row(
                         modifier = Modifier
                             .fillMaxWidth()
-                            .padding(horizontal = 14.dp, vertical = 10.dp),
+                            .padding(horizontal = 14.dp, vertical = 9.dp),
                         horizontalArrangement = Arrangement.SpaceBetween
                     ) {
                         StatBadge(label = "РЕКОРД", value = stats.bestScore.toString(), accent = TacticalAmber)
@@ -211,8 +214,130 @@ fun MainMenuScreen(
                     }
                 }
 
-                // Mission / Mode Selector
-                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                // 1. MAP SELECTOR (3 distinct 3D arenas)
+                Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Map,
+                            contentDescription = null,
+                            tint = TacticalAmber,
+                            modifier = Modifier.size(15.dp)
+                        )
+                        Text(
+                            text = "ВЫБОР КАРТЫ",
+                            style = MaterialTheme.typography.labelMedium,
+                            color = TextSecondary
+                        )
+                    }
+
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        ArenaMapId.entries.forEach { map ->
+                            val active = map == selectedMap
+                            val shape = CutCornerShape(topStart = 9.dp, bottomEnd = 9.dp)
+                            val accent = when (map) {
+                                ArenaMapId.INDUSTRIAL -> RtxEmerald
+                                ArenaMapId.HARBOR -> IceCyan
+                                ArenaMapId.RUINS -> TacticalAmber
+                            }
+                            Column(
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .clip(shape)
+                                    .background(
+                                        if (active) accent.copy(alpha = 0.20f)
+                                        else TacticalSurface.copy(alpha = 0.86f)
+                                    )
+                                    .border(
+                                        width = if (active) 1.5.dp else 1.dp,
+                                        color = if (active) accent else BorderSteel,
+                                        shape = shape
+                                    )
+                                    .clickable { onSelectMap(map) }
+                                    .padding(vertical = 9.dp, horizontal = 7.dp)
+                                    .testTag("map_${map.name.lowercase()}"),
+                                horizontalAlignment = Alignment.CenterHorizontally,
+                                verticalArrangement = Arrangement.spacedBy(3.dp)
+                            ) {
+                                Text(
+                                    text = map.titleRu,
+                                    style = MaterialTheme.typography.labelLarge,
+                                    color = if (active) accent else TextPrimary,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                                Text(
+                                    text = map.envTagRu,
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = if (active) TextPrimary else TextSecondary,
+                                    maxLines = 1
+                                )
+                            }
+                        }
+                    }
+                    Text(
+                        text = selectedMap.subtitleRu,
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = TextSecondary
+                    )
+                }
+
+                // 2. ARSENAL / STARTING WEAPON SELECTOR
+                Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    Text(
+                        text = "АРСЕНАЛ (МОЖНО МЕНЯТЬ В БОЮ)",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = TextSecondary
+                    )
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        WeaponType.entries.forEach { w ->
+                            val active = w == selectedWeapon
+                            val shape = CutCornerShape(topStart = 8.dp, bottomEnd = 8.dp)
+                            Box(
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .clip(shape)
+                                    .background(
+                                        if (active) TacticalAmber.copy(alpha = 0.22f)
+                                        else TacticalSurface.copy(alpha = 0.84f)
+                                    )
+                                    .border(
+                                        width = if (active) 1.5.dp else 1.dp,
+                                        color = if (active) TacticalAmber else BorderSteel,
+                                        shape = shape
+                                    )
+                                    .clickable { onSelectWeapon(w) }
+                                    .padding(vertical = 9.dp, horizontal = 6.dp)
+                                    .testTag("weapon_${w.name.lowercase()}"),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                                    Text(
+                                        text = w.shortLabel,
+                                        style = MaterialTheme.typography.labelLarge,
+                                        color = if (active) TacticalAmber else TextPrimary
+                                    )
+                                    Text(
+                                        text = "${w.magSize} пат.",
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = TextSecondary
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // 3. GAME MODE SELECTOR
+                Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
                     Text(
                         text = "РЕЖИМ ОПЕРАЦИИ",
                         style = MaterialTheme.typography.labelMedium,
@@ -231,7 +356,7 @@ fun MainMenuScreen(
                                     .clip(shape)
                                     .background(
                                         if (active) RtxEmerald.copy(alpha = 0.18f)
-                                        else TacticalSurface.copy(alpha = 0.82f)
+                                        else TacticalSurface.copy(alpha = 0.84f)
                                     )
                                     .border(
                                         width = if (active) 1.5.dp else 1.dp,
@@ -239,7 +364,7 @@ fun MainMenuScreen(
                                         shape = shape
                                     )
                                     .clickable { onSelectMode(mode) }
-                                    .padding(vertical = 10.dp, horizontal = 8.dp)
+                                    .padding(vertical = 9.dp, horizontal = 6.dp)
                                     .testTag("mode_${mode.name.lowercase()}"),
                                 contentAlignment = Alignment.Center
                             ) {
@@ -253,11 +378,6 @@ fun MainMenuScreen(
                             }
                         }
                     }
-                    Text(
-                        text = selectedMode.subtitleRu,
-                        style = MaterialTheme.typography.bodyMedium,
-                        color = TextSecondary
-                    )
                 }
 
                 // Primary CTA: В БОЙ
@@ -265,7 +385,7 @@ fun MainMenuScreen(
                     onClick = onPlay,
                     modifier = Modifier
                         .fillMaxWidth()
-                        .height(58.dp)
+                        .height(56.dp)
                         .testTag("play_button"),
                     shape = CutCornerShape(topStart = 12.dp, bottomEnd = 12.dp),
                     colors = ButtonDefaults.buttonColors(
@@ -280,10 +400,10 @@ fun MainMenuScreen(
                     )
                     Spacer(modifier = Modifier.width(8.dp))
                     Text(
-                        text = stringResource(R.string.btn_play),
-                        style = MaterialTheme.typography.headlineMedium,
+                        text = "${stringResource(R.string.btn_play)} • ${selectedMap.titleRu}",
+                        style = MaterialTheme.typography.titleLarge,
                         fontWeight = FontWeight.Bold,
-                        letterSpacing = 2.sp
+                        letterSpacing = 1.4.sp
                     )
                 }
 
@@ -296,12 +416,12 @@ fun MainMenuScreen(
                         onClick = onOpenSettings,
                         modifier = Modifier
                             .weight(1f)
-                            .height(52.dp)
+                            .height(50.dp)
                             .testTag("settings_button"),
                         shape = CutCornerShape(topStart = 10.dp, bottomEnd = 10.dp),
                         border = BorderStroke(1.dp, BorderSteel),
                         colors = ButtonDefaults.outlinedButtonColors(
-                            containerColor = ElevatedGunmetal.copy(alpha = 0.85f),
+                            containerColor = ElevatedGunmetal.copy(alpha = 0.88f),
                             contentColor = TextPrimary
                         )
                     ) {
@@ -322,12 +442,12 @@ fun MainMenuScreen(
                         onClick = onOpenControls,
                         modifier = Modifier
                             .weight(1f)
-                            .height(52.dp)
+                            .height(50.dp)
                             .testTag("controls_editor_button"),
                         shape = CutCornerShape(topStart = 10.dp, bottomEnd = 10.dp),
                         border = BorderStroke(1.dp, TacticalAmber.copy(alpha = 0.7f)),
                         colors = ButtonDefaults.outlinedButtonColors(
-                            containerColor = ElevatedGunmetal.copy(alpha = 0.85f),
+                            containerColor = ElevatedGunmetal.copy(alpha = 0.88f),
                             contentColor = TextPrimary
                         )
                     ) {
@@ -343,26 +463,6 @@ fun MainMenuScreen(
                             style = MaterialTheme.typography.labelLarge
                         )
                     }
-                }
-
-                // Engine capability footnote
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.Center,
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Icon(
-                        imageVector = Icons.Default.Shield,
-                        contentDescription = null,
-                        tint = TextSecondary,
-                        modifier = Modifier.size(13.dp)
-                    )
-                    Spacer(modifier = Modifier.width(6.dp))
-                    Text(
-                        text = "Модели бойцов 1:1 (1.80м) • PBR Нормали • RTX Отражения",
-                        style = MaterialTheme.typography.labelSmall,
-                        color = TextSecondary
-                    )
                 }
             }
         }

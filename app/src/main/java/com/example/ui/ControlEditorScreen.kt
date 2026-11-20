@@ -12,6 +12,7 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
@@ -31,10 +32,14 @@ import androidx.compose.material.icons.filled.ArrowDownward
 import androidx.compose.material.icons.filled.ArrowUpward
 import androidx.compose.material.icons.filled.CenterFocusStrong
 import androidx.compose.material.icons.filled.Check
+import androidx.compose.material.icons.filled.ExpandLess
+import androidx.compose.material.icons.filled.ExpandMore
 import androidx.compose.material.icons.filled.GpsFixed
 import androidx.compose.material.icons.filled.OpenWith
 import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.material.icons.filled.SwapHoriz
+import androidx.compose.material.icons.filled.SwapVert
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Icon
@@ -72,6 +77,7 @@ import com.example.model.ControlWidgetConfig
 import com.example.model.ControlWidgetId
 import com.example.ui.theme.BorderSteel
 import com.example.ui.theme.ElevatedGunmetal
+import com.example.ui.theme.IceCyan
 import com.example.ui.theme.ObsidianVoid
 import com.example.ui.theme.RtxEmerald
 import com.example.ui.theme.TacticalAmber
@@ -81,6 +87,12 @@ import com.example.ui.theme.TextSecondary
 import com.example.ui.theme.ThreatCrimson
 import kotlin.math.roundToInt
 
+/**
+ * Non-obstructive Control Layout Editor:
+ * - Inspector panel can be moved TOP <-> BOTTOM in 1 tap so top AND bottom controls are 100% reachable
+ * - Can be collapsed to a tiny slim strip (95%+ of screen unobstructed!)
+ * - Automatically fades translucent while actively dragging any button
+ */
 @Composable
 fun ControlEditorScreen(
     initialLayout: ControlLayout,
@@ -91,6 +103,9 @@ fun ControlEditorScreen(
 
     var draftLayout by remember(initialLayout) { mutableStateOf(initialLayout) }
     var selectedId by remember { mutableStateOf(ControlWidgetId.FIRE_RIGHT) }
+    var dockAtTop by remember { mutableStateOf(true) }
+    var isPanelExpanded by remember { mutableStateOf(false) }
+    var isDraggingAny by remember { mutableStateOf(false) }
     val selectedWidget = draftLayout.get(selectedId)
 
     BoxWithConstraints(
@@ -102,7 +117,6 @@ fun ControlEditorScreen(
         val containerWidthPx = with(density) { maxWidth.toPx() }.coerceAtLeast(1f)
         val containerHeightPx = with(density) { maxHeight.toPx() }.coerceAtLeast(1f)
 
-        // Realistic RTX Arena Backdrop for spatial HUD alignment
         Image(
             painter = painterResource(id = R.drawable.img_editor_backdrop),
             contentDescription = "Фон редактора управления",
@@ -118,40 +132,19 @@ fun ControlEditorScreen(
             val rows = 14
             for (c in 1 until cols) {
                 val x = size.width * c / cols
-                drawLine(
-                    color = Color.White.copy(alpha = 0.08f),
-                    start = Offset(x, 0f),
-                    end = Offset(x, size.height),
-                    strokeWidth = 1f
-                )
+                drawLine(Color.White.copy(alpha = 0.08f), Offset(x, 0f), Offset(x, size.height), 1f)
             }
             for (r in 1 until rows) {
                 val y = size.height * r / rows
-                drawLine(
-                    color = Color.White.copy(alpha = 0.08f),
-                    start = Offset(0f, y),
-                    end = Offset(size.width, y),
-                    strokeWidth = 1f
-                )
+                drawLine(Color.White.copy(alpha = 0.08f), Offset(0f, y), Offset(size.width, y), 1f)
             }
-            // Active alignment guides
             val gx = selectedWidget.xFraction * size.width
             val gy = selectedWidget.yFraction * size.height
-            drawLine(
-                color = RtxEmerald.copy(alpha = 0.45f),
-                start = Offset(gx, 0f),
-                end = Offset(gx, size.height),
-                strokeWidth = 1.5f
-            )
-            drawLine(
-                color = RtxEmerald.copy(alpha = 0.45f),
-                start = Offset(0f, gy),
-                end = Offset(size.width, gy),
-                strokeWidth = 1.5f
-            )
+            drawLine(RtxEmerald.copy(alpha = 0.48f), Offset(gx, 0f), Offset(gx, size.height), 1.5f)
+            drawLine(RtxEmerald.copy(alpha = 0.48f), Offset(0f, gy), Offset(size.width, gy), 1.5f)
         }
 
-        // Draggable Control Widgets
+        // Draggable Control Widgets (placed ABOVE backdrop so every corner is freely draggable!)
         ControlWidgetId.entries.forEach { id ->
             val cfg = draftLayout.get(id)
             val baseSizeDp = widgetBaseSizeDp(id)
@@ -176,14 +169,19 @@ fun ControlEditorScreen(
                     }
                     .pointerInput(id, containerWidthPx, containerHeightPx) {
                         detectDragGestures(
-                            onDragStart = { selectedId = id },
+                            onDragStart = {
+                                selectedId = id
+                                isDraggingAny = true
+                            },
+                            onDragEnd = { isDraggingAny = false },
+                            onDragCancel = { isDraggingAny = false },
                             onDrag = { change, dragAmount ->
                                 change.consume()
                                 val current = draftLayout.get(id)
                                 val nx = (current.xFraction + dragAmount.x / containerWidthPx)
-                                    .coerceIn(0.06f, 0.94f)
+                                    .coerceIn(0.05f, 0.95f)
                                 val ny = (current.yFraction + dragAmount.y / containerHeightPx)
-                                    .coerceIn(0.06f, 0.94f)
+                                    .coerceIn(0.05f, 0.95f)
                                 draftLayout = draftLayout.updateWidget(
                                     current.copy(xFraction = nx, yFraction = ny)
                                 )
@@ -201,26 +199,26 @@ fun ControlEditorScreen(
             }
         }
 
-        // Top Floating Toolbar + Selected Widget Inspector
-        Column(
+        // Compact, Collapsible & Relocatable (Top <-> Bottom) Inspector Panel
+        Box(
             modifier = Modifier
-                .align(Alignment.TopCenter)
+                .align(if (dockAtTop) Alignment.TopCenter else Alignment.BottomCenter)
                 .safeDrawingPadding()
-                .padding(horizontal = 12.dp, vertical = 8.dp)
-                .widthIn(max = 560.dp)
-                .fillMaxWidth(),
-            verticalArrangement = Arrangement.spacedBy(8.dp)
+                .padding(horizontal = 10.dp, vertical = 6.dp)
+                .widthIn(max = 520.dp)
+                .fillMaxWidth()
+                .alpha(if (isDraggingAny) 0.16f else 1.0f)
         ) {
-            // Header + Save / Cancel
             Surface(
                 color = TacticalSurface.copy(alpha = 0.92f),
                 shape = CutCornerShape(topStart = 10.dp, bottomEnd = 10.dp),
-                border = BorderStroke(1.dp, BorderSteel)
+                border = BorderStroke(1.dp, if (isPanelExpanded) RtxEmerald.copy(alpha = 0.65f) else BorderSteel)
             ) {
                 Column(
-                    modifier = Modifier.padding(10.dp),
-                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                    modifier = Modifier.padding(horizontal = 8.dp, vertical = 6.dp),
+                    verticalArrangement = Arrangement.spacedBy(6.dp)
                 ) {
+                    // Always-compact single-row bar (only ~44dp tall when collapsed!)
                     Row(
                         modifier = Modifier.fillMaxWidth(),
                         verticalAlignment = Alignment.CenterVertically,
@@ -230,74 +228,122 @@ fun ControlEditorScreen(
                             IconButton(
                                 onClick = onCancel,
                                 modifier = Modifier
-                                    .size(36.dp)
+                                    .size(34.dp)
                                     .testTag("editor_cancel_button")
                             ) {
                                 Icon(
                                     Icons.AutoMirrored.Filled.ArrowBack,
                                     contentDescription = "Отмена",
-                                    tint = TextPrimary
+                                    tint = TextPrimary,
+                                    modifier = Modifier.size(18.dp)
                                 )
                             }
-                            Spacer(modifier = Modifier.width(4.dp))
                             Text(
-                                text = "РЕДАКТОР HUD",
-                                style = MaterialTheme.typography.titleMedium,
-                                color = TextPrimary
+                                text = selectedWidget.id.labelRu.uppercase(),
+                                style = MaterialTheme.typography.labelLarge,
+                                color = RtxEmerald
                             )
                         }
 
-                        Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(4.dp)
+                        ) {
+                            // Dock Top <-> Bottom toggle so NO button is ever blocked!
                             OutlinedButton(
-                                onClick = { draftLayout = ControlLayout.defaultTwoFinger() },
+                                onClick = { dockAtTop = !dockAtTop },
                                 shape = CutCornerShape(6.dp),
-                                border = BorderStroke(1.dp, BorderSteel),
+                                border = BorderStroke(1.dp, IceCyan.copy(alpha = 0.7f)),
+                                contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp),
                                 modifier = Modifier
-                                    .height(36.dp)
-                                    .testTag("editor_preset_2finger")
+                                    .height(32.dp)
+                                    .testTag("editor_dock_toggle")
                             ) {
-                                Text("2 П.", style = MaterialTheme.typography.labelMedium, color = TextPrimary)
+                                Icon(
+                                    Icons.Default.SwapVert,
+                                    contentDescription = "Переместить панель вверх или вниз",
+                                    tint = IceCyan,
+                                    modifier = Modifier.size(15.dp)
+                                )
+                                Spacer(modifier = Modifier.width(3.dp))
+                                Text(
+                                    text = if (dockAtTop) "ВНИЗ" else "ВВЕРХ",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = IceCyan
+                                )
                             }
+
+                            // Expand / Collapse size & opacity panel
                             OutlinedButton(
-                                onClick = { draftLayout = ControlLayout.fourFingerClaw() },
+                                onClick = { isPanelExpanded = !isPanelExpanded },
                                 shape = CutCornerShape(6.dp),
-                                border = BorderStroke(1.dp, TacticalAmber.copy(alpha = 0.7f)),
+                                border = BorderStroke(1.dp, TacticalAmber.copy(alpha = 0.75f)),
+                                contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp),
                                 modifier = Modifier
-                                    .height(36.dp)
-                                    .testTag("editor_preset_4finger")
+                                    .height(32.dp)
+                                    .testTag("editor_expand_toggle")
                             ) {
-                                Text("4 П.", style = MaterialTheme.typography.labelMedium, color = TacticalAmber)
+                                Icon(
+                                    if (isPanelExpanded) Icons.Default.ExpandLess else Icons.Default.ExpandMore,
+                                    contentDescription = "Настройки кнопки",
+                                    tint = TacticalAmber,
+                                    modifier = Modifier.size(16.dp)
+                                )
+                                Text(
+                                    text = if (isPanelExpanded) "СКРЫТЬ" else "ОПЦИИ",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = TacticalAmber
+                                )
                             }
+
+                            // Save layout
                             Button(
                                 onClick = { onSave(draftLayout) },
                                 shape = CutCornerShape(6.dp),
+                                contentPadding = PaddingValues(horizontal = 10.dp, vertical = 0.dp),
                                 colors = ButtonDefaults.buttonColors(
                                     containerColor = RtxEmerald,
                                     contentColor = ObsidianVoid
                                 ),
                                 modifier = Modifier
-                                    .height(36.dp)
+                                    .height(32.dp)
                                     .testTag("editor_save_button")
                             ) {
-                                Icon(Icons.Default.Check, contentDescription = null, modifier = Modifier.size(16.dp))
-                                Spacer(modifier = Modifier.width(4.dp))
+                                Icon(Icons.Default.Check, contentDescription = null, modifier = Modifier.size(15.dp))
+                                Spacer(modifier = Modifier.width(3.dp))
                                 Text("ОК", style = MaterialTheme.typography.labelLarge)
                             }
                         }
                     }
 
-                    // Selected Element Property Controls
-                    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                    // Expandable Inspector for Selected Button (Scale, Opacity, Visibility, Presets)
+                    if (isPanelExpanded) {
                         Row(
                             modifier = Modifier.fillMaxWidth(),
                             horizontalArrangement = Arrangement.SpaceBetween,
                             verticalAlignment = Alignment.CenterVertically
                         ) {
-                            Text(
-                                text = "ВЫБРАНО: ${selectedWidget.id.labelRu.uppercase()}",
-                                style = MaterialTheme.typography.labelLarge,
-                                color = RtxEmerald
-                            )
+                            Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                                OutlinedButton(
+                                    onClick = { draftLayout = ControlLayout.defaultTwoFinger() },
+                                    shape = CutCornerShape(6.dp),
+                                    border = BorderStroke(1.dp, BorderSteel),
+                                    contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp),
+                                    modifier = Modifier.height(30.dp).testTag("editor_preset_2finger")
+                                ) {
+                                    Text("2 ПАЛЬЦА", style = MaterialTheme.typography.labelSmall, color = TextPrimary)
+                                }
+                                OutlinedButton(
+                                    onClick = { draftLayout = ControlLayout.fourFingerClaw() },
+                                    shape = CutCornerShape(6.dp),
+                                    border = BorderStroke(1.dp, TacticalAmber.copy(alpha = 0.7f)),
+                                    contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp),
+                                    modifier = Modifier.height(30.dp).testTag("editor_preset_4finger")
+                                ) {
+                                    Text("4 ПАЛЬЦА", style = MaterialTheme.typography.labelSmall, color = TacticalAmber)
+                                }
+                            }
+
                             if (selectedWidget.id.canHide) {
                                 Row(verticalAlignment = Alignment.CenterVertically) {
                                     Text(
@@ -305,13 +351,11 @@ fun ControlEditorScreen(
                                         style = MaterialTheme.typography.labelSmall,
                                         color = if (selectedWidget.visible) TextPrimary else ThreatCrimson
                                     )
-                                    Spacer(modifier = Modifier.width(6.dp))
+                                    Spacer(modifier = Modifier.width(4.dp))
                                     Switch(
                                         checked = selectedWidget.visible,
                                         onCheckedChange = { vis ->
-                                            draftLayout = draftLayout.updateWidget(
-                                                selectedWidget.copy(visible = vis)
-                                            )
+                                            draftLayout = draftLayout.updateWidget(selectedWidget.copy(visible = vis))
                                         },
                                         colors = SwitchDefaults.colors(
                                             checkedThumbColor = ObsidianVoid,
@@ -388,6 +432,7 @@ private fun EditorWidgetVisual(
         isSelected -> RtxEmerald
         config.id == ControlWidgetId.FIRE_RIGHT || config.id == ControlWidgetId.FIRE_LEFT -> ThreatCrimson
         config.id == ControlWidgetId.ADS -> TacticalAmber
+        config.id == ControlWidgetId.WEAPON_SWITCH -> IceCyan
         else -> Color.White.copy(alpha = 0.55f)
     }
 
@@ -395,7 +440,7 @@ private fun EditorWidgetVisual(
         modifier = Modifier
             .fillMaxSize()
             .background(
-                color = if (isSelected) RtxEmerald.copy(alpha = 0.24f) else ObsidianVoid.copy(alpha = 0.65f),
+                color = if (isSelected) RtxEmerald.copy(alpha = 0.26f) else ObsidianVoid.copy(alpha = 0.68f),
                 shape = CircleShape
             )
             .border(
@@ -426,7 +471,7 @@ private fun EditorWidgetVisual(
                     imageVector = widgetIcon(config.id),
                     contentDescription = config.id.labelRu,
                     tint = if (isSelected) RtxEmerald else TextPrimary,
-                    modifier = Modifier.size((sizeDp * 0.36f).coerceIn(16.dp, 32.dp))
+                    modifier = Modifier.size((sizeDp * 0.36f).coerceIn(16.dp, 30.dp))
                 )
                 Text(
                     text = widgetShortTag(config.id),
@@ -446,6 +491,7 @@ fun widgetBaseSizeDp(id: ControlWidgetId): Dp = when (id) {
     ControlWidgetId.RELOAD -> 56.dp
     ControlWidgetId.CROUCH -> 52.dp
     ControlWidgetId.JUMP -> 54.dp
+    ControlWidgetId.WEAPON_SWITCH -> 56.dp
     ControlWidgetId.PAUSE -> 48.dp
 }
 
@@ -456,6 +502,7 @@ fun widgetIcon(id: ControlWidgetId): ImageVector = when (id) {
     ControlWidgetId.RELOAD -> Icons.Default.Refresh
     ControlWidgetId.CROUCH -> Icons.Default.ArrowDownward
     ControlWidgetId.JUMP -> Icons.Default.ArrowUpward
+    ControlWidgetId.WEAPON_SWITCH -> Icons.Default.SwapHoriz
     ControlWidgetId.PAUSE -> Icons.Default.Pause
 }
 
@@ -466,5 +513,6 @@ fun widgetShortTag(id: ControlWidgetId): String = when (id) {
     ControlWidgetId.RELOAD -> "R"
     ControlWidgetId.CROUCH -> "С"
     ControlWidgetId.JUMP -> "ПР"
+    ControlWidgetId.WEAPON_SWITCH -> "ОРУЖ"
     ControlWidgetId.PAUSE -> "||"
 }

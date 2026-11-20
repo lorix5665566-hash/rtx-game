@@ -6,6 +6,7 @@ import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.gestures.detectDragGestures
@@ -48,9 +49,13 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.Path
+import androidx.compose.ui.graphics.PathFillType
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.input.pointer.pointerInput
@@ -70,6 +75,7 @@ import com.example.model.ControlWidgetConfig
 import com.example.model.ControlWidgetId
 import com.example.model.GameSettings
 import com.example.model.HudSnapshot
+import com.example.model.WeaponType
 import com.example.ui.theme.BorderSteel
 import com.example.ui.theme.ElevatedGunmetal
 import com.example.ui.theme.IceCyan
@@ -141,7 +147,6 @@ fun GameplayScreen(
         val widthPx = with(density) { maxWidth.toPx() }.coerceAtLeast(1f)
         val heightPx = with(density) { maxHeight.toPx() }.coerceAtLeast(1f)
 
-        // Apply live Resolution Scale to GLSurfaceView holder buffer
         LaunchedEffect(glViewRef, settings.graphics.resolutionScale, widthPx, heightPx) {
             val view = glViewRef ?: return@LaunchedEffect
             val scale = settings.graphics.resolutionScale.coerceIn(0.6f, 1.0f)
@@ -183,7 +188,12 @@ fun GameplayScreen(
             )
         }
 
-        // --- 3. DAMAGE FLASH VIGNETTE & ADS SCOPE OVERLAY ---
+        // --- 3. 4X OPTICAL SNIPER SCOPE OVERLAY (AWM .338 ADS) ---
+        if (!isPaused && !hud.isGameOver && !hud.isVictory && hud.weapon.hasSniperScope && hud.adsBlend > 0.72f) {
+            SniperScopeOverlay(modifier = Modifier.fillMaxSize())
+        }
+
+        // --- 4. DAMAGE FLASH VIGNETTE ---
         if (hud.damageFlashAlpha > 0.02f) {
             Box(
                 modifier = Modifier
@@ -197,12 +207,12 @@ fun GameplayScreen(
             )
         }
 
-        // --- 4. DYNAMIC TACTICAL CROSSHAIR & HITMARKER ---
+        // --- 5. DYNAMIC TACTICAL CROSSHAIR & HITMARKER ---
         if (!isPaused && !hud.isGameOver && !hud.isVictory) {
             CrosshairOverlay(hud = hud, modifier = Modifier.fillMaxSize())
         }
 
-        // --- 5. TOP TACTICAL HUD: RADAR, WAVE, SCORE, FPS ---
+        // --- 6. TOP TACTICAL HUD: RADAR, WAVE, SCORE, FPS ---
         Row(
             modifier = Modifier
                 .fillMaxWidth()
@@ -211,7 +221,6 @@ fun GameplayScreen(
             horizontalArrangement = Arrangement.SpaceBetween,
             verticalAlignment = Alignment.Top
         ) {
-            // Left: Live Circular Tactical Radar + Enemies Left
             Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
                 TacticalRadar(hud = hud)
                 Surface(
@@ -232,7 +241,6 @@ fun GameplayScreen(
                 }
             }
 
-            // Center: Score & Kills + FPS / RTX Telemetry
             Column(
                 horizontalAlignment = Alignment.CenterHorizontally,
                 verticalArrangement = Arrangement.spacedBy(4.dp)
@@ -247,16 +255,8 @@ fun GameplayScreen(
                         horizontalArrangement = Arrangement.spacedBy(10.dp),
                         verticalAlignment = Alignment.CenterVertically
                     ) {
-                        Text(
-                            text = "СЧЁТ ${hud.score}",
-                            style = MaterialTheme.typography.labelLarge,
-                            color = TextPrimary
-                        )
-                        Text(
-                            text = "УБ. ${hud.kills}",
-                            style = MaterialTheme.typography.labelMedium,
-                            color = RtxEmerald
-                        )
+                        Text("СЧЁТ ${hud.score}", style = MaterialTheme.typography.labelLarge, color = TextPrimary)
+                        Text("УБ. ${hud.kills}", style = MaterialTheme.typography.labelMedium, color = RtxEmerald)
                     }
                 }
                 if (settings.graphics.showFps) {
@@ -274,11 +274,10 @@ fun GameplayScreen(
                 }
             }
 
-            // Spacer balancing right side for custom-placed Pause button
             Spacer(modifier = Modifier.width(56.dp))
         }
 
-        // --- 6. WAVE / EVENT BANNER ---
+        // --- 7. WAVE / EVENT BANNER ---
         if (hud.bannerText.isNotEmpty() && !hud.isGameOver && !hud.isVictory) {
             Surface(
                 color = ObsidianVoid.copy(alpha = 0.80f),
@@ -298,75 +297,113 @@ fun GameplayScreen(
             }
         }
 
-        // --- 7. BOTTOM TELEMETRY: HP, ARMOR & AMMO ---
-        Row(
+        // --- 8. BOTTOM TELEMETRY: 1-TAP WEAPON STRIP + HP / ARMOR / AMMO ---
+        Column(
             modifier = Modifier
                 .align(Alignment.BottomCenter)
                 .safeDrawingPadding()
                 .padding(horizontal = 14.dp, vertical = 8.dp)
-                .widthIn(max = 320.dp)
+                .widthIn(max = 330.dp)
                 .fillMaxWidth(),
-            horizontalArrangement = Arrangement.SpaceBetween,
-            verticalAlignment = Alignment.Bottom
+            verticalArrangement = Arrangement.spacedBy(5.dp)
         ) {
-            // HP & Armor Bars
-            Surface(
-                color = ObsidianVoid.copy(alpha = 0.72f),
-                shape = CutCornerShape(topStart = 8.dp, bottomEnd = 8.dp),
-                border = BorderStroke(1.dp, BorderSteel),
-                modifier = Modifier.weight(1f)
+            // 1-Tap Arsenal Switcher Strip: M4A1 | AK-47 | AWM
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(6.dp)
             ) {
-                Column(
-                    modifier = Modifier.padding(horizontal = 10.dp, vertical = 7.dp),
-                    verticalArrangement = Arrangement.spacedBy(5.dp)
-                ) {
-                    StatusBarRow(label = "БР", value = hud.armor, color = IceCyan)
-                    StatusBarRow(
-                        label = "HP",
-                        value = hud.hp,
-                        color = if (hud.hp <= 30) ThreatCrimson else RtxEmerald
-                    )
+                WeaponType.entries.forEach { w ->
+                    val active = hud.weapon == w
+                    val shape = CutCornerShape(6.dp)
+                    Box(
+                        modifier = Modifier
+                            .weight(1f)
+                            .clip(shape)
+                            .background(
+                                if (active) TacticalAmber.copy(alpha = 0.28f)
+                                else ObsidianVoid.copy(alpha = 0.65f)
+                            )
+                            .border(
+                                width = if (active) 1.5.dp else 1.dp,
+                                color = if (active) TacticalAmber else BorderSteel.copy(alpha = 0.7f),
+                                shape = shape
+                            )
+                            .clickable { engine.selectWeapon(w) }
+                            .padding(vertical = 4.dp)
+                            .testTag("hud_weapon_${w.name.lowercase()}"),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Text(
+                            text = w.shortLabel,
+                            style = MaterialTheme.typography.labelSmall,
+                            color = if (active) TacticalAmber else TextSecondary
+                        )
+                    }
                 }
             }
 
-            Spacer(modifier = Modifier.width(8.dp))
-
-            // Ammo Magazine Counter
-            Surface(
-                color = ObsidianVoid.copy(alpha = 0.76f),
-                shape = CutCornerShape(topStart = 8.dp, bottomEnd = 8.dp),
-                border = BorderStroke(
-                    1.dp,
-                    if (hud.ammo <= 7) ThreatCrimson else RtxEmerald.copy(alpha = 0.6f)
-                )
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.Bottom
             ) {
-                Column(
-                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp),
-                    horizontalAlignment = Alignment.End
+                Surface(
+                    color = ObsidianVoid.copy(alpha = 0.72f),
+                    shape = CutCornerShape(topStart = 8.dp, bottomEnd = 8.dp),
+                    border = BorderStroke(1.dp, BorderSteel),
+                    modifier = Modifier.weight(1f)
                 ) {
-                    Text(
-                        text = if (hud.isReloading) "ПЕРЕЗАРЯДКА" else "M4-X RTX",
-                        style = MaterialTheme.typography.labelSmall,
-                        color = if (hud.isReloading) TacticalAmber else TextSecondary
+                    Column(
+                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 7.dp),
+                        verticalArrangement = Arrangement.spacedBy(5.dp)
+                    ) {
+                        StatusBarRow(label = "БР", value = hud.armor, color = IceCyan)
+                        StatusBarRow(
+                            label = "HP",
+                            value = hud.hp,
+                            color = if (hud.hp <= 30) ThreatCrimson else RtxEmerald
+                        )
+                    }
+                }
+
+                Spacer(modifier = Modifier.width(8.dp))
+
+                Surface(
+                    color = ObsidianVoid.copy(alpha = 0.78f),
+                    shape = CutCornerShape(topStart = 8.dp, bottomEnd = 8.dp),
+                    border = BorderStroke(
+                        1.dp,
+                        if (hud.ammo <= maxOf(1, hud.magSize / 4)) ThreatCrimson else RtxEmerald.copy(alpha = 0.6f)
                     )
-                    Row(verticalAlignment = Alignment.Bottom) {
+                ) {
+                    Column(
+                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp),
+                        horizontalAlignment = Alignment.End
+                    ) {
                         Text(
-                            text = hud.ammo.toString().padStart(2, '0'),
-                            style = MaterialTheme.typography.headlineMedium,
-                            color = if (hud.ammo <= 7) ThreatCrimson else TextPrimary
+                            text = if (hud.isReloading) "ПЕРЕЗАРЯДКА" else hud.weapon.shortLabel,
+                            style = MaterialTheme.typography.labelSmall,
+                            color = if (hud.isReloading) TacticalAmber else TextSecondary
                         )
-                        Text(
-                            text = " / ${if (hud.reserveAmmo >= 999) "∞" else hud.reserveAmmo}",
-                            style = MaterialTheme.typography.labelMedium,
-                            color = TextSecondary,
-                            modifier = Modifier.padding(bottom = 3.dp)
-                        )
+                        Row(verticalAlignment = Alignment.Bottom) {
+                            Text(
+                                text = hud.ammo.toString().padStart(2, '0'),
+                                style = MaterialTheme.typography.headlineMedium,
+                                color = if (hud.ammo <= maxOf(1, hud.magSize / 4)) ThreatCrimson else TextPrimary
+                            )
+                            Text(
+                                text = " / ${if (hud.reserveAmmo >= 999) "∞" else hud.reserveAmmo}",
+                                style = MaterialTheme.typography.labelMedium,
+                                color = TextSecondary,
+                                modifier = Modifier.padding(bottom = 3.dp)
+                            )
+                        }
                     }
                 }
             }
         }
 
-        // --- 8. CUSTOMIZABLE MULTI-TOUCH GAMEPLAY CONTROLS ---
+        // --- 9. CUSTOMIZABLE MULTI-TOUCH GAMEPLAY CONTROLS ---
         if (!isPaused && !hud.isGameOver && !hud.isVictory) {
             val layout = settings.controlLayout
             ControlWidgetId.entries.forEach { id ->
@@ -431,6 +468,13 @@ fun GameplayScreen(
                             accent = RtxEmerald,
                             onTap = { engine.triggerJump() }
                         )
+                        ControlWidgetId.WEAPON_SWITCH -> ActionHoldTapButton(
+                            config = cfg,
+                            sizeDp = scaledDp,
+                            isActive = false,
+                            accent = IceCyan,
+                            onTap = { engine.cycleWeapon() }
+                        )
                         ControlWidgetId.PAUSE -> ActionHoldTapButton(
                             config = cfg,
                             sizeDp = scaledDp,
@@ -443,7 +487,7 @@ fun GameplayScreen(
             }
         }
 
-        // --- 9. PAUSE OVERLAY ---
+        // --- 10. PAUSE OVERLAY ---
         if (isPaused && !hud.isGameOver && !hud.isVictory) {
             PauseOverlay(
                 onResume = { onSetPaused(false) },
@@ -454,7 +498,7 @@ fun GameplayScreen(
             )
         }
 
-        // --- 10. VICTORY / GAME OVER DEBRIEF OVERLAY ---
+        // --- 11. VICTORY / GAME OVER DEBRIEF OVERLAY ---
         if (hud.isGameOver || hud.isVictory) {
             MatchEndOverlay(
                 hud = hud,
@@ -462,6 +506,56 @@ fun GameplayScreen(
                 onExit = onExitToMenu
             )
         }
+    }
+}
+
+@Composable
+private fun SniperScopeOverlay(modifier: Modifier = Modifier) {
+    Canvas(modifier = modifier) {
+        val cx = size.width * 0.5f
+        val cy = size.height * 0.5f
+        val radius = size.minDimension * 0.44f
+
+        // Pitch-black outer scope aperture using EvenOdd path
+        val maskPath = Path().apply {
+            fillType = PathFillType.EvenOdd
+            addRect(Rect(0f, 0f, size.width, size.height))
+            addOval(Rect(cx - radius, cy - radius, cx + radius, cy + radius))
+        }
+        drawPath(maskPath, color = Color.Black.copy(alpha = 0.96f))
+
+        // Optical glass inner edge ring
+        drawCircle(
+            color = Color.Black,
+            radius = radius,
+            center = Offset(cx, cy),
+            style = Stroke(width = 6.dp.toPx())
+        )
+
+        // Razor-thin mil-dot reticle crosshairs
+        val lineCol = Color.Black.copy(alpha = 0.92f)
+        drawLine(lineCol, Offset(cx - radius, cy), Offset(cx + radius, cy), 1.4.dp.toPx())
+        drawLine(lineCol, Offset(cx, cy - radius), Offset(cx, cy + radius), 1.4.dp.toPx())
+
+        // Thick outer stadia bars
+        val stadiaStart = radius * 0.56f
+        val thick = 3.5.dp.toPx()
+        drawLine(Color.Black, Offset(cx - radius, cy), Offset(cx - stadiaStart, cy), thick)
+        drawLine(Color.Black, Offset(cx + stadiaStart, cy), Offset(cx + radius, cy), thick)
+        drawLine(Color.Black, Offset(cx, cy + stadiaStart), Offset(cx, cy + radius), thick)
+
+        // Mil-dot elevation & windage ticks
+        val step = radius * 0.12f
+        val tick = 4.dp.toPx()
+        for (i in 1..4) {
+            drawLine(lineCol, Offset(cx - tick, cy + step * i), Offset(cx + tick, cy + step * i), 1.5.dp.toPx())
+            drawLine(lineCol, Offset(cx - tick, cy - step * i), Offset(cx + tick, cy - step * i), 1.5.dp.toPx())
+            drawLine(lineCol, Offset(cx - step * i, cy - tick), Offset(cx - step * i, cy + tick), 1.5.dp.toPx())
+            drawLine(lineCol, Offset(cx + step * i, cy - tick), Offset(cx + step * i, cy + tick), 1.5.dp.toPx())
+        }
+
+        // Illuminated center sniper dot
+        drawCircle(ThreatCrimson, radius = 2.6.dp.toPx(), center = Offset(cx, cy))
     }
 }
 
@@ -661,41 +755,39 @@ private fun ReloadActionButton(
 
 @Composable
 private fun CrosshairOverlay(hud: HudSnapshot, modifier: Modifier = Modifier) {
+    val inSniperScope = hud.weapon.hasSniperScope && hud.adsBlend > 0.72f
     Box(modifier = modifier, contentAlignment = Alignment.Center) {
         Canvas(modifier = Modifier.size(110.dp)) {
             val c = Offset(size.width * 0.5f, size.height * 0.5f)
-            if (hud.isAds) {
-                // Crisp EOTech Holographic RTX Reticle
-                drawCircle(
-                    color = RtxEmerald.copy(alpha = 0.85f),
-                    radius = 22.dp.toPx(),
-                    center = c,
-                    style = Stroke(width = 1.6.dp.toPx())
-                )
-                drawCircle(
-                    color = RtxEmerald,
-                    radius = 2.4.dp.toPx(),
-                    center = c
-                )
-                val tick = 6.dp.toPx()
-                val r = 22.dp.toPx()
-                drawLine(RtxEmerald, Offset(c.x - r - tick, c.y), Offset(c.x - r + 2f, c.y), 2.dp.toPx())
-                drawLine(RtxEmerald, Offset(c.x + r - 2f, c.y), Offset(c.x + r + tick, c.y), 2.dp.toPx())
-                drawLine(RtxEmerald, Offset(c.x, c.y - r - tick), Offset(c.x, c.y - r + 2f), 2.dp.toPx())
-                drawLine(RtxEmerald, Offset(c.x, c.y + r - 2f), Offset(c.x, c.y + r + tick), 2.dp.toPx())
-            } else {
-                val gap = (8f + hud.crosshairSpread).dp.toPx()
-                val arm = 10.dp.toPx()
-                val col = Color.White.copy(alpha = 0.88f)
-                val stroke = 2.dp.toPx()
-                drawLine(col, Offset(c.x - gap - arm, c.y), Offset(c.x - gap, c.y), stroke, StrokeCap.Round)
-                drawLine(col, Offset(c.x + gap, c.y), Offset(c.x + gap + arm, c.y), stroke, StrokeCap.Round)
-                drawLine(col, Offset(c.x, c.y - gap - arm), Offset(c.x, c.y - gap), stroke, StrokeCap.Round)
-                drawLine(col, Offset(c.x, c.y + gap), Offset(c.x, c.y + gap + arm), stroke, StrokeCap.Round)
-                drawCircle(RtxEmerald, radius = 1.8.dp.toPx(), center = c)
+            if (!inSniperScope) {
+                if (hud.isAds) {
+                    val retCol = if (hud.weapon == WeaponType.AK47) TacticalAmber else RtxEmerald
+                    drawCircle(
+                        color = retCol.copy(alpha = 0.82f),
+                        radius = 20.dp.toPx(),
+                        center = c,
+                        style = Stroke(width = 1.5.dp.toPx())
+                    )
+                    drawCircle(color = retCol, radius = 2.4.dp.toPx(), center = c)
+                    val tick = 6.dp.toPx()
+                    val r = 20.dp.toPx()
+                    drawLine(retCol, Offset(c.x - r - tick, c.y), Offset(c.x - r + 2f, c.y), 2.dp.toPx())
+                    drawLine(retCol, Offset(c.x + r - 2f, c.y), Offset(c.x + r + tick, c.y), 2.dp.toPx())
+                    drawLine(retCol, Offset(c.x, c.y - r - tick), Offset(c.x, c.y - r + 2f), 2.dp.toPx())
+                    drawLine(retCol, Offset(c.x, c.y + r - 2f), Offset(c.x, c.y + r + tick), 2.dp.toPx())
+                } else {
+                    val gap = (8f + hud.crosshairSpread).dp.toPx()
+                    val arm = 10.dp.toPx()
+                    val col = Color.White.copy(alpha = 0.88f)
+                    val stroke = 2.dp.toPx()
+                    drawLine(col, Offset(c.x - gap - arm, c.y), Offset(c.x - gap, c.y), stroke, StrokeCap.Round)
+                    drawLine(col, Offset(c.x + gap, c.y), Offset(c.x + gap + arm, c.y), stroke, StrokeCap.Round)
+                    drawLine(col, Offset(c.x, c.y - gap - arm), Offset(c.x, c.y - gap), stroke, StrokeCap.Round)
+                    drawLine(col, Offset(c.x, c.y + gap), Offset(c.x, c.y + gap + arm), stroke, StrokeCap.Round)
+                    drawCircle(RtxEmerald, radius = 1.8.dp.toPx(), center = c)
+                }
             }
 
-            // Crisp Hitmarker X
             if (hud.hitMarkerAlpha > 0.02f) {
                 val hmCol = (if (hud.isHeadshotHit) ThreatCrimson else Color.White)
                     .copy(alpha = hud.hitMarkerAlpha)
@@ -733,13 +825,10 @@ private fun TacticalRadar(hud: HudSnapshot) {
         drawCircle(RtxEmerald.copy(alpha = 0.22f), r * 0.55f, c, style = Stroke(1f))
         drawLine(RtxEmerald.copy(alpha = 0.22f), Offset(c.x, c.y - r), Offset(c.x, c.y + r), 1f)
         drawLine(RtxEmerald.copy(alpha = 0.22f), Offset(c.x - r, c.y), Offset(c.x + r, c.y), 1f)
-
-        // Player FOV cone pointing UP
         drawLine(RtxEmerald.copy(alpha = 0.45f), c, Offset(c.x - r * 0.45f, c.y - r * 0.82f), 1.5f)
         drawLine(RtxEmerald.copy(alpha = 0.45f), c, Offset(c.x + r * 0.45f, c.y - r * 0.82f), 1.5f)
         drawCircle(RtxEmerald, 3.dp.toPx(), c)
 
-        // Enemy blips
         for (blip in hud.radarBlips) {
             val bx = c.x + blip.relX * r
             val by = c.y - blip.relZ * r

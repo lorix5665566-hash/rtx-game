@@ -33,22 +33,10 @@ class ShooterGlRenderer(
     private val modelMatrix = FloatArray(16)
     private val skyViewMatrix = FloatArray(16)
     private val weaponProjMatrix = FloatArray(16)
-    private val identityMatrix = FloatArray(16)
 
-    // 4 dynamic point lights (Emerald gantry, Amber left beacon, Cyan right beacon, Live Muzzle Flash)
-    private val lightPositions = floatArrayOf(
-        0.0f, 3.0f, -5.5f,
-        -10.5f, 2.5f, -1.0f,
-        10.5f, 2.5f, -1.0f,
-        0.0f, 1.5f, 10.0f
-    )
-    private val lightColors = floatArrayOf(
-        0.0f, 2.2f, 1.55f,
-        2.4f, 1.35f, 0.25f,
-        0.25f, 1.85f, 2.6f,
-        3.5f, 2.1f, 0.7f
-    )
-    private val lightRadii = floatArrayOf(18.0f, 16.0f, 16.0f, 0.1f)
+    private val lightPositions = FloatArray(12)
+    private val lightColors = FloatArray(12)
+    private val lightRadii = FloatArray(4)
 
     override fun onSurfaceCreated(gl: GL10?, config: EGLConfig?) {
         GLES30.glClearColor(0.03f, 0.045f, 0.075f, 1f)
@@ -65,7 +53,6 @@ class ShooterGlRenderer(
         floorQuad = MeshBuilder.createFloorQuad(44.4f, 44.4f)
         skyCube = MeshBuilder.createBox(2f, 2f, 2f)
         sparkMesh = MeshBuilder.createEllipsoid(0.08f, 0.08f, 0.08f, 6, 8)
-        Matrix.setIdentityM(identityMatrix, 0)
         lastFrameNs = System.nanoTime()
     }
 
@@ -85,14 +72,17 @@ class ShooterGlRenderer(
         val sh = shader ?: return
         val tex = textures ?: return
         val gfx: GraphicsSettings = engine.settings.graphics
+        val world = engine.world
+        val atm = world.atmosphere
 
         GLES30.glViewport(0, 0, surfaceWidth, surfaceHeight)
         GLES30.glClear(GLES30.GL_COLOR_BUFFER_BIT or GLES30.GL_DEPTH_BUFFER_BIT)
 
         val aspect = surfaceWidth.toFloat() / surfaceHeight.toFloat()
         val baseFov = gfx.fov.coerceIn(65f, 105f)
-        val liveFov = baseFov * (1f - engine.adsBlend * 0.36f)
-        Matrix.perspectiveM(projMatrix, 0, liveFov, aspect, 0.08f, 140f)
+        val zoomTarget = engine.activeWeapon.adsZoomFactor
+        val liveFov = baseFov * (1f - engine.adsBlend * (1f - zoomTarget))
+        Matrix.perspectiveM(projMatrix, 0, liveFov, aspect, 0.08f, 150f)
 
         val camX = engine.playerX
         val camY = engine.playerY + engine.eyeHeight
@@ -105,38 +95,45 @@ class ShooterGlRenderer(
         Matrix.setLookAtM(viewMatrix, 0, camX, camY, camZ, lookX, lookY, lookZ, 0f, 1f, 0f)
         Matrix.multiplyMM(vpMatrix, 0, projMatrix, 0, viewMatrix, 0)
 
-        // --- 1. ATMOSPHERIC NIGHT-STORM SKYBOX DOME ---
+        // --- 1. MAP-SPECIFIC ATMOSPHERIC SKYBOX ---
         GLES30.glDepthMask(false)
         GLES30.glDisable(GLES30.GL_CULL_FACE)
         GLES30.glUseProgram(sh.skyProgramId)
         System.arraycopy(viewMatrix, 0, skyViewMatrix, 0, 16)
-        skyViewMatrix[12] = 0f
-        skyViewMatrix[13] = 0f
-        skyViewMatrix[14] = 0f
+        skyViewMatrix[12] = 0f; skyViewMatrix[13] = 0f; skyViewMatrix[14] = 0f
         Matrix.multiplyMM(mvpMatrix, 0, projMatrix, 0, skyViewMatrix, 0)
         GLES30.glUniformMatrix4fv(sh.skyUMvp, 1, false, mvpMatrix, 0)
         GLES30.glUniform1f(sh.skyUTime, engine.timeSec)
         GLES30.glUniform1i(sh.skyUBloomAces, if (gfx.bloomAndAces) 1 else 0)
+        GLES30.glUniform3fv(sh.skyUTopColor, 1, atm.skyTopColor, 0)
+        GLES30.glUniform3fv(sh.skyUHorizonColor, 1, atm.skyHorizonColor, 0)
+        GLES30.glUniform3fv(sh.skyUSunDir, 1, atm.sunDir, 0)
+        GLES30.glUniform3fv(sh.skyUSunGlow, 1, atm.skySunGlow, 0)
         skyCube?.draw()
         GLES30.glEnable(GLES30.GL_CULL_FACE)
         GLES30.glDepthMask(true)
 
-        // --- 2. BIND PBR/RTX SHADER & DYNAMIC LIGHTS ---
+        // --- 2. PBR/RTX SHADER & DYNAMIC LIGHTS ---
         GLES30.glUseProgram(sh.programId)
         GLES30.glUniform3f(sh.uCamPos, camX, camY, camZ)
         GLES30.glUniform1f(sh.uTime, engine.timeSec)
-        GLES30.glUniform3f(sh.uSunDir, 0.42f, 0.68f, -0.60f)
-        GLES30.glUniform3f(sh.uSunColor, 0.92f, 1.04f, 1.25f)
+        GLES30.glUniform3fv(sh.uSunDir, 1, atm.sunDir, 0)
+        GLES30.glUniform3fv(sh.uSunColor, 1, atm.sunColor, 0)
+        GLES30.glUniform3fv(sh.uFogColor, 1, atm.fogColor, 0)
+        GLES30.glUniform1f(sh.uFogDensity, atm.fogDensity)
 
-        // Live Light #3 tracks player muzzle flash (illuminating wet floor, walls & soldiers!)
+        System.arraycopy(atm.lightPositions, 0, lightPositions, 0, 12)
+        System.arraycopy(atm.lightColors, 0, lightColors, 0, 12)
+        System.arraycopy(atm.lightRadii, 0, lightRadii, 0, 4)
+
         val flashIntensity = engine.muzzleFlashTimer.coerceIn(0f, 1f)
         lightPositions[9] = camX - sin(engine.playerYawRad) * 1.1f
         lightPositions[10] = camY - 0.1f
         lightPositions[11] = camZ - cos(engine.playerYawRad) * 1.1f
-        lightColors[9] = 4.5f * flashIntensity
+        lightColors[9] = 4.6f * flashIntensity
         lightColors[10] = 2.6f * flashIntensity
         lightColors[11] = 0.85f * flashIntensity
-        lightRadii[3] = if (flashIntensity > 0.02f) 14.0f else 0.1f
+        lightRadii[3] = if (flashIntensity > 0.02f) 14.5f else 0.1f
 
         GLES30.glUniform3fv(sh.uLightPos, 4, lightPositions, 0)
         GLES30.glUniform3fv(sh.uLightColor, 4, lightColors, 0)
@@ -150,27 +147,20 @@ class ShooterGlRenderer(
         GLES30.glUniform1i(sh.uAlbedoTex, 0)
         GLES30.glUniform1i(sh.uNormalTex, 1)
 
-        // --- 3. WET RTX REFLECTIVE COURTYARD FLOOR ---
+        // --- 3. MAP FLOOR ---
         Matrix.setIdentityM(modelMatrix, 0)
         drawMesh(
-            sh = sh,
-            tex = tex,
-            mesh = floorQuad ?: return,
-            model = modelMatrix,
-            vp = vpMatrix,
-            material = MaterialTexture.WET_ASPHALT,
-            r = 0.92f, g = 0.96f, b = 1.0f,
-            metallic = 0.12f,
-            roughness = 0.44f,
-            er = 0f, eg = 0f, eb = 0f,
-            reflectivity = 1.0f,
-            uvScaleX = 11f,
-            uvScaleY = 11f
+            sh = sh, tex = tex, mesh = floorQuad ?: return, model = modelMatrix, vp = vpMatrix,
+            material = atm.floorTexture,
+            r = atm.floorColor[0], g = atm.floorColor[1], b = atm.floorColor[2],
+            metallic = 0.10f, roughness = atm.floorRoughness,
+            er = 0f, eg = 0f, eb = 0f, reflectivity = atm.floorReflectivity,
+            uvScaleX = 11f, uvScaleY = 11f
         )
 
-        // --- 4. URBAN ARENA BUNKERS, WALLS, CRATES & NEON BEACONS ---
+        // --- 4. MAP STRUCTURES & COVER ---
         val box = unitBox ?: return
-        for (b in engine.world.blocks) {
+        for (b in world.blocks) {
             Matrix.setIdentityM(modelMatrix, 0)
             Matrix.translateM(modelMatrix, 0, b.cx, b.cy, b.cz)
             Matrix.scaleM(modelMatrix, 0, b.sx, b.sy, b.sz)
@@ -184,7 +174,7 @@ class ShooterGlRenderer(
             )
         }
 
-        // --- 5. 1:1 ANATOMICAL HUMAN SOLDIER MODELS ---
+        // --- 5. REALISTIC 1:1 HUMAN SOLDIERS IN BALLISTIC VESTS ---
         val soldier = soldierModel ?: return
         for (enemy in engine.enemies) {
             soldier.draw(enemy, engine.timeSec) { mesh, mat, matTex, r, g, b, met, rough, er, eg, eb, refl ->
@@ -192,7 +182,7 @@ class ShooterGlRenderer(
             }
         }
 
-        // --- 6. IMPACT SPARKS & ENEMY TRACER FLASHES ---
+        // --- 6. IMPACT SPARKS & TRACERS ---
         val spark = sparkMesh ?: return
         for (fx in engine.impacts) {
             val s = (fx.life * 4.5f).coerceIn(0.2f, 1.4f)
@@ -200,19 +190,19 @@ class ShooterGlRenderer(
             Matrix.translateM(modelMatrix, 0, fx.x, fx.y, fx.z)
             Matrix.scaleM(modelMatrix, 0, s, s, s)
             if (fx.isEnemy) {
-                drawMesh(sh, tex, spark, modelMatrix, vpMatrix, MaterialTexture.VISOR_GLASS, 1f, 0.3f, 0.2f, 0f, 1f, 3.2f, 0.7f, 0.25f, 0f, 1f, 1f)
+                drawMesh(sh, tex, spark, modelMatrix, vpMatrix, MaterialTexture.VISOR_GLASS, 1f, 0.35f, 0.2f, 0f, 1f, 3.0f, 0.8f, 0.25f, 0f, 1f, 1f)
             } else {
-                drawMesh(sh, tex, spark, modelMatrix, vpMatrix, MaterialTexture.VISOR_GLASS, 0.3f, 1f, 0.8f, 0f, 1f, 0.4f, 2.8f, 2.0f, 0f, 1f, 1f)
+                drawMesh(sh, tex, spark, modelMatrix, vpMatrix, MaterialTexture.VISOR_GLASS, 1f, 0.85f, 0.4f, 0f, 1f, 2.8f, 2.1f, 0.85f, 0f, 1f, 1f)
             }
         }
 
-        // --- 7. FIRST-PERSON 3D TACTICAL RIFLE VIEWMODEL ---
+        // --- 7. FIRST-PERSON 3D FIREARM VIEWMODEL (M4A1 / AK-47 / AWM SNIPER) ---
         GLES30.glClear(GLES30.GL_DEPTH_BUFFER_BIT)
         Matrix.perspectiveM(weaponProjMatrix, 0, 62f, aspect, 0.03f, 10f)
         GLES30.glUniform3f(sh.uCamPos, 0f, 0f, 0f)
         val hud = engine.latestHud
-        val ammoRatio = hud.ammo.toFloat() / hud.magSize.coerceAtLeast(1)
         weaponModel?.draw(
+            weapon = engine.activeWeapon,
             adsBlend = engine.adsBlend,
             walkBobPhase = engine.walkBobPhase,
             moveSpeedRatio = engine.moveSpeedRatio,
@@ -220,7 +210,7 @@ class ShooterGlRenderer(
             reloadProgress = hud.reloadProgress,
             isReloading = hud.isReloading,
             muzzleFlash = engine.muzzleFlashTimer,
-            ammoRatio = ammoRatio
+            boltProgress = engine.boltProgress
         ) { mesh, mat, matTex, r, g, b, met, rough, er, eg, eb, refl ->
             drawMesh(sh, tex, mesh, mat, weaponProjMatrix, matTex, r, g, b, met, rough, er, eg, eb, refl, 1f, 1f)
         }

@@ -39,6 +39,8 @@ fun VanguardRtxApp(vm: GameViewModel = viewModel()) {
     val settings by vm.settings.collectAsStateWithLifecycle()
     val stats by vm.stats.collectAsStateWithLifecycle()
     val selectedMode by vm.selectedMode.collectAsStateWithLifecycle()
+    val selectedMap by vm.selectedMap.collectAsStateWithLifecycle()
+    val selectedWeapon by vm.selectedWeapon.collectAsStateWithLifecycle()
     val isPaused by vm.isPauseOverlayOpen.collectAsStateWithLifecycle()
 
     when (val current = screen) {
@@ -46,7 +48,11 @@ fun VanguardRtxApp(vm: GameViewModel = viewModel()) {
             settings = settings,
             stats = stats,
             selectedMode = selectedMode,
+            selectedMap = selectedMap,
+            selectedWeapon = selectedWeapon,
             onSelectMode = vm::selectMode,
+            onSelectMap = vm::selectMap,
+            onSelectWeapon = vm::selectStartingWeapon,
             onPlay = vm::startGame,
             onOpenSettings = { vm.openSettings(fromGame = false) },
             onOpenControls = { vm.openControlEditor(fromGame = false) }

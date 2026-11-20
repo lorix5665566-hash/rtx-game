@@ -15,9 +15,89 @@ enum class GameMode(
     val titleRu: String,
     val subtitleRu: String
 ) {
-    ASSAULT("ШТУРМ", "5 волн спецназа • Тактический захват"),
+    ASSAULT("ШТУРМ", "5 волн спецназа • Зачистка сектора"),
     SURVIVAL("ВЫЖИВАНИЕ", "Бесконечные волны • Рекорд очков"),
-    RANGE("ПОЛИГОН", "Стрельбище • Отработка хедшотов")
+    RANGE("ПОЛИГОН", "Стрельбище • Тренировка оружия")
+}
+
+enum class ArenaMapId(
+    val titleRu: String,
+    val subtitleRu: String,
+    val envTagRu: String
+) {
+    INDUSTRIAL("ПРОМЗОНА", "Ночной дождь • Мокрый асфальт RTX", "НОЧЬ • RTX"),
+    HARBOR("ПОРТ-СИТИ", "Контейнерный терминал • Туман", "ТУМАН • ПОРТ"),
+    RUINS("ФОРПОСТ", "Закатная пустыня • Длинные линии", "ЗАКАТ • ПЕСОК")
+}
+
+enum class WeaponType(
+    val shortLabel: String,
+    val titleRu: String,
+    val magSize: Int,
+    val initialReserve: Int,
+    val fireIntervalSec: Float,
+    val reloadSec: Float,
+    val bodyDamage: Float,
+    val headDamage: Float,
+    val hipSpread: Float,
+    val adsSpread: Float,
+    val recoilKick: Float,
+    val recoilPitch: Float,
+    val adsZoomFactor: Float,
+    val isAutomatic: Boolean,
+    val hasSniperScope: Boolean
+) {
+    M4A1(
+        shortLabel = "M4A1",
+        titleRu = "M4A1 Тактический",
+        magSize = 30,
+        initialReserve = 180,
+        fireIntervalSec = 0.105f,
+        reloadSec = 1.55f,
+        bodyDamage = 32f,
+        headDamage = 84f,
+        hipSpread = 0.013f,
+        adsSpread = 0.0025f,
+        recoilKick = 0.45f,
+        recoilPitch = 0.011f,
+        adsZoomFactor = 0.64f,
+        isAutomatic = true,
+        hasSniperScope = false
+    ),
+    AK47(
+        shortLabel = "AK-47",
+        titleRu = "AK-47 Штурмовой",
+        magSize = 30,
+        initialReserve = 150,
+        fireIntervalSec = 0.132f,
+        reloadSec = 1.75f,
+        bodyDamage = 44f,
+        headDamage = 112f,
+        hipSpread = 0.018f,
+        adsSpread = 0.0042f,
+        recoilKick = 0.72f,
+        recoilPitch = 0.019f,
+        adsZoomFactor = 0.68f,
+        isAutomatic = true,
+        hasSniperScope = false
+    ),
+    SNIPER(
+        shortLabel = "AWM",
+        titleRu = "AWM .338 Снайпер",
+        magSize = 5,
+        initialReserve = 35,
+        fireIntervalSec = 1.05f,
+        reloadSec = 2.25f,
+        bodyDamage = 118f,
+        headDamage = 280f,
+        hipSpread = 0.045f,
+        adsSpread = 0.0004f,
+        recoilKick = 1.25f,
+        recoilPitch = 0.042f,
+        adsZoomFactor = 0.25f,
+        isAutomatic = false,
+        hasSniperScope = true
+    )
 }
 
 data class GraphicsSettings(
@@ -78,7 +158,7 @@ data class GraphicsSettings(
 
 data class SensitivitySettings(
     val lookSensitivity: Float = 1.0f,
-    val adsSensitivity: Float = 0.62f,
+    val adsSensitivity: Float = 0.58f,
     val xAxisMultiplier: Float = 1.0f,
     val yAxisMultiplier: Float = 0.85f,
     val invertY: Boolean = false,
@@ -86,7 +166,7 @@ data class SensitivitySettings(
 )
 
 data class AudioSettings(
-    val sfxVolume: Float = 0.85f,
+    val sfxVolume: Float = 0.90f,
     val hapticsEnabled: Boolean = true
 )
 
@@ -98,6 +178,7 @@ enum class ControlWidgetId(val labelRu: String, val canHide: Boolean) {
     RELOAD("Перезарядка", false),
     CROUCH("Присед", true),
     JUMP("Прыжок", true),
+    WEAPON_SWITCH("Оружие", false),
     PAUSE("Пауза", false)
 }
 
@@ -122,12 +203,13 @@ data class ControlLayout(
     companion object {
         fun defaultTwoFingerMap(): Map<ControlWidgetId, ControlWidgetConfig> = mapOf(
             ControlWidgetId.JOYSTICK to ControlWidgetConfig(ControlWidgetId.JOYSTICK, 0.16f, 0.78f, 1.0f, 0.82f, true),
-            ControlWidgetId.FIRE_RIGHT to ControlWidgetConfig(ControlWidgetId.FIRE_RIGHT, 0.85f, 0.76f, 1.1f, 0.92f, true),
+            ControlWidgetId.FIRE_RIGHT to ControlWidgetConfig(ControlWidgetId.FIRE_RIGHT, 0.85f, 0.75f, 1.1f, 0.92f, true),
             ControlWidgetId.FIRE_LEFT to ControlWidgetConfig(ControlWidgetId.FIRE_LEFT, 0.14f, 0.44f, 0.9f, 0.78f, false),
-            ControlWidgetId.ADS to ControlWidgetConfig(ControlWidgetId.ADS, 0.88f, 0.56f, 1.0f, 0.85f, true),
-            ControlWidgetId.RELOAD to ControlWidgetConfig(ControlWidgetId.RELOAD, 0.70f, 0.84f, 0.95f, 0.85f, true),
-            ControlWidgetId.CROUCH to ControlWidgetConfig(ControlWidgetId.CROUCH, 0.62f, 0.72f, 0.90f, 0.80f, true),
-            ControlWidgetId.JUMP to ControlWidgetConfig(ControlWidgetId.JUMP, 0.74f, 0.64f, 0.92f, 0.82f, true),
+            ControlWidgetId.ADS to ControlWidgetConfig(ControlWidgetId.ADS, 0.88f, 0.55f, 1.0f, 0.85f, true),
+            ControlWidgetId.RELOAD to ControlWidgetConfig(ControlWidgetId.RELOAD, 0.70f, 0.83f, 0.95f, 0.85f, true),
+            ControlWidgetId.CROUCH to ControlWidgetConfig(ControlWidgetId.CROUCH, 0.60f, 0.73f, 0.90f, 0.80f, true),
+            ControlWidgetId.JUMP to ControlWidgetConfig(ControlWidgetId.JUMP, 0.73f, 0.64f, 0.92f, 0.82f, true),
+            ControlWidgetId.WEAPON_SWITCH to ControlWidgetConfig(ControlWidgetId.WEAPON_SWITCH, 0.88f, 0.38f, 0.95f, 0.88f, true),
             ControlWidgetId.PAUSE to ControlWidgetConfig(ControlWidgetId.PAUSE, 0.92f, 0.08f, 0.95f, 0.88f, true)
         )
 
@@ -139,6 +221,7 @@ data class ControlLayout(
             ControlWidgetId.RELOAD to ControlWidgetConfig(ControlWidgetId.RELOAD, 0.70f, 0.85f, 0.95f, 0.85f, true),
             ControlWidgetId.CROUCH to ControlWidgetConfig(ControlWidgetId.CROUCH, 0.72f, 0.36f, 0.95f, 0.82f, true),
             ControlWidgetId.JUMP to ControlWidgetConfig(ControlWidgetId.JUMP, 0.86f, 0.42f, 0.95f, 0.82f, true),
+            ControlWidgetId.WEAPON_SWITCH to ControlWidgetConfig(ControlWidgetId.WEAPON_SWITCH, 0.72f, 0.22f, 0.92f, 0.85f, true),
             ControlWidgetId.PAUSE to ControlWidgetConfig(ControlWidgetId.PAUSE, 0.50f, 0.07f, 0.90f, 0.85f, true)
         )
 
@@ -171,12 +254,14 @@ data class HudSnapshot(
     val hp: Int = 100,
     val maxHp: Int = 100,
     val armor: Int = 100,
+    val weapon: WeaponType = WeaponType.M4A1,
     val ammo: Int = 30,
     val magSize: Int = 30,
-    val reserveAmmo: Int = 150,
+    val reserveAmmo: Int = 180,
     val isReloading: Boolean = false,
     val reloadProgress: Float = 0f,
     val isAds: Boolean = false,
+    val adsBlend: Float = 0f,
     val isCrouching: Boolean = false,
     val score: Int = 0,
     val wave: Int = 1,
