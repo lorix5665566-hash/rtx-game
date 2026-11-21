@@ -15,6 +15,7 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
@@ -31,7 +32,6 @@ import com.example.model.ArenaMapId
 import com.example.model.GameMode
 import com.example.model.MatchConfig
 import com.example.model.TeamSide
-import com.example.online.AuthSessionState
 import com.example.online.FirebaseAuthManager
 import com.example.online.OnlineRepository
 import com.example.ui.AppScreen
@@ -72,32 +72,33 @@ private fun VanguardAuthRoot() {
     val authManager = remember(context.applicationContext) {
         FirebaseAuthManager(context.applicationContext)
     }
-    val initialSession = remember(authManager) {
-        authManager.currentUser?.let { AuthSessionState.Authenticated(it) }
-            ?: AuthSessionState.Unauthenticated
-    }
-    val authState by remember(authManager) { authManager.observeAuthState() }
-        .collectAsStateWithLifecycle(initialValue = initialSession)
+    var currentUser by remember(authManager) { mutableStateOf(authManager.currentUser) }
 
-    when (val session = authState) {
-        AuthSessionState.Checking,
-        AuthSessionState.Unauthenticated -> {
-            AuthScreen(
-                authManager = authManager,
-                onAuthSuccess = { /* AuthStateListener emits Authenticated automatically */ }
-            )
+    DisposableEffect(authManager) {
+        val removeListener = authManager.addAuthStateListener { user ->
+            currentUser = user
         }
-        is AuthSessionState.Authenticated -> {
-            val uid = session.user.uid
-            // Key strictly by UID so every ViewModel, Firestore listener, and player state resets cleanly on account switch!
-            key(uid) {
-                VanguardRtxApp(
-                    currentUserId = uid,
-                    initialDisplayName = session.user.displayName
-                        ?: session.user.email?.substringBefore("@"),
-                    authManager = authManager
-                )
+        onDispose { removeListener() }
+    }
+
+    val user = currentUser
+    if (user == null) {
+        AuthScreen(
+            authManager = authManager,
+            onAuthSuccess = { signedInUser ->
+                currentUser = signedInUser
             }
+        )
+    } else {
+        val uid = user.uid
+        // Key strictly by UID so every ViewModel, Firestore listener, and player state resets cleanly on account switch!
+        key(uid) {
+            VanguardRtxApp(
+                currentUserId = uid,
+                initialDisplayName = user.displayName
+                    ?: user.email?.substringBefore("@"),
+                authManager = authManager
+            )
         }
     }
 }
@@ -207,6 +208,7 @@ fun VanguardRtxApp(
                 onSignOut = {
                     scope.launch {
                         authManager.signOut(
+                            uiContext = context,
                             onBeforeSignOut = { onlineVm.setOfflineBeforeSignOut() }
                         )
                     }

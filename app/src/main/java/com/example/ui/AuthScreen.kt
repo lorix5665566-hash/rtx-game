@@ -67,7 +67,7 @@ import kotlinx.coroutines.launch
 @Composable
 fun AuthScreen(
     authManager: FirebaseAuthManager,
-    onAuthSuccess: () -> Unit
+    onAuthSuccess: (com.google.firebase.auth.FirebaseUser) -> Unit
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
@@ -75,6 +75,7 @@ fun AuthScreen(
 
     var isCheckingAuto by remember { mutableStateOf(authManager.isFirebaseConfigured) }
     var isSigningIn by remember { mutableStateOf(false) }
+    var signInStage by remember { mutableStateOf("ВХОД...") }
     var errorMessage by remember {
         mutableStateOf(
             if (authManager.isFirebaseConfigured) null else FirebaseAuthManager.MISSING_CONFIG_MESSAGE
@@ -86,12 +87,12 @@ fun AuthScreen(
             isCheckingAuto = false
             return@LaunchedEffect
         }
-        when (authManager.restoreSessionOrAutoSignIn(context)) {
+        when (val result = authManager.restoreSessionOrAutoSignIn(context)) {
             is GoogleSignInResult.Success -> {
                 isCheckingAuto = false
-                onAuthSuccess()
+                onAuthSuccess(result.user)
             }
-            GoogleSignInResult.Cancelled,
+            is GoogleSignInResult.Cancelled,
             is GoogleSignInResult.Error -> {
                 isCheckingAuto = false
             }
@@ -229,15 +230,22 @@ fun AuthScreen(
                     Button(
                         onClick = {
                             errorMessage = null
+                            signInStage = "ВЫБОР АККАУНТА..."
                             isSigningIn = true
                             scope.launch {
-                                when (val result = authManager.signInWithGoogle(context)) {
+                                when (val result = authManager.signInWithGoogle(
+                                    uiContext = context,
+                                    onStageChanged = { stage -> signInStage = stage }
+                                )) {
                                     is GoogleSignInResult.Success -> {
                                         isSigningIn = false
-                                        onAuthSuccess()
+                                        onAuthSuccess(result.user)
                                     }
-                                    GoogleSignInResult.Cancelled -> {
+                                    is GoogleSignInResult.Cancelled -> {
                                         isSigningIn = false
+                                        if (!result.diagnosticReason.isNullOrBlank()) {
+                                            errorMessage = "Вход отменён (${result.diagnosticReason}). Попробуйте ещё раз."
+                                        }
                                     }
                                     is GoogleSignInResult.Error -> {
                                         isSigningIn = false
@@ -266,7 +274,7 @@ fun AuthScreen(
                             )
                             Spacer(modifier = Modifier.width(m.s(8f)))
                             Text(
-                                text = if (isCheckingAuto) "ПРОВЕРКА..." else "ВХОД...",
+                                text = if (isCheckingAuto) "ПРОВЕРКА..." else signInStage,
                                 fontSize = m.sp(12f),
                                 fontWeight = FontWeight.Black
                             )
