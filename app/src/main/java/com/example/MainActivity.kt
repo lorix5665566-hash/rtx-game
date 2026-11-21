@@ -15,7 +15,6 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
@@ -26,13 +25,14 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color as ComposeColor
 import androidx.compose.ui.platform.LocalContext
-import androidx.credentials.CredentialManager
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.example.model.ArenaMapId
 import com.example.model.GameMode
 import com.example.model.MatchConfig
 import com.example.model.TeamSide
+import com.example.online.AuthSessionState
+import com.example.online.FirebaseAuthManager
 import com.example.online.OnlineRepository
 import com.example.ui.AppScreen
 import com.example.ui.AuthScreen
@@ -45,12 +45,9 @@ import com.example.ui.MultiplayerLobbyScreen
 import com.example.ui.OnlineUiState
 import com.example.ui.OnlineViewModel
 import com.example.ui.SettingsScreen
-import com.example.ui.signOutWithGoogle
 import com.example.ui.theme.ResponsiveUiProvider
 import com.example.ui.theme.VanguardTheme
-import com.google.firebase.Firebase
-import com.google.firebase.auth.FirebaseAuth
-import com.google.firebase.auth.auth
+import kotlinx.coroutines.launch
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -71,27 +68,36 @@ class MainActivity : ComponentActivity() {
 
 @Composable
 private fun VanguardAuthRoot() {
-    var currentUser by remember { mutableStateOf(Firebase.auth.currentUser) }
-
-    DisposableEffect(Unit) {
-        val listener = FirebaseAuth.AuthStateListener { auth ->
-            currentUser = auth.currentUser
-        }
-        Firebase.auth.addAuthStateListener(listener)
-        onDispose { Firebase.auth.removeAuthStateListener(listener) }
+    val context = LocalContext.current
+    val authManager = remember(context.applicationContext) {
+        FirebaseAuthManager(context.applicationContext)
     }
+    val initialSession = remember(authManager) {
+        authManager.currentUser?.let { AuthSessionState.Authenticated(it) }
+            ?: AuthSessionState.Unauthenticated
+    }
+    val authState by remember(authManager) { authManager.observeAuthState() }
+        .collectAsStateWithLifecycle(initialValue = initialSession)
 
-    val user = currentUser
-    if (user == null) {
-        AuthScreen(onAuthSuccess = { currentUser = Firebase.auth.currentUser })
-    } else {
-        val uid = user.uid
-        // Key strictly by UID so every ViewModel, Firestore listener, and player state resets cleanly on account switch!
-        key(uid) {
-            VanguardRtxApp(
-                currentUserId = uid,
-                initialDisplayName = user.displayName ?: user.email?.substringBefore("@")
+    when (val session = authState) {
+        AuthSessionState.Checking,
+        AuthSessionState.Unauthenticated -> {
+            AuthScreen(
+                authManager = authManager,
+                onAuthSuccess = { /* AuthStateListener emits Authenticated automatically */ }
             )
+        }
+        is AuthSessionState.Authenticated -> {
+            val uid = session.user.uid
+            // Key strictly by UID so every ViewModel, Firestore listener, and player state resets cleanly on account switch!
+            key(uid) {
+                VanguardRtxApp(
+                    currentUserId = uid,
+                    initialDisplayName = session.user.displayName
+                        ?: session.user.email?.substringBefore("@"),
+                    authManager = authManager
+                )
+            }
         }
     }
 }
@@ -100,11 +106,11 @@ private fun VanguardAuthRoot() {
 fun VanguardRtxApp(
     currentUserId: String,
     initialDisplayName: String?,
+    authManager: FirebaseAuthManager,
     vm: GameViewModel = viewModel()
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
-    val credentialManager = remember(context) { CredentialManager.create(context) }
     val onlineRepo = remember(context.applicationContext) { OnlineRepository(context.applicationContext) }
     val onlineVm: OnlineViewModel = viewModel(
         key = currentUserId,
@@ -199,11 +205,11 @@ fun VanguardRtxApp(
                 onOpenSettings = { vm.openSettings(fromGame = false) },
                 onOpenControls = { vm.openControlEditor(fromGame = false) },
                 onSignOut = {
-                    signOutWithGoogle(
-                        credentialManager = credentialManager,
-                        scope = scope,
-                        onBeforeSignOut = { onlineVm.setOfflineBeforeSignOut() }
-                    )
+                    scope.launch {
+                        authManager.signOut(
+                            onBeforeSignOut = { onlineVm.setOfflineBeforeSignOut() }
+                        )
+                    }
                 }
             )
 
