@@ -35,9 +35,15 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.CutCornerShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
+import android.content.ClipData
+import android.content.ClipboardManager
+import android.content.Context
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.Logout
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.ContentCopy
+import androidx.compose.material.icons.filled.Groups
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Remove
 import androidx.compose.material.icons.filled.Settings
@@ -78,6 +84,8 @@ import com.example.model.MatchConfig
 import com.example.model.ModelAssetRegistry
 import com.example.model.PlayerStats
 import com.example.model.TeamSide
+import com.example.online.LobbyInvite
+import com.example.online.PlayerProfile
 import com.example.ui.theme.BorderSteel
 import com.example.ui.theme.ElevatedGunmetal
 import com.example.ui.theme.IceCyan
@@ -87,6 +95,7 @@ import com.example.ui.theme.RtxEmerald
 import com.example.ui.theme.TacticalAmber
 import com.example.ui.theme.TextPrimary
 import com.example.ui.theme.TextSecondary
+import com.example.ui.theme.ThreatCrimson
 
 private enum class MenuTab { HOME, PLAY }
 
@@ -96,10 +105,18 @@ fun MainMenuScreen(
     stats: PlayerStats,
     matchConfig: MatchConfig,
     modelRegistry: ModelAssetRegistry,
+    playerProfile: PlayerProfile?,
+    pendingFriendsCount: Int,
+    incomingInvites: List<LobbyInvite>,
     onUpdateMatchConfig: ((MatchConfig) -> MatchConfig) -> Unit,
     onPlay: () -> Unit,
+    onCreateLobby: () -> Unit,
+    onOpenFriends: () -> Unit,
+    onAcceptInvite: (LobbyInvite) -> Unit,
+    onDeclineInvite: (LobbyInvite) -> Unit,
     onOpenSettings: () -> Unit,
-    onOpenControls: () -> Unit
+    onOpenControls: () -> Unit,
+    onSignOut: () -> Unit
 ) {
     val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
@@ -270,6 +287,20 @@ fun MainMenuScreen(
                     tag = "nav_play"
                 )
                 Cs2NavTab(
+                    label = "ЛОББИ",
+                    selected = false,
+                    accentOverride = IceCyan,
+                    onClick = onCreateLobby,
+                    tag = "nav_lobby"
+                )
+                Cs2NavTab(
+                    label = if (pendingFriendsCount > 0) "ДРУЗЬЯ ($pendingFriendsCount)" else "ДРУЗЬЯ",
+                    selected = false,
+                    accentOverride = if (pendingFriendsCount > 0) TacticalAmber else null,
+                    onClick = onOpenFriends,
+                    tag = "nav_friends"
+                )
+                Cs2NavTab(
                     label = "УПРАВЛЕНИЕ",
                     selected = false,
                     onClick = onOpenControls,
@@ -277,36 +308,125 @@ fun MainMenuScreen(
                 )
             }
 
-            // Top-Right Compact Stats & Engine Pill
+            // Top-Right Unique 6-Digit Human Player ID Pill + Sign Out
             Row(
                 verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(m.s(6f)),
-                modifier = Modifier
-                    .clip(RoundedCornerShape(m.s(6f)))
-                    .background(Color(0x940A1019))
-                    .border(1.dp, Color.White.copy(alpha = 0.13f), RoundedCornerShape(m.s(6f)))
-                    .padding(horizontal = m.s(9f), vertical = m.s(4f))
+                horizontalArrangement = Arrangement.spacedBy(m.s(6f))
             ) {
-                Text(
-                    text = "УБ ${stats.totalKills}",
-                    fontSize = m.sp(10f),
-                    fontWeight = FontWeight.Bold,
-                    color = TextPrimary
-                )
-                Text("•", fontSize = m.sp(10f), color = TextSecondary)
-                Text(
-                    text = "ХШ ${stats.totalHeadshots}",
-                    fontSize = m.sp(10f),
-                    fontWeight = FontWeight.Bold,
-                    color = TacticalAmber
-                )
-                Text("•", fontSize = m.sp(10f), color = TextSecondary)
-                Text(
-                    text = settings.graphics.preset.titleRu,
-                    fontSize = m.sp(10f),
-                    fontWeight = FontWeight.Bold,
-                    color = RtxEmerald
-                )
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(m.s(5f)),
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(m.s(6f)))
+                        .background(Color(0xA60A1019))
+                        .border(1.dp, TacticalAmber.copy(alpha = 0.45f), RoundedCornerShape(m.s(6f)))
+                        .clickable {
+                            playerProfile?.shortId?.takeIf { it.isNotBlank() }?.let { sid ->
+                                val cm = context.getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
+                                cm?.setPrimaryClip(ClipData.newPlainText("Player ID", sid))
+                            }
+                            onOpenFriends()
+                        }
+                        .padding(horizontal = m.s(8f), vertical = m.s(4f))
+                        .testTag("menu_player_id_badge")
+                ) {
+                    Text(
+                        text = if (playerProfile != null) "ID: ${playerProfile.shortId}" else "ID: ...",
+                        fontSize = m.sp(10f),
+                        fontWeight = FontWeight.Black,
+                        color = TacticalAmber
+                    )
+                    Icon(
+                        imageVector = Icons.Default.ContentCopy,
+                        contentDescription = "Скопировать ID",
+                        tint = TacticalAmber.copy(alpha = 0.85f),
+                        modifier = Modifier.size(m.s(12f))
+                    )
+                    Text("•", fontSize = m.sp(10f), color = TextSecondary)
+                    Text(
+                        text = "УБ ${stats.totalKills}",
+                        fontSize = m.sp(9.5f),
+                        fontWeight = FontWeight.Bold,
+                        color = TextPrimary
+                    )
+                }
+
+                IconButton(
+                    onClick = onSignOut,
+                    modifier = Modifier
+                        .size(m.s(34f).coerceAtLeast(44.dp))
+                        .clip(CircleShape)
+                        .background(Color.White.copy(alpha = 0.08f))
+                        .border(0.8.dp, Color.White.copy(alpha = 0.16f), CircleShape)
+                        .testTag("menu_sign_out_button")
+                ) {
+                    Icon(
+                        imageVector = Icons.AutoMirrored.Filled.Logout,
+                        contentDescription = "Выйти из аккаунта",
+                        tint = TextSecondary,
+                        modifier = Modifier.size(m.s(16f))
+                    )
+                }
+            }
+        }
+
+        // Live Incoming Lobby Invite Toast Banner
+        val activeInvite = incomingInvites.firstOrNull()
+        AnimatedVisibility(
+            visible = activeInvite != null,
+            enter = fadeIn(),
+            exit = fadeOut(),
+            modifier = Modifier
+                .align(Alignment.TopCenter)
+                .safeDrawingPadding()
+                .padding(top = m.s(54f), start = m.s(16f), end = m.s(16f))
+        ) {
+            if (activeInvite != null) {
+                Surface(
+                    color = Color(0xEC0D1626),
+                    shape = CutCornerShape(topStart = m.s(10f), bottomEnd = m.s(10f)),
+                    border = BorderStroke(1.3.dp, IceCyan.copy(alpha = 0.75f))
+                ) {
+                    Row(
+                        modifier = Modifier.padding(horizontal = m.s(12f), vertical = m.s(7f)),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(m.s(10f))
+                    ) {
+                        Column {
+                            Text(
+                                text = "ПРИГЛАШЕНИЕ В ЛОББИ ОТ ${activeInvite.fromName.uppercase()} (ID ${activeInvite.fromShortId})",
+                                fontSize = m.sp(10.5f),
+                                fontWeight = FontWeight.Black,
+                                color = IceCyan
+                            )
+                            Text(
+                                text = "Карта: ${activeInvite.mapId}  •  Нажмите «ПРИНЯТЬ» для выбора команды T / CT",
+                                fontSize = m.sp(9f),
+                                color = TextSecondary
+                            )
+                        }
+                        Button(
+                            onClick = { onAcceptInvite(activeInvite) },
+                            colors = ButtonDefaults.buttonColors(containerColor = RtxEmerald, contentColor = ObsidianVoid),
+                            contentPadding = PaddingValues(horizontal = m.s(12f), vertical = m.s(4f)),
+                            modifier = Modifier
+                                .height(m.s(32f).coerceAtLeast(48.dp))
+                                .testTag("invite_accept_button")
+                        ) {
+                            Text("ПРИНЯТЬ", fontSize = m.sp(10f), fontWeight = FontWeight.Black)
+                        }
+                        Button(
+                            onClick = { onDeclineInvite(activeInvite) },
+                            colors = ButtonDefaults.buttonColors(containerColor = ThreatCrimson.copy(alpha = 0.25f), contentColor = Color(0xFFFFB4B4)),
+                            contentPadding = PaddingValues(horizontal = m.s(10f), vertical = m.s(4f)),
+                            modifier = Modifier
+                                .height(m.s(32f).coerceAtLeast(48.dp))
+                                .testTag("invite_decline_button")
+                        ) {
+                            Text("НЕТ", fontSize = m.sp(10f), fontWeight = FontWeight.Bold)
+                        }
+                    }
+                }
             }
         }
 
@@ -420,6 +540,7 @@ fun MainMenuScreen(
                 config = matchConfig,
                 onUpdate = onUpdateMatchConfig,
                 onStartMatch = onPlay,
+                onCreateLobby = onCreateLobby,
                 onClose = { activeTab = MenuTab.HOME }
             )
         }
@@ -431,6 +552,7 @@ private fun MatchSetupDrawer(
     config: MatchConfig,
     onUpdate: ((MatchConfig) -> MatchConfig) -> Unit,
     onStartMatch: () -> Unit,
+    onCreateLobby: () -> Unit,
     onClose: () -> Unit
 ) {
     val m = LocalUiMetrics.current
@@ -610,25 +732,49 @@ private fun MatchSetupDrawer(
                 }
             }
 
-            Button(
-                onClick = onStartMatch,
-                shape = CutCornerShape(topStart = m.s(10f), bottomEnd = m.s(10f)),
-                colors = ButtonDefaults.buttonColors(
-                    containerColor = RtxEmerald,
-                    contentColor = ObsidianVoid
-                ),
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .height(m.s(44f).coerceAtLeast(48.dp))
-                    .testTag("drawer_start_match_button")
-            ) {
-                Icon(Icons.Default.PlayArrow, contentDescription = null, modifier = Modifier.size(m.s(20f)))
-                Spacer(modifier = Modifier.width(m.s(5f)))
-                Text(
-                    text = "НАЧАТЬ МАТЧ (${config.playerTeamSize}v${config.enemyTeamSize})",
-                    fontSize = m.sp(12.5f),
-                    fontWeight = FontWeight.Black
-                )
+            Column(verticalArrangement = Arrangement.spacedBy(m.s(6f))) {
+                Button(
+                    onClick = onCreateLobby,
+                    shape = CutCornerShape(topStart = m.s(8f), bottomEnd = m.s(8f)),
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = IceCyan.copy(alpha = 0.22f),
+                        contentColor = IceCyan
+                    ),
+                    border = BorderStroke(1.1.dp, IceCyan.copy(alpha = 0.72f)),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(m.s(38f).coerceAtLeast(48.dp))
+                        .testTag("drawer_create_lobby_button")
+                ) {
+                    Icon(Icons.Default.Groups, contentDescription = null, modifier = Modifier.size(m.s(18f)))
+                    Spacer(modifier = Modifier.width(m.s(5f)))
+                    Text(
+                        text = "СОЗДАТЬ ЛОББИ (ДРУЗЬЯ / 1v1)",
+                        fontSize = m.sp(11f),
+                        fontWeight = FontWeight.Black
+                    )
+                }
+
+                Button(
+                    onClick = onStartMatch,
+                    shape = CutCornerShape(topStart = m.s(10f), bottomEnd = m.s(10f)),
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = RtxEmerald,
+                        contentColor = ObsidianVoid
+                    ),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(m.s(42f).coerceAtLeast(48.dp))
+                        .testTag("drawer_start_match_button")
+                ) {
+                    Icon(Icons.Default.PlayArrow, contentDescription = null, modifier = Modifier.size(m.s(20f)))
+                    Spacer(modifier = Modifier.width(m.s(5f)))
+                    Text(
+                        text = "БЫСТРЫЙ МАТЧ С БОТАМИ (${config.playerTeamSize}v${config.enemyTeamSize})",
+                        fontSize = m.sp(11.5f),
+                        fontWeight = FontWeight.Black
+                    )
+                }
             }
         }
     }

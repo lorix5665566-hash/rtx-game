@@ -1,0 +1,385 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // Global default-deny safety net
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // --- GLOBAL HELPERS ---
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() >= 1 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function isValidShortId(shortId) {
+      return shortId is string && shortId.size() == 6 && shortId.matches('^[1-9][0-9]{5}$');
+    }
+
+    function isValidTimestamp(ts) {
+      return ts is timestamp && ts <= request.time;
+    }
+
+    function isValidTeam(team) {
+      return team is string && (team == 'T' || team == 'CT');
+    }
+
+    function isValidMap(mapId) {
+      return mapId is string && (mapId == 'MIRAGE' || mapId == 'DUST2');
+    }
+
+    function isValidMode(mode) {
+      return mode is string && (mode == 'BOMB_DEFUSAL' || mode == 'TEAM_DEATHMATCH');
+    }
+
+    // --- ENTITY VALIDATION BLUEPRINTS ---
+
+    function isValidPlayerProfile(data) {
+      return data.userId is string && data.userId.size() >= 1 && data.userId.size() <= 128 &&
+             isValidShortId(data.shortId) &&
+             data.displayName is string && data.displayName.size() >= 1 && data.displayName.size() <= 24 &&
+             data.online is bool &&
+             (!('activeLobbyId' in data) || (data.activeLobbyId is string && data.activeLobbyId.size() <= 128)) &&
+             (!('totalKills' in data) || (data.totalKills is int && data.totalKills >= 0 && data.totalKills <= 1000000)) &&
+             (!('totalHeadshots' in data) || (data.totalHeadshots is int && data.totalHeadshots >= 0 && data.totalHeadshots <= 1000000)) &&
+             isValidTimestamp(data.createdAt) &&
+             isValidTimestamp(data.updatedAt);
+    }
+
+    function isValidPlayerIdReservation(data) {
+      return isValidShortId(data.shortId) &&
+             data.userId is string && data.userId.size() >= 1 && data.userId.size() <= 128 &&
+             data.displayName is string && data.displayName.size() >= 1 && data.displayName.size() <= 24 &&
+             isValidTimestamp(data.createdAt);
+    }
+
+    function isValidFriendEntry(data) {
+      return data.friendUid is string && data.friendUid.size() >= 1 && data.friendUid.size() <= 128 &&
+             isValidShortId(data.friendShortId) &&
+             data.friendName is string && data.friendName.size() >= 1 && data.friendName.size() <= 24 &&
+             isValidTimestamp(data.createdAt);
+    }
+
+    function isValidFriendRequest(data) {
+      return data.fromUid is string && data.fromUid.size() >= 1 && data.fromUid.size() <= 128 &&
+             isValidShortId(data.fromShortId) &&
+             data.fromName is string && data.fromName.size() >= 1 && data.fromName.size() <= 24 &&
+             data.toUid is string && data.toUid.size() >= 1 && data.toUid.size() <= 128 &&
+             data.fromUid != data.toUid &&
+             isValidShortId(data.toShortId) &&
+             data.toName is string && data.toName.size() >= 1 && data.toName.size() <= 24 &&
+             data.status is string && (data.status == 'pending' || data.status == 'accepted' || data.status == 'declined') &&
+             isValidTimestamp(data.createdAt) &&
+             isValidTimestamp(data.updatedAt);
+    }
+
+    function isValidLobbyInvite(data) {
+      return isValidId(data.lobbyId) &&
+             data.fromUid is string && data.fromUid.size() >= 1 && data.fromUid.size() <= 128 &&
+             data.fromName is string && data.fromName.size() >= 1 && data.fromName.size() <= 24 &&
+             isValidShortId(data.fromShortId) &&
+             data.toUid is string && data.toUid.size() >= 1 && data.toUid.size() <= 128 &&
+             data.fromUid != data.toUid &&
+             isValidMap(data.mapId) &&
+             isValidMode(data.mode) &&
+             data.status is string && (data.status == 'pending' || data.status == 'accepted' || data.status == 'declined') &&
+             isValidTimestamp(data.createdAt) &&
+             isValidTimestamp(data.updatedAt);
+    }
+
+    function isValidLobby(data) {
+      return data.hostUid is string && data.hostUid.size() >= 1 && data.hostUid.size() <= 128 &&
+             data.hostName is string && data.hostName.size() >= 1 && data.hostName.size() <= 24 &&
+             isValidMap(data.mapId) &&
+             isValidMode(data.mode) &&
+             data.roundsToWin is int && data.roundsToWin >= 1 && data.roundsToWin <= 15 &&
+             data.allowBots is bool &&
+             data.status is string && (data.status == 'waiting' || data.status == 'playing' || data.status == 'finished') &&
+             data.memberUids is list && data.memberUids.size() >= 1 && data.memberUids.size() <= 10 &&
+             (data.memberUids.size() == 0 || data.memberUids[0] is string) &&
+             data.tScore is int && data.tScore >= 0 && data.tScore <= 30 &&
+             data.ctScore is int && data.ctScore >= 0 && data.ctScore <= 30 &&
+             data.roundNumber is int && data.roundNumber >= 1 && data.roundNumber <= 40 &&
+             data.bombState is string && data.bombState.size() <= 32 &&
+             (!('bombX' in data) || data.bombX is number) &&
+             (!('bombY' in data) || data.bombY is number) &&
+             (!('bombZ' in data) || data.bombZ is number) &&
+             isValidTimestamp(data.createdAt) &&
+             isValidTimestamp(data.updatedAt);
+    }
+
+    function isValidPlayerState(data) {
+      return data.userId is string && data.userId.size() >= 1 && data.userId.size() <= 128 &&
+             isValidShortId(data.shortId) &&
+             data.displayName is string && data.displayName.size() >= 1 && data.displayName.size() <= 24 &&
+             isValidTeam(data.team) &&
+             data.ready is bool &&
+             data.x is number && data.y is number && data.z is number &&
+             data.yawDeg is number && data.pitchDeg is number &&
+             data.hp is int && data.hp >= 0 && data.hp <= 100 &&
+             data.dead is bool &&
+             data.moving is bool &&
+             data.shooting is bool &&
+             data.weapon is string && data.weapon.size() >= 1 && data.weapon.size() <= 32 &&
+             data.kills is int && data.kills >= 0 && data.kills <= 500 &&
+             data.deaths is int && data.deaths >= 0 && data.deaths <= 500 &&
+             data.hitSeq is int && data.hitSeq >= 0 && data.hitSeq <= 1000000 &&
+             (!('hitTargetUid' in data) || (data.hitTargetUid is string && data.hitTargetUid.size() <= 128)) &&
+             (!('hitDamage' in data) || (data.hitDamage is int && data.hitDamage >= 0 && data.hitDamage <= 200)) &&
+             (!('hitHeadshot' in data) || data.hitHeadshot is bool) &&
+             (!('hitWeapon' in data) || (data.hitWeapon is string && data.hitWeapon.size() <= 32)) &&
+             isValidTimestamp(data.updatedAt);
+    }
+
+    // --- 1. HUMAN PLAYER PROFILES (NO PII) ---
+    match /players/{userId} {
+      // Authenticated players may read public gaming profile by known UID (friends/lobby)
+      allow get: if isSignedIn() && isValidId(userId);
+      allow list: if isSignedIn() && resource.data.userId == request.auth.uid;
+
+      allow create: if isSignedIn() &&
+                       isValidId(userId) &&
+                       request.auth.uid == userId &&
+                       incoming().userId == request.auth.uid &&
+                       incoming().keys().hasAll(['userId', 'shortId', 'displayName', 'online', 'createdAt', 'updatedAt']) &&
+                       incoming().keys().hasOnly(['userId', 'shortId', 'displayName', 'online', 'activeLobbyId', 'totalKills', 'totalHeadshots', 'createdAt', 'updatedAt']) &&
+                       isValidPlayerProfile(incoming());
+
+      allow update: if isSignedIn() &&
+                       isValidId(userId) &&
+                       isValidPlayerProfile(incoming()) &&
+                       request.auth.uid == userId &&
+                       incoming().userId == existing().userId &&
+                       incoming().shortId == existing().shortId &&
+                       incoming().createdAt == existing().createdAt &&
+                       incoming().diff(existing()).affectedKeys().hasOnly(['displayName', 'online', 'activeLobbyId', 'totalKills', 'totalHeadshots', 'updatedAt']);
+
+      allow delete: if isSignedIn() && isValidId(userId) && request.auth.uid == userId;
+
+      // User-scoped confirmed friends subcollection
+      match /friends/{friendUid} {
+        allow get: if isSignedIn() && isValidId(userId) && isValidId(friendUid) && request.auth.uid == userId;
+        allow list: if isSignedIn() && request.auth.uid == userId;
+
+        allow create: if isSignedIn() &&
+                         isValidId(userId) &&
+                         isValidId(friendUid) &&
+                         userId != friendUid &&
+                         incoming().friendUid == friendUid &&
+                         incoming().keys().hasAll(['friendUid', 'friendShortId', 'friendName', 'createdAt']) &&
+                         incoming().keys().hasOnly(['friendUid', 'friendShortId', 'friendName', 'createdAt']) &&
+                         isValidFriendEntry(incoming()) &&
+                         (
+                           request.auth.uid == userId ||
+                           (
+                             request.auth.uid == friendUid &&
+                             (
+                               exists(/databases/$(database)/documents/friendRequests/$(userId + '_' + friendUid)) ||
+                               exists(/databases/$(database)/documents/friendRequests/$(friendUid + '_' + userId))
+                             )
+                           )
+                         );
+
+        allow update: if false;
+
+        allow delete: if isSignedIn() &&
+                         isValidId(userId) &&
+                         isValidId(friendUid) &&
+                         (request.auth.uid == userId || request.auth.uid == friendUid);
+      }
+    }
+
+    // --- 2. UNIQUE 6-DIGIT NUMERIC PLAYER ID REGISTRY ---
+    match /playerIds/{shortId} {
+      allow get: if isSignedIn() && isValidShortId(shortId);
+      allow list: if false;
+
+      allow create: if isSignedIn() &&
+                       isValidShortId(shortId) &&
+                       incoming().shortId == shortId &&
+                       incoming().userId == request.auth.uid &&
+                       incoming().keys().hasAll(['shortId', 'userId', 'displayName', 'createdAt']) &&
+                       incoming().keys().hasOnly(['shortId', 'userId', 'displayName', 'createdAt']) &&
+                       isValidPlayerIdReservation(incoming());
+
+      allow update: if isSignedIn() &&
+                       isValidShortId(shortId) &&
+                       isValidPlayerIdReservation(incoming()) &&
+                       existing().userId == request.auth.uid &&
+                       incoming().userId == existing().userId &&
+                       incoming().shortId == existing().shortId &&
+                       incoming().createdAt == existing().createdAt &&
+                       incoming().diff(existing()).affectedKeys().hasOnly(['displayName']);
+
+      allow delete: if false;
+    }
+
+    // --- 3. FRIEND REQUESTS ---
+    match /friendRequests/{requestId} {
+      allow get: if isSignedIn() &&
+                    isValidId(requestId) &&
+                    (existing().fromUid == request.auth.uid || existing().toUid == request.auth.uid);
+
+      allow list: if isSignedIn() &&
+                     (resource.data.fromUid == request.auth.uid || resource.data.toUid == request.auth.uid);
+
+      allow create: if isSignedIn() &&
+                       isValidId(requestId) &&
+                       incoming().fromUid == request.auth.uid &&
+                       incoming().status == 'pending' &&
+                       incoming().keys().hasAll(['fromUid', 'fromShortId', 'fromName', 'toUid', 'toShortId', 'toName', 'status', 'createdAt', 'updatedAt']) &&
+                       incoming().keys().hasOnly(['fromUid', 'fromShortId', 'fromName', 'toUid', 'toShortId', 'toName', 'status', 'createdAt', 'updatedAt']) &&
+                       isValidFriendRequest(incoming()) &&
+                       exists(/databases/$(database)/documents/players/$(incoming().toUid));
+
+      allow update: if isSignedIn() &&
+                       isValidId(requestId) &&
+                       isValidFriendRequest(incoming()) &&
+                       existing().status == 'pending' &&
+                       existing().toUid == request.auth.uid &&
+                       (incoming().status == 'accepted' || incoming().status == 'declined') &&
+                       incoming().fromUid == existing().fromUid &&
+                       incoming().toUid == existing().toUid &&
+                       incoming().createdAt == existing().createdAt &&
+                       incoming().diff(existing()).affectedKeys().hasOnly(['status', 'updatedAt']);
+
+      allow delete: if isSignedIn() &&
+                       isValidId(requestId) &&
+                       (existing().fromUid == request.auth.uid || existing().toUid == request.auth.uid);
+    }
+
+    // --- 4. LIVE LOBBY INVITES ---
+    match /invites/{inviteId} {
+      allow get: if isSignedIn() &&
+                    isValidId(inviteId) &&
+                    (existing().fromUid == request.auth.uid || existing().toUid == request.auth.uid);
+
+      allow list: if isSignedIn() &&
+                     (resource.data.toUid == request.auth.uid || resource.data.fromUid == request.auth.uid);
+
+      allow create: if isSignedIn() &&
+                       isValidId(inviteId) &&
+                       incoming().fromUid == request.auth.uid &&
+                       incoming().status == 'pending' &&
+                       incoming().keys().hasAll(['lobbyId', 'fromUid', 'fromName', 'fromShortId', 'toUid', 'mapId', 'mode', 'status', 'createdAt', 'updatedAt']) &&
+                       incoming().keys().hasOnly(['lobbyId', 'fromUid', 'fromName', 'fromShortId', 'toUid', 'mapId', 'mode', 'status', 'createdAt', 'updatedAt']) &&
+                       isValidLobbyInvite(incoming()) &&
+                       exists(/databases/$(database)/documents/lobbies/$(incoming().lobbyId));
+
+      allow update: if isSignedIn() &&
+                       isValidId(inviteId) &&
+                       isValidLobbyInvite(incoming()) &&
+                       existing().status == 'pending' &&
+                       existing().toUid == request.auth.uid &&
+                       (incoming().status == 'accepted' || incoming().status == 'declined') &&
+                       incoming().lobbyId == existing().lobbyId &&
+                       incoming().fromUid == existing().fromUid &&
+                       incoming().toUid == existing().toUid &&
+                       incoming().createdAt == existing().createdAt &&
+                       incoming().diff(existing()).affectedKeys().hasOnly(['status', 'updatedAt']);
+
+      allow delete: if isSignedIn() &&
+                       isValidId(inviteId) &&
+                       (existing().fromUid == request.auth.uid || existing().toUid == request.auth.uid);
+    }
+
+    // --- 5. MULTIPLAYER LOBBIES & REAL-TIME PLAYER STATES ---
+    match /lobbies/{lobbyId} {
+      allow get: if isSignedIn() && isValidId(lobbyId);
+      allow list: if isSignedIn() && (request.auth.uid in resource.data.memberUids);
+
+      allow create: if isSignedIn() &&
+                       isValidId(lobbyId) &&
+                       incoming().hostUid == request.auth.uid &&
+                       incoming().status == 'waiting' &&
+                       incoming().memberUids.size() == 1 &&
+                       incoming().memberUids[0] == request.auth.uid &&
+                       incoming().keys().hasAll(['hostUid', 'hostName', 'mapId', 'mode', 'roundsToWin', 'allowBots', 'status', 'memberUids', 'tScore', 'ctScore', 'roundNumber', 'bombState', 'createdAt', 'updatedAt']) &&
+                       incoming().keys().hasOnly(['hostUid', 'hostName', 'mapId', 'mode', 'roundsToWin', 'allowBots', 'status', 'memberUids', 'tScore', 'ctScore', 'roundNumber', 'bombState', 'bombX', 'bombY', 'bombZ', 'createdAt', 'updatedAt']) &&
+                       isValidLobby(incoming());
+
+      allow update: if isSignedIn() &&
+                       isValidId(lobbyId) &&
+                       isValidLobby(incoming()) &&
+                       existing().status != 'finished' &&
+                       incoming().hostUid == existing().hostUid &&
+                       incoming().createdAt == existing().createdAt &&
+                       (
+                         // Action 1: Host updates settings, starts/finishes match, or syncs score/bomb
+                         (
+                           existing().hostUid == request.auth.uid &&
+                           incoming().diff(existing()).affectedKeys().hasOnly(['mapId', 'mode', 'roundsToWin', 'allowBots', 'status', 'memberUids', 'tScore', 'ctScore', 'roundNumber', 'bombState', 'bombX', 'bombY', 'bombZ', 'updatedAt'])
+                         ) ||
+                         // Action 2: Invited/joining player adds or removes themselves in memberUids
+                         (
+                           incoming().diff(existing()).affectedKeys().hasOnly(['memberUids', 'updatedAt']) &&
+                           (
+                             (request.auth.uid in incoming().memberUids && !(request.auth.uid in existing().memberUids) && incoming().memberUids.size() == existing().memberUids.size() + 1) ||
+                             (!(request.auth.uid in incoming().memberUids) && (request.auth.uid in existing().memberUids) && incoming().memberUids.size() == existing().memberUids.size() - 1)
+                           )
+                         ) ||
+                         // Action 3: Active member updates live bomb/score state during active match
+                         (
+                           existing().status == 'playing' &&
+                           (request.auth.uid in existing().memberUids) &&
+                           incoming().diff(existing()).affectedKeys().hasOnly(['tScore', 'ctScore', 'roundNumber', 'bombState', 'bombX', 'bombY', 'bombZ', 'updatedAt'])
+                         )
+                       );
+
+      allow delete: if isSignedIn() && isValidId(lobbyId) && existing().hostUid == request.auth.uid;
+
+      // Per-player live state document (read via direct get() per memberUid; no list scraping)
+      match /states/{playerUid} {
+        allow get: if isSignedIn() &&
+                      isValidId(lobbyId) &&
+                      isValidId(playerUid) &&
+                      (
+                        request.auth.uid == playerUid ||
+                        request.auth.uid in get(/databases/$(database)/documents/lobbies/$(lobbyId)).data.memberUids
+                      );
+
+        allow list: if false;
+
+        allow create: if isSignedIn() &&
+                         isValidId(lobbyId) &&
+                         isValidId(playerUid) &&
+                         request.auth.uid == playerUid &&
+                         incoming().userId == request.auth.uid &&
+                         incoming().keys().hasAll(['userId', 'shortId', 'displayName', 'team', 'ready', 'x', 'y', 'z', 'yawDeg', 'pitchDeg', 'hp', 'dead', 'moving', 'shooting', 'weapon', 'kills', 'deaths', 'hitSeq', 'updatedAt']) &&
+                         incoming().keys().hasOnly(['userId', 'shortId', 'displayName', 'team', 'ready', 'x', 'y', 'z', 'yawDeg', 'pitchDeg', 'hp', 'dead', 'moving', 'shooting', 'weapon', 'kills', 'deaths', 'hitTargetUid', 'hitDamage', 'hitHeadshot', 'hitWeapon', 'hitSeq', 'updatedAt']) &&
+                         isValidPlayerState(incoming()) &&
+                         exists(/databases/$(database)/documents/lobbies/$(lobbyId));
+
+        allow update: if isSignedIn() &&
+                         isValidId(lobbyId) &&
+                         isValidId(playerUid) &&
+                         isValidPlayerState(incoming()) &&
+                         request.auth.uid == playerUid &&
+                         incoming().userId == existing().userId &&
+                         incoming().shortId == existing().shortId &&
+                         incoming().diff(existing()).affectedKeys().hasOnly(['displayName', 'team', 'ready', 'x', 'y', 'z', 'yawDeg', 'pitchDeg', 'hp', 'dead', 'moving', 'shooting', 'weapon', 'kills', 'deaths', 'hitTargetUid', 'hitDamage', 'hitHeadshot', 'hitWeapon', 'hitSeq', 'updatedAt']);
+
+        allow delete: if isSignedIn() &&
+                         isValidId(lobbyId) &&
+                         isValidId(playerUid) &&
+                         (
+                           request.auth.uid == playerUid ||
+                           get(/databases/$(database)/documents/lobbies/$(lobbyId)).data.hostUid == request.auth.uid
+                         );
+      }
+    }
+  }
+}

@@ -53,7 +53,44 @@ data class MatchConfig(
     val playerSide: TeamSide = TeamSide.T,
     val playerTeamSize: Int = 5, // 1..5 (includes player)
     val enemyTeamSize: Int = 5,  // 1..5
-    val roundsToWin: Int = 8
+    val roundsToWin: Int = 8,
+    val isMultiplayer: Boolean = false,
+    val lobbyId: String? = null,
+    val allowBots: Boolean = true,
+    val localUserId: String = "",
+    val localDisplayName: String = "",
+    val localShortId: String = ""
+)
+
+data class RemoteHumanPlayer(
+    val userId: String,
+    val shortId: String,
+    val displayName: String,
+    val team: TeamSide,
+    var x: Float = 0f,
+    var y: Float = 0f,
+    var z: Float = 0f,
+    var targetX: Float = 0f,
+    var targetY: Float = 0f,
+    var targetZ: Float = 0f,
+    var yawDeg: Float = 0f,
+    var targetYawDeg: Float = 0f,
+    var hp: Int = 100,
+    var isDead: Boolean = false,
+    var deathProgress: Float = 0f,
+    var isMoving: Boolean = false,
+    var isShooting: Boolean = false,
+    var weapon: WeaponType = WeaponType.AK47,
+    var kills: Int = 0,
+    var deaths: Int = 0
+)
+
+data class OutgoingHitEvent(
+    val seq: Int,
+    val targetUid: String,
+    val damage: Int,
+    val headshot: Boolean,
+    val weaponName: String
 )
 
 enum class WeaponSlot {
@@ -553,7 +590,9 @@ data class HudSnapshot(
     val bannerText: String = "",
     val killFeedText: String = "",
     val radarBlips: List<RadarBlip> = emptyList(),
-    val playerYawDeg: Float = 0f
+    val playerYawDeg: Float = 0f,
+    val isMultiplayer: Boolean = false,
+    val onlinePlayersCount: Int = 1
 ) {
     val accuracyPercent: Int
         get() = if (shotsFired <= 0) 0 else ((shotsHit * 100f) / shotsFired).toInt().coerceIn(0, 100)

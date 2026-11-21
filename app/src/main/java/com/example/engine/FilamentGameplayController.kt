@@ -395,7 +395,45 @@ class FilamentGameplayController(
         val tm = engine.transformManager
         var ctIdx = 0
         var tIdx = 0
+        val px = gameEngine.playerX
+        val pz = gameEngine.playerZ
 
+        // 1. Render remote human players FIRST so friends/opponents always get priority in character pools!
+        if (gameEngine.matchConfig.isMultiplayer) {
+            val remotes = gameEngine.getRemotePlayersSnapshot()
+            for ((idx, rp) in remotes.withIndex()) {
+                val pool = if (rp.team == TeamSide.CT) ctPool else tPool
+                val slotIdx = if (rp.team == TeamSide.CT) ctIdx++ else tIdx++
+                if (slotIdx >= pool.size) continue
+                val model = pool[slotIdx]
+                val charSlot = if (rp.team == TeamSide.CT) ModelSlot.CHARACTER_CT else ModelSlot.CHARACTER_T
+                FilamentSceneHelpers.setAssetVisible(scene, model, true)
+                FilamentSceneHelpers.buildCharacterMatrix(
+                    out = tmpMat,
+                    model = model,
+                    x = rp.x,
+                    y = rp.y,
+                    z = rp.z,
+                    yawDeg = rp.yawDeg,
+                    deathProgress = rp.deathProgress,
+                    targetHeight = 1.76f,
+                    isCustomImported = registry.hasCustomFile(charSlot)
+                )
+                tm.setTransform(tm.getInstance(model.asset.root), tmpMat)
+
+                val animator = model.asset.instance.animator
+                if (animator.animationCount > 0 && !rp.isDead) {
+                    val animIdx = if (rp.isMoving) model.runAnimIdx else model.idleAnimIdx
+                    if (animIdx >= 0) {
+                        val dur = animator.getAnimationDuration(animIdx).coerceAtLeast(0.1f)
+                        animator.applyAnimation(animIdx, (gameEngine.timeSec + idx * 0.41f) % dur)
+                        animator.updateBoneMatrices()
+                    }
+                }
+            }
+        }
+
+        // 2. Render AI bots (skipping skeletal skinning on dead or distant > 38m bots for max FPS!)
         for (b in gameEngine.bots) {
             val pool = if (b.team == TeamSide.CT) ctPool else tPool
             val slotIdx = if (b.team == TeamSide.CT) ctIdx++ else tIdx++
@@ -417,9 +455,11 @@ class FilamentGameplayController(
             )
             tm.setTransform(tm.getInstance(model.asset.root), tmpMat)
 
-            // Drive real skeletal glTF animation (Idle / Walk / Run)!
+            val dx = b.x - px
+            val dz = b.z - pz
+            val distSq = dx * dx + dz * dz
             val animator = model.asset.instance.animator
-            if (animator.animationCount > 0 && !b.isDead) {
+            if (animator.animationCount > 0 && !b.isDead && distSq < 38f * 38f) {
                 val animIdx = when {
                     !b.isMoving -> model.idleAnimIdx
                     kotlin.math.abs(b.moveForwardRatio) > 0.65f -> model.runAnimIdx

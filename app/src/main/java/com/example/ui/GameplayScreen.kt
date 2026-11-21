@@ -127,6 +127,26 @@ fun GameplayScreen(
     modelRegistry: ModelAssetRegistry,
     settings: GameSettings,
     isPaused: Boolean,
+    currentUserId: String,
+    activeLobbyId: String?,
+    remoteMemberStates: List<com.example.online.PlayerMatchState>,
+    onPublishLiveState: (
+        lobbyId: String,
+        team: TeamSide,
+        x: Float,
+        y: Float,
+        z: Float,
+        yawDeg: Float,
+        pitchDeg: Float,
+        hp: Int,
+        dead: Boolean,
+        moving: Boolean,
+        shooting: Boolean,
+        weaponName: String,
+        kills: Int,
+        deaths: Int,
+        outgoingHit: com.example.model.OutgoingHitEvent?
+    ) -> Unit,
     onSetPaused: (Boolean) -> Unit,
     onRestart: () -> Unit,
     onOpenSettings: () -> Unit,
@@ -149,13 +169,54 @@ fun GameplayScreen(
         }
     }
 
+    // Feed live remote human player transforms & PvP hits directly into GameEngine!
+    LaunchedEffect(remoteMemberStates, currentUserId) {
+        if (engine.matchConfig.isMultiplayer && currentUserId.isNotBlank()) {
+            engine.applyRemoteStates(currentUserId, remoteMemberStates)
+        }
+    }
+
+    // Publish local human player transform, HP, weapon & outgoing hits at ~10Hz during online matches!
+    LaunchedEffect(activeLobbyId, engine.matchConfig.isMultiplayer) {
+        val lobbyId = activeLobbyId
+        if (!engine.matchConfig.isMultiplayer || lobbyId.isNullOrBlank()) return@LaunchedEffect
+        var lastSentHitSeq = 0
+        while (true) {
+            val snap = engine.latestHud
+            val hit = engine.lastOutgoingHit
+            val hitToSend = if (hit != null && hit.seq > lastSentHitSeq) {
+                lastSentHitSeq = hit.seq
+                hit
+            } else null
+            onPublishLiveState(
+                lobbyId,
+                snap.playerSide,
+                engine.playerX,
+                engine.playerY,
+                engine.playerZ,
+                Math.toDegrees(engine.playerYawRad.toDouble()).toFloat(),
+                Math.toDegrees(engine.playerPitchRad.toDouble()).toFloat(),
+                snap.hp,
+                snap.isPlayerDead,
+                engine.moveSpeedRatio > 0.1f,
+                engine.muzzleFlashTimer > 0.05f,
+                snap.activeWeapon.name,
+                snap.kills,
+                snap.deaths,
+                hitToSend
+            )
+            delay(100L)
+        }
+    }
+
+    // Optimized 48ms HUD polling (~21Hz) frees CPU for smooth 60 FPS Google Filament rendering
     LaunchedEffect(engine) {
         while (true) {
             hud = engine.latestHud
             if (!hud.canBuy && isShopOpen) {
                 isShopOpen = false
             }
-            delay(33L)
+            delay(48L)
         }
     }
 

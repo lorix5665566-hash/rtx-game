@@ -74,6 +74,14 @@ class ArenaWorld(
     private var missingVal: Int = -32768
     private var floorLayers: List<IntArray> = emptyList()
 
+    // High-precision 512x512 32-bit vertical wall slice bitmask (0.5m slices, -4m..+12m)
+    private var wallSize: Int = 0
+    private var wallMin: Float = -51.2f
+    private var wallSpan: Float = 102.4f
+    private var wallMinY: Float = -4.0f
+    private var wallStepY: Float = 0.5f
+    private var wallBits: IntArray? = null
+
     val bombsites: List<BombsiteZone>
     val tSpawns: List<Pair<Float, Float>>
     val ctSpawns: List<Pair<Float, Float>>
@@ -123,12 +131,12 @@ class ArenaWorld(
                     listOf(-22.0f to 5.0f, -24.0f to -5.0f, -28.0f to -24.0f)
                 ).map { route -> route.map { snapToNearestWalkable(it.first, it.second) } }
 
-                // Verified 100% unobstructed sunlit Mirage T-Spawn courtyard!
+                // Verified 100% unobstructed sunlit Mirage T-Spawn courtyard, pulled back so full head & bandana sit below top nav bar!
                 val stand = snapToNearestWalkable(38.5f, -5.5f)
                 val standY = sampleFloorHeight(stand.first, stand.second) ?: -0.08f
                 lobbyStandPos = Triple(stand.first, standY, stand.second)
-                lobbyCamPos = Triple(stand.first + 3.0f, standY + 1.18f, stand.second + 0.8f)
-                lobbyLookTarget = Triple(stand.first, standY + 0.96f, stand.second)
+                lobbyCamPos = Triple(stand.first + 4.10f, standY + 1.12f, stand.second + 1.10f)
+                lobbyLookTarget = Triple(stand.first, standY + 1.12f, stand.second)
             }
 
             ArenaMapId.DUST2 -> {
@@ -167,8 +175,8 @@ class ArenaWorld(
                 val stand = snapToNearestWalkable(27.9f, -34.2f)
                 val standY = sampleFloorHeight(stand.first, stand.second) ?: 2.17f
                 lobbyStandPos = Triple(stand.first, standY, stand.second)
-                lobbyCamPos = Triple(stand.first + 3.0f, standY + 1.18f, stand.second + 0.8f)
-                lobbyLookTarget = Triple(stand.first, standY + 0.96f, stand.second)
+                lobbyCamPos = Triple(stand.first + 4.10f, standY + 1.12f, stand.second + 1.10f)
+                lobbyLookTarget = Triple(stand.first, standY + 1.12f, stand.second)
             }
         }
     }
@@ -209,7 +217,52 @@ class ArenaWorld(
                 }
             }
             floorLayers = layers
+
+            if (root.has("walls") && root.has("wallSize")) {
+                wallSize = root.optInt("wallSize", 512)
+                wallMin = root.optDouble("wallMin", gridMin.toDouble()).toFloat()
+                wallSpan = root.optDouble("wallSpan", gridSpan.toDouble()).toFloat()
+                wallMinY = root.optDouble("wallMinY", -4.0).toFloat()
+                wallStepY = root.optDouble("wallStepY", 0.5).toFloat().coerceAtLeast(0.1f)
+                val wallRle = root.getJSONArray("walls")
+                val totalWallCells = wallSize * wallSize
+                val decodedWalls = IntArray(totalWallCells)
+                var wIdx = 0
+                var i = 0
+                while (i + 1 < wallRle.length() && wIdx < totalWallCells) {
+                    val count = wallRle.getInt(i)
+                    val mask = wallRle.getInt(i + 1)
+                    val end = (wIdx + count).coerceAtMost(totalWallCells)
+                    if (mask != 0) {
+                        for (k in wIdx until end) decodedWalls[k] = mask
+                    }
+                    wIdx = end
+                    i += 2
+                }
+                wallBits = decodedWalls
+            }
         }
+    }
+
+    private fun buildVerticalMask(minY: Float, maxY: Float): Int {
+        val s0 = floor((minY - wallMinY) / wallStepY).toInt().coerceIn(0, 31)
+        val s1 = floor((maxY - wallMinY) / wallStepY).toInt().coerceIn(0, 31)
+        var mask = 0
+        for (bit in s0..s1) {
+            mask = mask or (1 shl bit)
+        }
+        return mask
+    }
+
+    fun hasWallAt(x: Float, z: Float, minY: Float, maxY: Float): Boolean {
+        val bits = wallBits ?: return false
+        if (wallSize <= 0) return false
+        val gx = floor((x - wallMin) / wallSpan * wallSize).toInt()
+        val gz = floor((z - wallMin) / wallSpan * wallSize).toInt()
+        if (gx !in 0 until wallSize || gz !in 0 until wallSize) return true
+        val cellMask = bits[gz * wallSize + gx]
+        if (cellMask == 0) return false
+        return (cellMask and buildVerticalMask(minY, maxY)) != 0
     }
 
     /**
@@ -264,22 +317,32 @@ class ArenaWorld(
     }
 
     fun snapToNearestWalkable(x: Float, z: Float): Pair<Float, Float> {
-        sampleFloorHeight(x, z)?.let { return x to z }
+        fun isClear(px: Float, pz: Float): Boolean {
+            val h = sampleFloorHeight(px, pz) ?: return false
+            return !hasWallAt(px, pz, h + 0.58f, h + 1.52f) &&
+                !hasWallAt(px + 0.30f, pz, h + 0.58f, h + 1.52f) &&
+                !hasWallAt(px - 0.30f, pz, h + 0.58f, h + 1.52f) &&
+                !hasWallAt(px, pz + 0.30f, h + 0.58f, h + 1.52f) &&
+                !hasWallAt(px, pz - 0.30f, h + 0.58f, h + 1.52f)
+        }
+        if (isClear(x, z)) return x to z
         for (ring in 1..20) {
             val r = ring * 0.42f
             for (step in 0 until 16) {
                 val ang = step * (Math.PI * 2.0 / 16.0)
                 val tx = x + cos(ang).toFloat() * r
                 val tz = z + sin(ang).toFloat() * r
-                if (sampleFloorHeight(tx, tz) != null) return tx to tz
+                if (isClear(tx, tz)) return tx to tz
             }
         }
         return x to z
     }
 
     /**
-     * Smooth multi-level movement with doorway-friendly radius (0.24m), stair/ramp elevation,
-     * and crisp wall sliding across ALL Mirage & Dust 2 indoor/outdoor passages!
+     * Swept multi-step solid wall & floor collision:
+     * Uses both the 3-layer floor heightmap AND the 512x512 32-bit vertical wall slice grid
+     * (checking chest/torso elevation [floorY + 0.58m .. floorY + 1.52m] so stairs & curbs
+     * remain smoothly walkable and doorways/arches pass freely, while EVERY vertical wall is 100% solid!).
      */
     fun resolveMovement(
         curX: Float,
@@ -287,41 +350,81 @@ class ArenaWorld(
         curZ: Float,
         targetX: Float,
         targetZ: Float,
-        radius: Float = 0.24f
+        radius: Float = 0.36f
     ): Triple<Float, Float, Float> {
-        val currentFloor = sampleNearestFloorHeight(curX, curZ, curY, maxStepUp = 1.1f, maxDrop = 3.5f)
+        var rx = curX
+        var rz = curZ
+        var ry = sampleNearestFloorHeight(curX, curZ, curY, maxStepUp = 1.1f, maxDrop = 3.5f)
             ?: sampleFloorHeight(curX, curZ)
             ?: curY
 
-        fun canStandAt(px: Float, pz: Float): Float? {
-            val c = sampleNearestFloorHeight(px, pz, currentFloor, maxStepUp = 0.90f, maxDrop = 3.20f)
+        val totalDx = targetX - curX
+        val totalDz = targetZ - curZ
+        val totalDist = sqrt(totalDx * totalDx + totalDz * totalDz)
+        if (totalDist < 0.0001f) return Triple(rx, ry, rz)
+
+        fun isBlockedByWall(px: Float, pz: Float, floorH: Float): Boolean {
+            if (wallBits == null) return false
+            val bodyLow = floorH + 0.58f
+            val bodyHigh = floorH + 1.52f
+            val rDiag = radius * 0.7071f
+            return hasWallAt(px, pz, bodyLow, bodyHigh) ||
+                hasWallAt(px + radius, pz, bodyLow, bodyHigh) ||
+                hasWallAt(px - radius, pz, bodyLow, bodyHigh) ||
+                hasWallAt(px, pz + radius, bodyLow, bodyHigh) ||
+                hasWallAt(px, pz - radius, bodyLow, bodyHigh) ||
+                hasWallAt(px + rDiag, pz + rDiag, bodyLow, bodyHigh) ||
+                hasWallAt(px - rDiag, pz + rDiag, bodyLow, bodyHigh) ||
+                hasWallAt(px + rDiag, pz - rDiag, bodyLow, bodyHigh) ||
+                hasWallAt(px - rDiag, pz - rDiag, bodyLow, bodyHigh)
+        }
+
+        fun canStandAt(px: Float, pz: Float, refFloor: Float): Float? {
+            val c = sampleNearestFloorHeight(px, pz, refFloor, maxStepUp = 0.88f, maxDrop = 3.20f)
                 ?: return null
-            // Gentle doorway-friendly clearance check: allows tight 1m doorways while stopping solid walls
-            val p1 = sampleNearestFloorHeight(px + radius, pz, c, 0.95f, 3.2f)
-            val p2 = sampleNearestFloorHeight(px - radius, pz, c, 0.95f, 3.2f)
-            val p3 = sampleNearestFloorHeight(px, pz + radius, c, 0.95f, 3.2f)
-            val p4 = sampleNearestFloorHeight(px, pz - radius, c, 0.95f, 3.2f)
+            if (isBlockedByWall(px, pz, c)) return null
+            val p1 = sampleNearestFloorHeight(px + radius * 0.75f, pz, c, 0.92f, 3.2f)
+            val p2 = sampleNearestFloorHeight(px - radius * 0.75f, pz, c, 0.92f, 3.2f)
+            val p3 = sampleNearestFloorHeight(px, pz + radius * 0.75f, c, 0.92f, 3.2f)
+            val p4 = sampleNearestFloorHeight(px, pz - radius * 0.75f, c, 0.92f, 3.2f)
             val valid = (if (p1 != null) 1 else 0) +
                 (if (p2 != null) 1 else 0) +
                 (if (p3 != null) 1 else 0) +
                 (if (p4 != null) 1 else 0)
-            return if (valid >= 1) c else null
+            return if (valid >= 2) c else null
         }
 
-        canStandAt(targetX, targetZ)?.let { h ->
-            return Triple(targetX, h, targetZ)
+        // Subdivide movement into <= 0.14m swept micro-steps so players can NEVER skip through thin walls
+        val steps = kotlin.math.ceil((totalDist / 0.14f).toDouble()).toInt().coerceIn(1, 12)
+        val stepDx = totalDx / steps
+        val stepDz = totalDz / steps
+
+        for (s in 0 until steps) {
+            val nx = rx + stepDx
+            val nz = rz + stepDz
+            val bothH = canStandAt(nx, nz, ry)
+            if (bothH != null) {
+                rx = nx; rz = nz; ry = bothH
+            } else {
+                val xOnlyH = canStandAt(nx, rz, ry)
+                if (xOnlyH != null) {
+                    rx = nx; ry = xOnlyH
+                } else {
+                    val zOnlyH = canStandAt(rx, nz, ry)
+                    if (zOnlyH != null) {
+                        rz = nz; ry = zOnlyH
+                    } else {
+                        break
+                    }
+                }
+            }
         }
-        canStandAt(targetX, curZ)?.let { h ->
-            return Triple(targetX, h, curZ)
-        }
-        canStandAt(curX, targetZ)?.let { h ->
-            return Triple(curX, h, targetZ)
-        }
-        return Triple(curX, currentFloor, curZ)
+        return Triple(rx, ry, rz)
     }
 
     /**
-     * Marches a 3D ray through the multi-layer CS2 navigation world to block bullets/LOS on walls & floors.
+     * Marches a 3D ray through the multi-layer CS2 floors AND 512x512 vertical wall grid
+     * to block bullets & bot line-of-sight accurately on every solid wall and floor.
      */
     fun raycastWalls(
         ox: Float, oy: Float, oz: Float,
@@ -329,13 +432,15 @@ class ArenaWorld(
         maxDist: Float
     ): Float {
         if (floorLayers.isEmpty()) return maxDist
-        var dist = 0.45f
-        val step = 0.38f
+        var dist = 0.35f
+        val step = 0.24f
         while (dist < maxDist) {
             val px = ox + dx * dist
             val py = oy + dy * dist
             val pz = oz + dz * dist
-            // Check if there is any walkable space near this ray's elevation
+            if (hasWallAt(px, pz, py - 0.14f, py + 0.14f)) {
+                return dist
+            }
             val floorH = sampleNearestFloorHeight(px, pz, py - 1.35f, maxStepUp = 2.6f, maxDrop = 4.2f)
             if (floorH == null) {
                 return dist

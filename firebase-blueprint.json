@@ -1,0 +1,166 @@
+{
+  "entities": {
+    "PlayerProfile": {
+      "title": "PlayerProfile",
+      "description": "Authenticated human player profile with permanent unique 6-digit numeric shortId (bots never have profiles or IDs).",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string", "description": "Firebase Auth UID" },
+        "shortId": { "type": "string", "description": "Permanent unique 6-digit numeric ID (100000-999999)" },
+        "displayName": { "type": "string", "description": "Player display nickname" },
+        "online": { "type": "boolean", "description": "Current online status" },
+        "activeLobbyId": { "type": "string", "description": "Current multiplayer lobby ID if in lobby/match" },
+        "totalKills": { "type": "integer", "description": "Lifetime kills" },
+        "totalHeadshots": { "type": "integer", "description": "Lifetime headshots" },
+        "createdAt": { "type": "string", "format": "date-time", "description": "Server timestamp" },
+        "updatedAt": { "type": "string", "format": "date-time", "description": "Server timestamp" }
+      },
+      "required": ["userId", "shortId", "displayName", "online", "createdAt", "updatedAt"]
+    },
+    "PlayerIdReservation": {
+      "title": "PlayerIdReservation",
+      "description": "Unique 6-digit ID registry mapping shortId to player UID for friend search.",
+      "type": "object",
+      "properties": {
+        "shortId": { "type": "string", "description": "6-digit numeric ID" },
+        "userId": { "type": "string", "description": "Owner Firebase Auth UID" },
+        "displayName": { "type": "string", "description": "Owner display nickname" },
+        "createdAt": { "type": "string", "format": "date-time", "description": "Server timestamp" }
+      },
+      "required": ["shortId", "userId", "displayName", "createdAt"]
+    },
+    "FriendEntry": {
+      "title": "FriendEntry",
+      "description": "Confirmed friend entry under a player's friends subcollection.",
+      "type": "object",
+      "properties": {
+        "friendUid": { "type": "string", "description": "Friend Firebase Auth UID" },
+        "friendShortId": { "type": "string", "description": "Friend 6-digit numeric ID" },
+        "friendName": { "type": "string", "description": "Friend display name" },
+        "createdAt": { "type": "string", "format": "date-time", "description": "Server timestamp" }
+      },
+      "required": ["friendUid", "friendShortId", "friendName", "createdAt"]
+    },
+    "FriendRequest": {
+      "title": "FriendRequest",
+      "description": "Friend request sent by numeric ID between two real players.",
+      "type": "object",
+      "properties": {
+        "fromUid": { "type": "string" },
+        "fromShortId": { "type": "string" },
+        "fromName": { "type": "string" },
+        "toUid": { "type": "string" },
+        "toShortId": { "type": "string" },
+        "toName": { "type": "string" },
+        "status": { "type": "string", "enum": ["pending", "accepted", "declined"] },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["fromUid", "fromShortId", "fromName", "toUid", "toShortId", "toName", "status", "createdAt", "updatedAt"]
+    },
+    "LobbyInvite": {
+      "title": "LobbyInvite",
+      "description": "Real-time invitation sent to a friend to join a multiplayer lobby.",
+      "type": "object",
+      "properties": {
+        "lobbyId": { "type": "string" },
+        "fromUid": { "type": "string" },
+        "fromName": { "type": "string" },
+        "fromShortId": { "type": "string" },
+        "toUid": { "type": "string" },
+        "mapId": { "type": "string", "enum": ["MIRAGE", "DUST2"] },
+        "mode": { "type": "string", "enum": ["BOMB_DEFUSAL", "TEAM_DEATHMATCH"] },
+        "status": { "type": "string", "enum": ["pending", "accepted", "declined"] },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["lobbyId", "fromUid", "fromName", "fromShortId", "toUid", "mapId", "mode", "status", "createdAt", "updatedAt"]
+    },
+    "MultiplayerLobby": {
+      "title": "MultiplayerLobby",
+      "description": "Multiplayer room with host config (map, mode, rounds, allowBots), team roster, and match state.",
+      "type": "object",
+      "properties": {
+        "hostUid": { "type": "string" },
+        "hostName": { "type": "string" },
+        "mapId": { "type": "string", "enum": ["MIRAGE", "DUST2"] },
+        "mode": { "type": "string", "enum": ["BOMB_DEFUSAL", "TEAM_DEATHMATCH"] },
+        "roundsToWin": { "type": "integer" },
+        "allowBots": { "type": "boolean" },
+        "status": { "type": "string", "enum": ["waiting", "playing", "finished"] },
+        "memberUids": { "type": "array", "description": "Bounded list (max 10) of human player UIDs in the lobby" },
+        "tScore": { "type": "integer" },
+        "ctScore": { "type": "integer" },
+        "roundNumber": { "type": "integer" },
+        "bombState": { "type": "string" },
+        "bombX": { "type": "number" },
+        "bombY": { "type": "number" },
+        "bombZ": { "type": "number" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["hostUid", "hostName", "mapId", "mode", "roundsToWin", "allowBots", "status", "memberUids", "tScore", "ctScore", "roundNumber", "bombState", "createdAt", "updatedAt"]
+    },
+    "LobbyPlayerState": {
+      "title": "LobbyPlayerState",
+      "description": "Per-player live team selection, readiness, 3D transform, weapon, HP, and hit notification.",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string" },
+        "shortId": { "type": "string" },
+        "displayName": { "type": "string" },
+        "team": { "type": "string", "enum": ["T", "CT"] },
+        "ready": { "type": "boolean" },
+        "x": { "type": "number" },
+        "y": { "type": "number" },
+        "z": { "type": "number" },
+        "yawDeg": { "type": "number" },
+        "pitchDeg": { "type": "number" },
+        "hp": { "type": "integer" },
+        "dead": { "type": "boolean" },
+        "moving": { "type": "boolean" },
+        "shooting": { "type": "boolean" },
+        "weapon": { "type": "string" },
+        "kills": { "type": "integer" },
+        "deaths": { "type": "integer" },
+        "hitTargetUid": { "type": "string" },
+        "hitDamage": { "type": "integer" },
+        "hitHeadshot": { "type": "boolean" },
+        "hitWeapon": { "type": "string" },
+        "hitSeq": { "type": "integer" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["userId", "shortId", "displayName", "team", "ready", "x", "y", "z", "yawDeg", "pitchDeg", "hp", "dead", "moving", "shooting", "weapon", "kills", "deaths", "hitSeq", "updatedAt"]
+    }
+  },
+  "firestore": {
+    "/players/{userId}": {
+      "schema": { "$ref": "#/entities/PlayerProfile" },
+      "description": "Human player profiles keyed by Firebase UID"
+    },
+    "/players/{userId}/friends/{friendUid}": {
+      "schema": { "$ref": "#/entities/FriendEntry" },
+      "description": "User-scoped confirmed friends list"
+    },
+    "/playerIds/{shortId}": {
+      "schema": { "$ref": "#/entities/PlayerIdReservation" },
+      "description": "Unique 6-digit numeric ID registry for human players"
+    },
+    "/friendRequests/{requestId}": {
+      "schema": { "$ref": "#/entities/FriendRequest" },
+      "description": "Pending and resolved friend requests between human players"
+    },
+    "/invites/{inviteId}": {
+      "schema": { "$ref": "#/entities/LobbyInvite" },
+      "description": "Live multiplayer lobby invitations"
+    },
+    "/lobbies/{lobbyId}": {
+      "schema": { "$ref": "#/entities/MultiplayerLobby" },
+      "description": "Multiplayer match rooms with host configuration and member roster"
+    },
+    "/lobbies/{lobbyId}/states/{playerUid}": {
+      "schema": { "$ref": "#/entities/LobbyPlayerState" },
+      "description": "Per-player live team choice, 3D transform, HP, and combat hit events"
+    }
+  }
+}

@@ -8,7 +8,9 @@ import com.example.model.GameMode
 import com.example.model.GameSettings
 import com.example.model.HudSnapshot
 import com.example.model.MatchConfig
+import com.example.model.OutgoingHitEvent
 import com.example.model.RadarBlip
+import com.example.model.RemoteHumanPlayer
 import com.example.model.TeamSide
 import com.example.model.WeaponSlot
 import com.example.model.WeaponType
@@ -187,6 +189,14 @@ class GameEngine(
 
     val bots = mutableListOf<BotOperative>()
 
+    // Real-time multiplayer remote human players (thread-safe bridge with Firestore)
+    private val remoteLock = Any()
+    private val remotePlayersMap = LinkedHashMap<String, RemoteHumanPlayer>()
+    private val lastProcessedHitSeq = HashMap<String, Int>()
+    @Volatile var lastOutgoingHit: OutgoingHitEvent? = null
+        private set
+    private var outgoingHitSeq: Int = 0
+
     private var fpsFrameCount: Int = 0
     private var fpsAccumTime: Float = 0f
     private var currentFps: Int = 60
@@ -194,6 +204,106 @@ class GameEngine(
     @Volatile
     var latestHud: HudSnapshot = HudSnapshot()
         private set
+
+    fun getRemotePlayersSnapshot(): List<RemoteHumanPlayer> = synchronized(remoteLock) {
+        remotePlayersMap.values.map { it.copy() }
+    }
+
+    /**
+     * Called from Firestore live listener when remote human members in the lobby update their state.
+     */
+    fun applyRemoteStates(
+        localUid: String,
+        remoteStates: List<com.example.online.PlayerMatchState>
+    ) {
+        val incomingHits = ArrayList<Triple<String, com.example.online.PlayerMatchState, Float>>()
+        synchronized(remoteLock) {
+            val activeUids = HashSet<String>()
+            for (st in remoteStates) {
+                if (st.userId.isBlank() || st.userId == localUid) continue
+                activeUids.add(st.userId)
+                val side = if (st.team == "CT") TeamSide.CT else TeamSide.T
+                val wep = WeaponType.entries.firstOrNull { it.name == st.weapon } ?: WeaponType.AK47
+                val existing = remotePlayersMap[st.userId]
+                if (existing == null) {
+                    remotePlayersMap[st.userId] = RemoteHumanPlayer(
+                        userId = st.userId,
+                        shortId = st.shortId,
+                        displayName = st.displayName,
+                        team = side,
+                        x = st.x.toFloat(),
+                        y = st.y.toFloat(),
+                        z = st.z.toFloat(),
+                        targetX = st.x.toFloat(),
+                        targetY = st.y.toFloat(),
+                        targetZ = st.z.toFloat(),
+                        yawDeg = st.yawDeg.toFloat(),
+                        targetYawDeg = st.yawDeg.toFloat(),
+                        hp = st.hp,
+                        isDead = st.dead,
+                        deathProgress = if (st.dead) 1f else 0f,
+                        isMoving = st.moving,
+                        isShooting = st.shooting,
+                        weapon = wep,
+                        kills = st.kills,
+                        deaths = st.deaths
+                    )
+                    // Baseline hitSeq on first observe so old hits aren't replayed on join
+                    lastProcessedHitSeq[st.userId] = st.hitSeq
+                } else {
+                    existing.targetX = st.x.toFloat()
+                    existing.targetY = st.y.toFloat()
+                    existing.targetZ = st.z.toFloat()
+                    existing.targetYawDeg = st.yawDeg.toFloat()
+                    existing.hp = st.hp
+                    existing.isDead = st.dead
+                    if (!st.dead) existing.deathProgress = 0f
+                    existing.isMoving = st.moving
+                    existing.isShooting = st.shooting
+                    existing.weapon = wep
+                    existing.kills = st.kills
+                    existing.deaths = st.deaths
+
+                    val prevSeq = lastProcessedHitSeq[st.userId] ?: 0
+                    if (st.hitSeq > prevSeq) {
+                        lastProcessedHitSeq[st.userId] = st.hitSeq
+                        if (st.hitTargetUid == localUid && st.hitDamage > 0 && side != matchConfig.playerSide) {
+                            incomingHits.add(Triple(st.displayName, st, st.hitDamage.toFloat()))
+                        }
+                    }
+                }
+            }
+            remotePlayersMap.keys.retainAll(activeUids)
+        }
+        // Apply incoming human PvP damage outside lock
+        for ((attackerName, st, dmg) in incomingHits) {
+            if (!isPlayerDead && !isRoundOver && !isMatchFinished) {
+                val side = if (st.team == "CT") TeamSide.CT else TeamSide.T
+                applyPlayerDamage(dmg, side, killedByBomb = false, attackerLabel = attackerName)
+            }
+        }
+    }
+
+    private fun updateRemotePlayersInterpolation(dt: Float) {
+        val posAlpha = (dt * 12f).coerceAtMost(1f)
+        val rotAlpha = (dt * 14f).coerceAtMost(1f)
+        synchronized(remoteLock) {
+            for (rp in remotePlayersMap.values) {
+                rp.x += (rp.targetX - rp.x) * posAlpha
+                rp.y += (rp.targetY - rp.y) * posAlpha
+                rp.z += (rp.targetZ - rp.z) * posAlpha
+                var diff = (rp.targetYawDeg - rp.yawDeg) % 360f
+                if (diff > 180f) diff -= 360f
+                if (diff < -180f) diff += 360f
+                rp.yawDeg += diff * rotAlpha
+                if (rp.isDead) {
+                    rp.deathProgress = (rp.deathProgress + dt * 2.2f).coerceAtMost(1f)
+                } else {
+                    rp.deathProgress = 0f
+                }
+            }
+        }
+    }
 
     init {
         resetMatchInternal()
@@ -319,6 +429,9 @@ class GameEngine(
         updateWeaponsAndFiring(dt)
         updateBombInteractions(dt)
         updateBots(dt)
+        if (matchConfig.isMultiplayer) {
+            updateRemotePlayersInterpolation(dt)
+        }
 
         if (isWarmup) {
             updateWarmupPhase(dt)
@@ -476,18 +589,27 @@ class GameEngine(
         // Orient player toward map center (0, 0)
         playerYawRad = atan2(sx.toDouble(), sz.toDouble()).toFloat()
 
-        // Spawn CT & T Bots (customizable 1..5 vs 1..5)
+        // Spawn CT & T Bots (respecting multiplayer host toggle allowBots: friends-only 1v1 vs bots!)
         bots.clear()
-        val allyBotsCount = (matchConfig.playerTeamSize - 1).coerceIn(0, 4)
-        val enemyBotsCount = matchConfig.enemyTeamSize.coerceIn(1, 5)
         val enemySide = if (matchConfig.playerSide == TeamSide.T) TeamSide.CT else TeamSide.T
+        if (!matchConfig.isMultiplayer || matchConfig.allowBots) {
+            val remoteAllies = if (matchConfig.isMultiplayer) {
+                synchronized(remoteLock) { remotePlayersMap.values.count { it.team == matchConfig.playerSide } }
+            } else 0
+            val remoteEnemies = if (matchConfig.isMultiplayer) {
+                synchronized(remoteLock) { remotePlayersMap.values.count { it.team == enemySide } }
+            } else 0
 
-        for (i in 0 until allyBotsCount) {
-            bots.add(createBot(matchConfig.playerSide, i + 1, assignBomb = false))
-        }
-        for (i in 0 until enemyBotsCount) {
-            val giveBombToBot = (!isWarmup && matchConfig.mode == GameMode.BOMB_DEFUSAL && enemySide == TeamSide.T && i == 0)
-            bots.add(createBot(enemySide, i, assignBomb = giveBombToBot))
+            val allyBotsCount = (matchConfig.playerTeamSize - 1 - remoteAllies).coerceIn(0, 4)
+            val enemyBotsCount = (matchConfig.enemyTeamSize - remoteEnemies).coerceIn(0, 5)
+
+            for (i in 0 until allyBotsCount) {
+                bots.add(createBot(matchConfig.playerSide, i + 1, assignBomb = false))
+            }
+            for (i in 0 until enemyBotsCount) {
+                val giveBombToBot = (!isWarmup && matchConfig.mode == GameMode.BOMB_DEFUSAL && enemySide == TeamSide.T && i == 0 && remoteEnemies == 0)
+                bots.add(createBot(enemySide, i, assignBomb = giveBombToBot))
+            }
         }
 
         bannerText = when {
@@ -685,7 +807,7 @@ class GameEngine(
 
         val targetX = playerX + (fwdX * ny + rightX * nx) * baseSpeed * dt
         val targetZ = playerZ + (fwdZ * ny + rightZ * nx) * baseSpeed * dt
-        val (resolvedX, floorY, resolvedZ) = world.resolveMovement(playerX, playerFloorY, playerZ, targetX, targetZ, 0.24f)
+        val (resolvedX, floorY, resolvedZ) = world.resolveMovement(playerX, playerFloorY, playerZ, targetX, targetZ, 0.36f)
         playerX = resolvedX
         playerZ = resolvedZ
         playerFloorY = floorY
@@ -1053,6 +1175,7 @@ class GameEngine(
         val wallDist = world.raycastWalls(camX, camY, camZ, dirX, dirY, dirZ, 110f)
 
         var hitBot: BotOperative? = null
+        var hitRemote: RemoteHumanPlayer? = null
         var hitDist = wallDist
         var headshot = false
 
@@ -1061,15 +1184,35 @@ class GameEngine(
             if (b.isDead || b.team == matchConfig.playerSide) continue
             val tHead = intersectRaySphere(camX, camY, camZ, dirX, dirY, dirZ, b.x, b.y + 1.56f, b.z, 0.22f)
             if (tHead < hitDist) {
-                hitDist = tHead; hitBot = b; headshot = true
+                hitDist = tHead; hitBot = b; hitRemote = null; headshot = true
             }
             val tChest = intersectRaySphere(camX, camY, camZ, dirX, dirY, dirZ, b.x, b.y + 1.12f, b.z, 0.35f)
             if (tChest < hitDist) {
-                hitDist = tChest; hitBot = b; headshot = false
+                hitDist = tChest; hitBot = b; hitRemote = null; headshot = false
             }
             val tLegs = intersectRaySphere(camX, camY, camZ, dirX, dirY, dirZ, b.x, b.y + 0.54f, b.z, 0.31f)
             if (tLegs < hitDist) {
-                hitDist = tLegs; hitBot = b; headshot = false
+                hitDist = tLegs; hitBot = b; hitRemote = null; headshot = false
+            }
+        }
+
+        // Also test against live remote human opponents in multiplayer matches!
+        if (matchConfig.isMultiplayer) {
+            val remotes = getRemotePlayersSnapshot()
+            for (rp in remotes) {
+                if (rp.isDead || rp.team == matchConfig.playerSide) continue
+                val tHead = intersectRaySphere(camX, camY, camZ, dirX, dirY, dirZ, rp.x, rp.y + 1.56f, rp.z, 0.24f)
+                if (tHead < hitDist) {
+                    hitDist = tHead; hitRemote = rp; hitBot = null; headshot = true
+                }
+                val tChest = intersectRaySphere(camX, camY, camZ, dirX, dirY, dirZ, rp.x, rp.y + 1.12f, rp.z, 0.36f)
+                if (tChest < hitDist) {
+                    hitDist = tChest; hitRemote = rp; hitBot = null; headshot = false
+                }
+                val tLegs = intersectRaySphere(camX, camY, camZ, dirX, dirY, dirZ, rp.x, rp.y + 0.54f, rp.z, 0.32f)
+                if (tLegs < hitDist) {
+                    hitDist = tLegs; hitRemote = rp; hitBot = null; headshot = false
+                }
             }
         }
 
@@ -1079,6 +1222,30 @@ class GameEngine(
             isHeadshotHit = headshot
             val dmg = if (headshot) w.headDamage else w.bodyDamage
             applyBotDamage(hitBot, dmg, headshot, killerIsPlayer = true, weaponUsed = w)
+            if (headshot) soundEngine.playHeadshot() else soundEngine.playHitMarker()
+            if (headshot && settings.audio.hapticsEnabled) onHapticPulse(true)
+        } else if (hitRemote != null) {
+            shotsHit++
+            hitMarkerAlpha = 1.0f
+            isHeadshotHit = headshot
+            val dmg = (if (headshot) w.headDamage else w.bodyDamage).toInt().coerceIn(1, 200)
+            outgoingHitSeq++
+            lastOutgoingHit = OutgoingHitEvent(
+                seq = outgoingHitSeq,
+                targetUid = hitRemote.userId,
+                damage = dmg,
+                headshot = headshot,
+                weaponName = w.shortLabel
+            )
+            if (dmg >= hitRemote.hp && !isWarmup) {
+                kills++
+                if (headshot) headshots++
+                money = (money + w.killReward).coerceAtMost(16000)
+                score += if (headshot) 250 else 150
+                val hsTag = if (headshot) " [ГОЛОВА]" else ""
+                killFeedText = "ВЫ [${w.shortLabel}]$hsTag → ${hitRemote.displayName}"
+                killFeedTimer = 3.2f
+            }
             if (headshot) soundEngine.playHeadshot() else soundEngine.playHitMarker()
             if (headshot && settings.audio.hapticsEnabled) onHapticPulse(true)
         }
@@ -1286,7 +1453,7 @@ class GameEngine(
                 }
             }
 
-            val (nx, ny, nz) = world.resolveMovement(b.x, b.y, b.z, b.x + vx * dt, b.z + vz * dt, 0.24f)
+            val (nx, ny, nz) = world.resolveMovement(b.x, b.y, b.z, b.x + vx * dt, b.z + vz * dt, 0.30f)
             b.x = nx; b.y = ny; b.z = nz
             // Smooth shortest-arc angular turning so bots never snap instantaneously!
             var diff = (b.yawDeg - b.visualYawDeg) % 360f
@@ -1327,7 +1494,12 @@ class GameEngine(
         if (abs(b.moveStrafeRatio) > 0.05f) b.strafePhase += dt * (2.8f + abs(b.moveStrafeRatio) * 5.2f)
     }
 
-    private fun applyPlayerDamage(amount: Float, attackerSide: TeamSide, killedByBomb: Boolean) {
+    private fun applyPlayerDamage(
+        amount: Float,
+        attackerSide: TeamSide,
+        killedByBomb: Boolean,
+        attackerLabel: String? = null
+    ) {
         damageFlashAlpha = if (killedByBomb) 1.0f else 0.85f
         if (!killedByBomb) soundEngine.playDamage()
         if (settings.audio.hapticsEnabled) onHapticPulse(true)
@@ -1345,7 +1517,7 @@ class GameEngine(
             killFeedText = if (killedByBomb) {
                 "ВЫ ПОГИБЛИ ОТ ВЗРЫВА C4!"
             } else {
-                "${attackerSide.shortRu} → ВЫ"
+                "${attackerLabel ?: attackerSide.shortRu} → ВЫ"
             }
             killFeedTimer = 3.6f
 
@@ -1407,6 +1579,11 @@ class GameEngine(
     private fun countAlive(side: TeamSide): Int {
         var count = bots.count { !it.isDead && it.team == side }
         if (matchConfig.playerSide == side && !isPlayerDead) count++
+        if (matchConfig.isMultiplayer) {
+            synchronized(remoteLock) {
+                count += remotePlayersMap.values.count { !it.isDead && it.team == side }
+            }
+        }
         return count
     }
 
@@ -1443,10 +1620,16 @@ class GameEngine(
             bombState == BombState.PLANTED &&
             distBomb <= 3.0f
 
-        val blips = ArrayList<RadarBlip>(bots.size + 1)
+        val remotes = if (matchConfig.isMultiplayer) getRemotePlayersSnapshot() else emptyList()
+        val blips = ArrayList<RadarBlip>(bots.size + remotes.size + 1)
         for (b in bots) {
             if (!b.isDead) {
                 blips.add(RadarBlip(b.x - playerX, b.z - playerZ, isAlly = b.team == matchConfig.playerSide))
+            }
+        }
+        for (rp in remotes) {
+            if (!rp.isDead) {
+                blips.add(RadarBlip(rp.x - playerX, rp.z - playerZ, isAlly = rp.team == matchConfig.playerSide))
             }
         }
         if (bombState == BombState.PLANTED) {
@@ -1512,7 +1695,9 @@ class GameEngine(
             bannerText = bannerText,
             killFeedText = killFeedText,
             radarBlips = blips,
-            playerYawDeg = Math.toDegrees(playerYawRad.toDouble()).toFloat()
+            playerYawDeg = Math.toDegrees(playerYawRad.toDouble()).toFloat(),
+            isMultiplayer = matchConfig.isMultiplayer,
+            onlinePlayersCount = 1 + remotes.size
         )
     }
 }

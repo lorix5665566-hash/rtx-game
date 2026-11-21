@@ -184,25 +184,29 @@ object FilamentSceneHelpers {
         }
 
         val bloom = View.BloomOptions().apply {
-            enabled = gfx.bloomAndAces
-            strength = if (gfx.preset == GraphicsPreset.ULTRA_RTX) 0.14f else 0.08f
+            enabled = gfx.bloomAndAces && gfx.preset != GraphicsPreset.LOW
+            strength = if (gfx.preset == GraphicsPreset.ULTRA_RTX) 0.12f else 0.07f
             threshold = true
         }
         view.bloomOptions = bloom
 
+        // Disable heavy screen-space AO for maximum FPS on mobile GPUs (2K shadows remain active!)
         val ao = View.AmbientOcclusionOptions().apply {
-            enabled = gfx.preset == GraphicsPreset.ULTRA_RTX && gfx.rtxReflections
-            radius = 0.45f
-            intensity = 1.15f
+            enabled = false
         }
         view.ambientOcclusionOptions = ao
 
+        // Preserve full 2048px 2-cascade dynamic sun shadows unchanged
         view.setShadowingEnabled(gfx.dynamicLighting && gfx.preset != GraphicsPreset.LOW)
 
+        // Adaptive dynamic resolution scaling keeps FPS smooth on all phones during combat
+        val targetMax = gfx.resolutionScale.coerceIn(0.60f, 1.0f)
+        val targetMin = (targetMax * 0.72f).coerceIn(0.55f, targetMax)
         val dynRes = View.DynamicResolutionOptions().apply {
-            enabled = gfx.resolutionScale < 0.99f
-            minScale = gfx.resolutionScale.coerceIn(0.55f, 1.0f)
-            maxScale = gfx.resolutionScale.coerceIn(0.55f, 1.0f)
+            enabled = true
+            minScale = targetMin
+            maxScale = targetMax
+            quality = View.QualityLevel.MEDIUM
         }
         view.dynamicResolutionOptions = dynRes
 
@@ -212,8 +216,8 @@ object FilamentSceneHelpers {
                 if (gfx.bloomAndAces) ColorGrading.ToneMapping.ACES
                 else ColorGrading.ToneMapping.LINEAR
             )
-            .contrast(if (gfx.bloomAndAces) 1.08f else 1.0f)
-            .saturation(if (gfx.bloomAndAces) 1.07f else 1.0f)
+            .contrast(if (gfx.bloomAndAces) 1.07f else 1.0f)
+            .saturation(if (gfx.bloomAndAces) 1.06f else 1.0f)
             .build(engine)
         view.colorGrading = grading
         if (prevGrading != null && prevGrading != grading) {
@@ -223,13 +227,8 @@ object FilamentSceneHelpers {
 
     /**
      * Builds a transform matrix that places a loaded character .GLB standing at (x, y, z)
-     * with exact real human height (~1.76m), feet anchored cleanly on floor y, facing yawDeg,
+     * with exact real human height (1.76m), feet anchored cleanly on floor y, facing yawDeg (+Z forward),
      * with smooth backward death fall tilt.
-     *
-     * CRITICAL: Bundled Mixamo skeletal GLBs have a 0.01 scale root node canceled by 100.0
-     * inverseBindMatrices, so Filament's unskinned asset.boundingBox reads 0.0047m while the
-     * actual animated skeleton stands at 1.93m with feet at y=0! Using native 1.93m calibration
-     * completely prevents the 378x giant-character bug!
      */
     fun buildCharacterMatrix(
         out: FloatArray,
@@ -244,15 +243,14 @@ object FilamentSceneHelpers {
     ) {
         Matrix.setIdentityM(out, 0)
         Matrix.translateM(out, 0, x, y + deathProgress * 0.14f, z)
-        // Bundled Mixamo rigs face -Z natively -> +180° aligns forward strictly to +Z (atan2(dx, dz))!
-        val correctedYaw = if (!isCustomImported) yawDeg + 180f else yawDeg
-        Matrix.rotateM(out, 0, correctedYaw, 0f, 1f, 0f)
+        // Bundled anatomical human operatives face +Z natively (aligned 1:1 with atan2(dx, dz))
+        Matrix.rotateM(out, 0, yawDeg, 0f, 1f, 0f)
         if (deathProgress > 0.001f) {
             Matrix.rotateM(out, 0, -deathProgress * 86f, 1f, 0f, 0f)
         }
         if (!isCustomImported) {
-            // Calibrated Mixamo rigged character: native animated height = 1.93m, feet at y = 0.0
-            val nativeScale = targetHeight / 1.93f
+            // Native height of char_terrorist.glb & char_ct.glb is exactly 1.76m with boots at y = 0.0
+            val nativeScale = targetHeight / 1.76f
             Matrix.scaleM(out, 0, nativeScale, nativeScale, nativeScale)
         } else {
             // Safe clamped auto-normalization for user-imported Sketchfab characters

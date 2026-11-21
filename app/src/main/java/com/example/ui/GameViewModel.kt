@@ -25,6 +25,7 @@ import kotlinx.coroutines.flow.asStateFlow
 
 sealed interface AppScreen {
     data object Menu : AppScreen
+    data object MultiplayerLobby : AppScreen
     data object Playing : AppScreen
     data class Settings(val returnToGame: Boolean) : AppScreen
     data class ControlEditor(val returnToGame: Boolean) : AppScreen
@@ -76,7 +77,20 @@ class GameViewModel(application: Application) : AndroidViewModel(application) {
     fun startGame() {
         _isPauseOverlayOpen.value = false
         engine.settings = _settings.value
-        engine.startNewMatch(_matchConfig.value)
+        engine.startNewMatch(_matchConfig.value.copy(isMultiplayer = false, lobbyId = null, allowBots = true))
+        _screen.value = AppScreen.Playing
+    }
+
+    fun openMultiplayerLobby() {
+        _isPauseOverlayOpen.value = false
+        _screen.value = AppScreen.MultiplayerLobby
+    }
+
+    fun startMultiplayerMatch(config: MatchConfig) {
+        _matchConfig.value = config
+        _isPauseOverlayOpen.value = false
+        engine.settings = _settings.value
+        engine.startNewMatch(config)
         _screen.value = AppScreen.Playing
     }
 

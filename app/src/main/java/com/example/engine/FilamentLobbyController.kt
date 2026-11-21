@@ -40,8 +40,8 @@ class FilamentLobbyController(
 ) : Choreographer.FrameCallback {
 
     @Volatile var showcaseSide: TeamSide = TeamSide.T
-    // Calibrated so Idle tactical stance faces 99.7% dead-straight into the Mirage courtyard camera!
-    @Volatile var characterYawDeg: Float = 118f
+    // Calibrated so our +Z human operative faces dead-straight into the pulled-back Mirage courtyard camera (atan2(4.10, 1.10) ≈ 75°)!
+    @Volatile var characterYawDeg: Float = 75f
     @Volatile private var yawVelocityDegPerSec: Float = 0f
 
     private lateinit var engine: Engine
