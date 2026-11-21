@@ -68,6 +68,15 @@ class FilamentGameplayController(
 
     // First-person weapon models mapped by ModelSlot
     private val fpWeapons = HashMap<ModelSlot, LoadedGlbModel>()
+
+    // Faction first-person tactical hands & gloves (.GLB) aligned 1:1 with bundled CS2 weapons
+    private var handsTRifle: LoadedGlbModel? = null
+    private var handsTPistol: LoadedGlbModel? = null
+    private var handsTKnife: LoadedGlbModel? = null
+    private var handsCtRifle: LoadedGlbModel? = null
+    private var handsCtPistol: LoadedGlbModel? = null
+    private var handsCtKnife: LoadedGlbModel? = null
+
     private var muzzleFlashModel: LoadedGlbModel? = null
     private var plantedBombModel: LoadedGlbModel? = null
     private var explosionFireball: LoadedGlbModel? = null
@@ -94,7 +103,8 @@ class FilamentGameplayController(
         scene = engine.createScene()
         view = engine.createView()
         camera = engine.createCamera(engine.entityManager.create())
-        camera.setExposure(16.0f, 1.0f / 125.0f, 100.0f)
+        // Bright crisp CS2 daylight exposure
+        camera.setExposure(16.0f, 1.0f / 100.0f, 100.0f)
         view.scene = scene
         view.camera = camera
 
@@ -112,7 +122,7 @@ class FilamentGameplayController(
             override fun onNativeWindowChanged(surface: Surface) {
                 swapChain?.let { engine.destroySwapChain(it) }
                 swapChain = engine.createSwapChain(surface)
-                displayHelper.attach(renderer, surfaceView.display)
+                surfaceView.display?.let { displayHelper.attach(renderer, it) }
             }
 
             override fun onDetachedFromSurface() {
@@ -154,6 +164,30 @@ class FilamentGameplayController(
             assetLoader, resourceLoader,
             registry.loadBundledAssetBuffer("models/vfx_shockwave.glb")
         )
+        handsTRifle = FilamentSceneHelpers.loadGlb(
+            assetLoader, resourceLoader,
+            registry.loadBundledAssetBuffer("models/fp_hands_t_rifle.glb")
+        )
+        handsTPistol = FilamentSceneHelpers.loadGlb(
+            assetLoader, resourceLoader,
+            registry.loadBundledAssetBuffer("models/fp_hands_t_pistol.glb")
+        )
+        handsTKnife = FilamentSceneHelpers.loadGlb(
+            assetLoader, resourceLoader,
+            registry.loadBundledAssetBuffer("models/fp_hands_t_knife.glb")
+        )
+        handsCtRifle = FilamentSceneHelpers.loadGlb(
+            assetLoader, resourceLoader,
+            registry.loadBundledAssetBuffer("models/fp_hands_ct_rifle.glb")
+        )
+        handsCtPistol = FilamentSceneHelpers.loadGlb(
+            assetLoader, resourceLoader,
+            registry.loadBundledAssetBuffer("models/fp_hands_ct_pistol.glb")
+        )
+        handsCtKnife = FilamentSceneHelpers.loadGlb(
+            assetLoader, resourceLoader,
+            registry.loadBundledAssetBuffer("models/fp_hands_ct_knife.glb")
+        )
         reloadDynamicSlots()
     }
 
@@ -169,13 +203,16 @@ class FilamentGameplayController(
             assetLoader, resourceLoader, registry.loadGlbBuffer(ModelSlot.BOMB_C4)
         )
 
-        // First-person Weapon .GLB slots
+        // All 10 Distinct CS2 First-Person Weapon .GLB slots
         val weaponSlots = listOf(
             ModelSlot.WEAPON_AK47,
             ModelSlot.WEAPON_M4A1_S,
             ModelSlot.WEAPON_AWP,
             ModelSlot.WEAPON_P90,
-            ModelSlot.WEAPON_PISTOL,
+            ModelSlot.WEAPON_MP9,
+            ModelSlot.WEAPON_USP_S,
+            ModelSlot.WEAPON_GLOCK_18,
+            ModelSlot.WEAPON_DEAGLE,
             ModelSlot.WEAPON_KNIFE,
             ModelSlot.BOMB_C4
         )
@@ -248,6 +285,7 @@ class FilamentGameplayController(
         if (isDestroyed) return
         isDestroyed = true
         stop()
+        if (!::engine.isInitialized) return
         uiHelper.detach()
 
         destroyModel(mapModel)
@@ -256,6 +294,12 @@ class FilamentGameplayController(
         destroyModel(explosionFireball)
         destroyModel(explosionSmoke)
         destroyModel(explosionShockwave)
+        destroyModel(handsTRifle)
+        destroyModel(handsTPistol)
+        destroyModel(handsTKnife)
+        destroyModel(handsCtRifle)
+        destroyModel(handsCtPistol)
+        destroyModel(handsCtKnife)
         fpWeapons.values.forEach { destroyModel(it) }
         ctPool.forEach { destroyModel(it) }
         tPool.forEach { destroyModel(it) }
@@ -358,6 +402,7 @@ class FilamentGameplayController(
             if (slotIdx >= pool.size) continue
             val model = pool[slotIdx]
 
+            val charSlot = if (b.team == TeamSide.CT) ModelSlot.CHARACTER_CT else ModelSlot.CHARACTER_T
             FilamentSceneHelpers.setAssetVisible(scene, model, true)
             FilamentSceneHelpers.buildCharacterMatrix(
                 out = tmpMat,
@@ -365,9 +410,10 @@ class FilamentGameplayController(
                 x = b.x,
                 y = b.y,
                 z = b.z,
-                yawDeg = b.yawDeg,
+                yawDeg = b.visualYawDeg,
                 deathProgress = b.deathProgress,
-                targetHeight = 1.78f
+                targetHeight = 1.76f,
+                isCustomImported = registry.hasCustomFile(charSlot)
             )
             tm.setTransform(tm.getInstance(model.asset.root), tmpMat)
 
@@ -396,79 +442,207 @@ class FilamentGameplayController(
     private fun updateFirstPersonWeaponAndMuzzle() {
         val tm = engine.transformManager
         val hud = gameEngine.latestHud
-        val hideWeapon = hud.isPlayerDead || (gameEngine.activeWeapon.hasSniperScope && gameEngine.adsBlend > 0.52f)
-        val activeSlot = ModelSlot.forWeapon(gameEngine.activeWeapon)
+        val w = gameEngine.activeWeapon
+        val hideWeapon = hud.isPlayerDead || (w.hasSniperScope && gameEngine.adsBlend > 0.52f)
+        val activeSlot = ModelSlot.forWeapon(w)
+        val isCustomWeapon = registry.hasCustomFile(activeSlot)
+
+        // Compute smooth CS2 per-weapon equip/draw animation offsets (u: 1 -> 0 as weapon finishes drawing)
+        val ep = gameEngine.equipProgress
+        val u = (1f - ep).coerceIn(0f, 1f)
+        val ease = u * u * (3f - 2f * u)
+        val midPulse = sin(ep * Math.PI).toFloat().coerceAtLeast(0f)
+
+        var eqX = 0f
+        var eqY = 0f
+        var eqZ = 0f
+        var eqYaw = 0f
+        var eqPitch = 0f
+        var eqRoll = 0f
+
+        if (u > 0.001f) {
+            when (w) {
+                WeaponType.KNIFE -> {
+                    eqX = 0.08f * ease
+                    eqY = -0.26f * ease
+                    eqZ = 0.07f * ease
+                    eqYaw = -22f * ease
+                    eqPitch = -35f * ease
+                    eqRoll = 210f * ease
+                }
+                WeaponType.USP_S, WeaponType.GLOCK_18, WeaponType.DESERT_EAGLE -> {
+                    val rackBump = if (ep in 0.42f..0.78f) {
+                        sin(((ep - 0.42f) / 0.36f) * Math.PI).toFloat()
+                    } else 0f
+                    eqX = 0.05f * ease
+                    eqY = -0.24f * ease + rackBump * 0.015f
+                    eqZ = 0.08f * ease + rackBump * 0.025f
+                    eqPitch = -48f * ease + rackBump * 12f
+                    eqRoll = -18f * ease + rackBump * 14f
+                }
+                WeaponType.MP9, WeaponType.P90 -> {
+                    eqX = 0.06f * ease
+                    eqY = -0.25f * ease
+                    eqZ = 0.09f * ease
+                    eqPitch = -36f * ease
+                    eqRoll = -26f * ease + midPulse * 14f
+                }
+                WeaponType.AK47, WeaponType.M4A1_S -> {
+                    eqX = 0.07f * ease
+                    eqY = -0.30f * ease
+                    eqZ = 0.11f * ease
+                    eqYaw = -10f * ease
+                    eqPitch = -38f * ease
+                    eqRoll = -14f * ease + midPulse * 28f
+                }
+                WeaponType.AWP -> {
+                    eqX = 0.09f * ease
+                    eqY = -0.34f * ease
+                    eqZ = 0.13f * ease
+                    eqYaw = -12f * ease
+                    eqPitch = -44f * ease
+                    eqRoll = -16f * ease + midPulse * 24f
+                }
+                WeaponType.C4_BOMB -> {
+                    eqY = -0.26f * ease
+                    eqZ = 0.08f * ease
+                    eqPitch = -35f * ease
+                }
+            }
+        }
+
+        val ads = gameEngine.adsBlend
+        val bobX = sin(gameEngine.walkBobPhase) * 0.011f * gameEngine.moveSpeedRatio * (1f - ads * 0.72f)
+        val bobY = kotlin.math.abs(cos(gameEngine.walkBobPhase)) * 0.013f * gameEngine.moveSpeedRatio * (1f - ads * 0.72f)
+        val recoilZ = gameEngine.recoilKick * 0.048f
+        val recoilPitch = gameEngine.recoilKick * 7.2f
+        val reloadDip = if (hud.isReloading) sin(hud.reloadProgress * Math.PI).toFloat() * 0.16f else 0f
+        val knifeSwing = if (w == WeaponType.KNIFE && gameEngine.knifeSwingProgress > 0f) {
+            sin(gameEngine.knifeSwingProgress * Math.PI).toFloat()
+        } else 0f
+        val boltTilt = if (w == WeaponType.AWP && gameEngine.boltProgress > 0f) {
+            sin(gameEngine.boltProgress * Math.PI).toFloat()
+        } else 0f
+
+        // Calibrated 1:1 CS2 hip offsets for our meter-authored weapons (grip at origin, barrel along -Z)
+        val hipX = when (w) {
+            WeaponType.C4_BOMB -> 0.04f
+            WeaponType.KNIFE -> 0.19f
+            WeaponType.USP_S, WeaponType.GLOCK_18, WeaponType.DESERT_EAGLE -> 0.17f
+            WeaponType.AWP -> 0.21f
+            else -> 0.19f
+        }
+        val hipY = when (w) {
+            WeaponType.C4_BOMB -> -0.18f
+            WeaponType.KNIFE -> -0.19f
+            WeaponType.USP_S, WeaponType.GLOCK_18, WeaponType.DESERT_EAGLE -> -0.18f
+            WeaponType.AWP -> -0.21f
+            else -> -0.20f
+        }
+        val hipZ = when (w) {
+            WeaponType.C4_BOMB -> -0.34f
+            WeaponType.KNIFE -> -0.32f
+            WeaponType.USP_S, WeaponType.GLOCK_18, WeaponType.DESERT_EAGLE -> -0.36f
+            WeaponType.MP9, WeaponType.P90 -> -0.35f
+            WeaponType.AWP -> -0.36f
+            else -> -0.35f
+        }
+        val adsY = when (w) {
+            WeaponType.USP_S, WeaponType.GLOCK_18, WeaponType.DESERT_EAGLE -> -0.115f
+            WeaponType.P90, WeaponType.MP9 -> -0.135f
+            else -> -0.140f
+        }
+
+        val offX = hipX * (1f - ads) + bobX + gameEngine.weaponSwayX - knifeSwing * 0.22f + eqX
+        val offY = (hipY * (1f - ads) + adsY * ads) - bobY + gameEngine.weaponSwayY - gameEngine.landingDip - reloadDip + knifeSwing * 0.05f + eqY
+        val offZ = hipZ + recoilZ - knifeSwing * 0.14f + eqZ
+
+        val yawDeg = eqYaw + gameEngine.weaponSwayX * 145f + knifeSwing * 46f + boltTilt * 6f
+        val pitchDeg = recoilPitch + gameEngine.weaponSwayY * 130f - gameEngine.landingDip * 90f - reloadDip * 78f + eqPitch + boltTilt * 10f
+        val rollDeg = (if (hud.isReloading) -26f else -knifeSwing * 36f) + gameEngine.strafeRoll + eqRoll + boltTilt * 22f
 
         for ((slot, model) in fpWeapons) {
             val visible = !hideWeapon && slot == activeSlot
             FilamentSceneHelpers.setAssetVisible(scene, model, visible)
             if (!visible) continue
 
-            val w = gameEngine.activeWeapon
-            val ads = gameEngine.adsBlend
-            val bobX = sin(gameEngine.walkBobPhase) * 0.012f * gameEngine.moveSpeedRatio * (1f - ads * 0.7f)
-            val bobY = kotlin.math.abs(cos(gameEngine.walkBobPhase)) * 0.014f * gameEngine.moveSpeedRatio * (1f - ads * 0.7f)
-            val recoilZ = gameEngine.recoilKick * 0.055f
-            val recoilPitch = gameEngine.recoilKick * 7.5f
-            val reloadDip = if (hud.isReloading) sin(hud.reloadProgress * Math.PI).toFloat() * 0.16f else 0f
-            val knifeSwing = if (w == WeaponType.KNIFE && gameEngine.knifeSwingProgress > 0f) {
-                sin(gameEngine.knifeSwingProgress * Math.PI).toFloat()
-            } else 0f
-
-            val targetSpan = when (w) {
-                WeaponType.AWP -> 0.76f
-                WeaponType.AK47, WeaponType.M4A1_S -> 0.62f
-                WeaponType.MP9, WeaponType.P90 -> 0.46f
-                WeaponType.USP_S, WeaponType.GLOCK_18, WeaponType.DESERT_EAGLE -> 0.28f
-                WeaponType.KNIFE -> 0.28f
-                WeaponType.C4_BOMB -> 0.24f
+            if (!isCustomWeapon) {
+                // Exact 1:1 calibrated CS2 PBR weapon model (grip at origin, barrel along -Z)
+                FilamentSceneHelpers.buildDirectWeaponMatrix(
+                    out = localMat,
+                    tx = offX,
+                    ty = offY,
+                    tz = offZ,
+                    yawDeg = yawDeg,
+                    pitchDeg = pitchDeg,
+                    rollDeg = rollDeg,
+                    scale = 1.0f
+                )
+            } else {
+                // Auto-normalized fallback for user-imported Sketchfab weapon .GLBs
+                val targetSpan = when (w) {
+                    WeaponType.AWP -> 0.78f
+                    WeaponType.AK47, WeaponType.M4A1_S -> 0.64f
+                    WeaponType.MP9, WeaponType.P90 -> 0.46f
+                    WeaponType.USP_S, WeaponType.GLOCK_18, WeaponType.DESERT_EAGLE -> 0.28f
+                    WeaponType.KNIFE -> 0.28f
+                    WeaponType.C4_BOMB -> 0.24f
+                }
+                val autoYaw = when {
+                    w == WeaponType.C4_BOMB -> 180f
+                    w == WeaponType.KNIFE -> 165f
+                    model.sizeX > model.sizeZ * 1.15f -> 90f
+                    else -> 180f
+                }
+                FilamentSceneHelpers.buildNormalizedPropMatrix(
+                    out = localMat,
+                    model = model,
+                    targetMaxExtent = targetSpan,
+                    tx = offX,
+                    ty = offY,
+                    tz = offZ - 0.08f,
+                    yawDeg = autoYaw + yawDeg,
+                    pitchDeg = pitchDeg,
+                    rollDeg = rollDeg,
+                    anchorBottom = false
+                )
             }
-
-            // Right-hand hip offset lerping cleanly to centered ADS sightline
-            val hipX = if (w == WeaponType.C4_BOMB) 0.06f else 0.21f
-            val hipY = if (w == WeaponType.C4_BOMB) -0.17f else -0.18f
-            val hipZ = if (w == WeaponType.KNIFE || w == WeaponType.C4_BOMB) -0.38f else -0.44f
-
-            val offX = hipX * (1f - ads) + bobX - knifeSwing * 0.22f
-            val offY = hipY * (1f - ads * 0.35f) - bobY - reloadDip + knifeSwing * 0.04f
-            val offZ = hipZ + recoilZ - knifeSwing * 0.14f
-
-            // Auto-orient weapon long axis along -Z (aiming forward)
-            val autoYaw = when {
-                w == WeaponType.C4_BOMB -> 180f
-                w == WeaponType.KNIFE -> 165f
-                model.sizeX > model.sizeZ * 1.15f -> 90f
-                else -> 180f
-            }
-
-            FilamentSceneHelpers.buildNormalizedPropMatrix(
-                out = localMat,
-                model = model,
-                targetMaxExtent = targetSpan,
-                tx = offX,
-                ty = offY,
-                tz = offZ,
-                yawDeg = autoYaw + knifeSwing * 48f,
-                pitchDeg = recoilPitch - reloadDip * 85f,
-                rollDeg = if (hud.isReloading) -28f else -knifeSwing * 35f,
-                anchorBottom = false
-            )
             Matrix.multiplyMM(finalMat, 0, camMat, 0, localMat, 0)
             tm.setTransform(tm.getInstance(model.asset.root), finalMat)
         }
 
-        // Crisp 45ms 3D Muzzle Flash (.GLB) at barrel tip
+        // Synced Faction First-Person Tactical Hands & Gloves (T vs CT; Rifle / Pistol / Knife poses)
+        val isT = gameEngine.matchConfig.playerSide == TeamSide.T
+        val activeHands: LoadedGlbModel? = if (hideWeapon || isCustomWeapon || w == WeaponType.C4_BOMB) {
+            null
+        } else {
+            when (w) {
+                WeaponType.KNIFE -> if (isT) handsTKnife else handsCtKnife
+                WeaponType.USP_S, WeaponType.GLOCK_18, WeaponType.DESERT_EAGLE -> if (isT) handsTPistol else handsCtPistol
+                else -> if (isT) handsTRifle else handsCtRifle
+            }
+        }
+        val allHands = listOf(handsTRifle, handsTPistol, handsTKnife, handsCtRifle, handsCtPistol, handsCtKnife)
+        for (h in allHands) {
+            val vis = (h != null && h === activeHands)
+            FilamentSceneHelpers.setAssetVisible(scene, h, vis)
+            if (vis && h != null) {
+                // Hands share the EXACT same localMat as our calibrated weapon model!
+                Matrix.multiplyMM(finalMat, 0, camMat, 0, localMat, 0)
+                tm.setTransform(tm.getInstance(h.asset.root), finalMat)
+            }
+        }
+
+        // Crisp 45ms 3D Muzzle Flash (.GLB) anchored to exact weapon barrel tip!
         val flashAmt = gameEngine.muzzleFlashTimer
-        val showFlash = !hideWeapon && flashAmt > 0.08f &&
-            gameEngine.activeWeapon != WeaponType.KNIFE &&
-            gameEngine.activeWeapon != WeaponType.C4_BOMB
+        val showFlash = !hideWeapon && !gameEngine.isEquipping && flashAmt > 0.08f &&
+            w != WeaponType.KNIFE && w != WeaponType.C4_BOMB
         FilamentSceneHelpers.setAssetVisible(scene, muzzleFlashModel, showFlash)
         if (showFlash && muzzleFlashModel != null) {
-            val ads = gameEngine.adsBlend
-            val fxX = 0.21f * (1f - ads)
-            val fxY = -0.14f * (1f - ads * 0.35f)
-            val fxZ = -0.78f
-            val flashSize = (0.20f + flashAmt * 0.26f) * if (gameEngine.activeWeapon.isSuppressed) 0.45f else 1.0f
+            val fxX = offX
+            val fxY = offY + 0.072f
+            val fxZ = offZ + w.muzzleOffsetZ
+            val flashSize = (0.18f + flashAmt * 0.24f) * if (w.isSuppressed) 0.42f else 1.0f
             FilamentSceneHelpers.buildNormalizedPropMatrix(
                 out = localMat,
                 model = muzzleFlashModel!!,

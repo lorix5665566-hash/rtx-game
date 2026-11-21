@@ -73,24 +73,45 @@ enum class ModelSlot(
         sketchfabQuery = "cs2 awp"
     ),
     WEAPON_P90(
-        titleRu = "P90 / MP9",
+        titleRu = "P90",
         categoryRu = "ОРУЖИЕ",
         bundledAssetPath = "models/weapon_p90.glb",
-        defaultSourceLabel = "Встроенный P90 (.GLB)",
+        defaultSourceLabel = "PBR CS2 P90 (.GLB)",
         sketchfabQuery = "cs2 p90"
     ),
-    WEAPON_PISTOL(
-        titleRu = "Пистолеты (USP / Glock / Deagle)",
+    WEAPON_MP9(
+        titleRu = "MP9",
         categoryRu = "ОРУЖИЕ",
-        bundledAssetPath = "models/weapon_pistol.glb",
-        defaultSourceLabel = "Встроенный пистолет (.GLB)",
+        bundledAssetPath = "models/weapon_mp9.glb",
+        defaultSourceLabel = "PBR CS2 MP9 (.GLB)",
+        sketchfabQuery = "cs2 mp9"
+    ),
+    WEAPON_USP_S(
+        titleRu = "USP-S (с глушителем)",
+        categoryRu = "ОРУЖИЕ",
+        bundledAssetPath = "models/weapon_usp.glb",
+        defaultSourceLabel = "PBR CS2 USP-S (.GLB)",
+        sketchfabQuery = "cs2 usp-s"
+    ),
+    WEAPON_GLOCK_18(
+        titleRu = "Glock-18",
+        categoryRu = "ОРУЖИЕ",
+        bundledAssetPath = "models/weapon_glock.glb",
+        defaultSourceLabel = "PBR CS2 Glock-18 (.GLB)",
+        sketchfabQuery = "cs2 glock"
+    ),
+    WEAPON_DEAGLE(
+        titleRu = "Desert Eagle .50",
+        categoryRu = "ОРУЖИЕ",
+        bundledAssetPath = "models/weapon_deagle.glb",
+        defaultSourceLabel = "PBR CS2 Desert Eagle (.GLB)",
         sketchfabQuery = "cs2 deagle"
     ),
     WEAPON_KNIFE(
         titleRu = "Боевой нож",
         categoryRu = "ОРУЖИЕ",
         bundledAssetPath = "models/weapon_knife.glb",
-        defaultSourceLabel = "Встроенный нож CS2 (.GLB)",
+        defaultSourceLabel = "PBR CS2 нож (.GLB)",
         sketchfabQuery = "cs2 knife"
     );
 
@@ -99,8 +120,11 @@ enum class ModelSlot(
             WeaponType.AK47 -> WEAPON_AK47
             WeaponType.M4A1_S -> WEAPON_M4A1_S
             WeaponType.AWP -> WEAPON_AWP
-            WeaponType.MP9, WeaponType.P90 -> WEAPON_P90
-            WeaponType.USP_S, WeaponType.GLOCK_18, WeaponType.DESERT_EAGLE -> WEAPON_PISTOL
+            WeaponType.P90 -> WEAPON_P90
+            WeaponType.MP9 -> WEAPON_MP9
+            WeaponType.USP_S -> WEAPON_USP_S
+            WeaponType.GLOCK_18 -> WEAPON_GLOCK_18
+            WeaponType.DESERT_EAGLE -> WEAPON_DEAGLE
             WeaponType.KNIFE -> WEAPON_KNIFE
             WeaponType.C4_BOMB -> BOMB_C4
         }
@@ -139,18 +163,29 @@ class ModelAssetRegistry(private val context: Context) {
     }
 
     /**
-     * Reads the active .glb model bytes into a direct ByteBuffer ready for Google Filament gltfio.
+     * Reads the active .glb model bytes directly into a native DirectByteBuffer using a small
+     * 64 KB staging chunk to avoid large Java heap spikes on high-detail CS2 maps.
      */
     fun loadGlbBuffer(slot: ModelSlot): ByteBuffer? {
         val customFile = customFileFor(slot)
         if (customFile.exists() && customFile.length() > 32L) {
             runCatching {
-                val bytes = customFile.readBytes()
-                if (isValidGlbHeader(bytes)) {
-                    return ByteBuffer.allocateDirect(bytes.size).apply {
-                        order(ByteOrder.nativeOrder())
-                        put(bytes)
-                        flip()
+                val len = customFile.length().toInt()
+                if (len > 20) {
+                    val header = ByteArray(20)
+                    customFile.inputStream().use { input ->
+                        if (input.read(header) == 20 && isValidGlbHeader(header)) {
+                            val direct = ByteBuffer.allocateDirect(len).order(ByteOrder.nativeOrder())
+                            direct.put(header)
+                            val chunk = ByteArray(64 * 1024)
+                            while (true) {
+                                val read = input.read(chunk)
+                                if (read <= 0) break
+                                direct.put(chunk, 0, read)
+                            }
+                            direct.flip()
+                            return direct
+                        }
                     }
                 }
             }
@@ -159,6 +194,30 @@ class ModelAssetRegistry(private val context: Context) {
     }
 
     fun loadBundledAssetBuffer(assetPath: String): ByteBuffer? {
+        // Fast zero-heap-spike path for uncompressed .glb assets via AssetFileDescriptor
+        val fromFd = runCatching {
+            context.assets.openFd(assetPath).use { afd ->
+                val totalLen = afd.declaredLength.toInt()
+                if (totalLen <= 0) return@use null
+                val direct = ByteBuffer.allocateDirect(totalLen).order(ByteOrder.nativeOrder())
+                val chunk = ByteArray(64 * 1024)
+                afd.createInputStream().use { input ->
+                    var remaining = totalLen
+                    while (remaining > 0) {
+                        val toRead = minOf(chunk.size, remaining)
+                        val read = input.read(chunk, 0, toRead)
+                        if (read <= 0) break
+                        direct.put(chunk, 0, read)
+                        remaining -= read
+                    }
+                }
+                direct.flip()
+                direct
+            }
+        }.getOrNull()
+        if (fromFd != null) return fromFd
+
+        // Fallback if APK compressed the asset
         return runCatching {
             context.assets.open(assetPath).use { input ->
                 val bytes = input.readBytes()

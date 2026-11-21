@@ -10,7 +10,6 @@ import com.example.model.GraphicsSettings
 import com.example.model.ModelAssetRegistry
 import com.example.model.ModelSlot
 import com.example.model.TeamSide
-import com.example.model.WeaponType
 import com.google.android.filament.Camera
 import com.google.android.filament.Engine
 import com.google.android.filament.EntityManager
@@ -24,13 +23,15 @@ import com.google.android.filament.android.UiHelper
 import com.google.android.filament.gltfio.AssetLoader
 import com.google.android.filament.gltfio.ResourceLoader
 import com.google.android.filament.gltfio.UbershaderProvider
+import kotlin.math.cos
+import kotlin.math.exp
 import kotlin.math.sin
 
 /**
  * Live 3D Google Filament CS2 Lobby Renderer:
- * Renders the real sunlit CS2 Mirage .GLB courtyard behind the clean CS2 Main Menu
- * with the real skeletal rigged Terrorist (T) or Спецназ (CT) operative standing in center,
- * smoothly playing its Idle breathing animation and rotatable 360° by touch!
+ * Renders the sunlit ultra-detailed CS2 Mirage courtyard behind the clean Main Menu
+ * with the rigged Terrorist (T) or Спецназ (CT) operative facing directly toward the camera,
+ * smoothly breathing and rotatable 360° with silky inertial damping!
  */
 class FilamentLobbyController(
     private val context: Context,
@@ -39,8 +40,9 @@ class FilamentLobbyController(
 ) : Choreographer.FrameCallback {
 
     @Volatile var showcaseSide: TeamSide = TeamSide.T
-    @Volatile var showcaseWeapon: WeaponType = WeaponType.KNIFE
-    @Volatile var characterYawDeg: Float = -55f
+    // Calibrated so Idle tactical stance faces 99.7% dead-straight into the Mirage courtyard camera!
+    @Volatile var characterYawDeg: Float = 118f
+    @Volatile private var yawVelocityDegPerSec: Float = 0f
 
     private lateinit var engine: Engine
     private lateinit var renderer: Renderer
@@ -61,9 +63,7 @@ class FilamentLobbyController(
     private var mapModel: LoadedGlbModel? = null
     private var tCharModel: LoadedGlbModel? = null
     private var ctCharModel: LoadedGlbModel? = null
-    private val weaponModels = HashMap<ModelSlot, LoadedGlbModel>()
 
-    private var loadedRevision: Int = -1
     private var lastGraphics: GraphicsSettings? = null
     private var surfaceWidth = 1
     private var surfaceHeight = 1
@@ -74,6 +74,12 @@ class FilamentLobbyController(
 
     private val tmpMat = FloatArray(16)
 
+    fun addSpinDrag(deltaPixels: Float) {
+        val deltaDeg = deltaPixels * 0.40f
+        characterYawDeg = (characterYawDeg + deltaDeg) % 360f
+        yawVelocityDegPerSec = (deltaDeg * 18f).coerceIn(-260f, 260f)
+    }
+
     fun attachTo(surfaceView: SurfaceView) {
         FilamentBootstrap.ensureInitialized()
         engine = Engine.create()
@@ -81,7 +87,8 @@ class FilamentLobbyController(
         scene = engine.createScene()
         view = engine.createView()
         camera = engine.createCamera(engine.entityManager.create())
-        camera.setExposure(16.0f, 1.0f / 125.0f, 100.0f)
+        // Bright crisp CS2 daylight exposure
+        camera.setExposure(16.0f, 1.0f / 100.0f, 100.0f)
         view.scene = scene
         view.camera = camera
 
@@ -99,7 +106,7 @@ class FilamentLobbyController(
             override fun onNativeWindowChanged(surface: Surface) {
                 swapChain?.let { engine.destroySwapChain(it) }
                 swapChain = engine.createSwapChain(surface)
-                displayHelper.attach(renderer, surfaceView.display)
+                surfaceView.display?.let { displayHelper.attach(renderer, it) }
             }
 
             override fun onDetachedFromSurface() {
@@ -119,49 +126,34 @@ class FilamentLobbyController(
         }
         uiHelper.attachTo(surfaceView)
 
-        reloadLobbyAssets()
+        loadLobbyAssets()
         lastNs = System.nanoTime()
     }
 
-    private fun reloadLobbyAssets() {
+    private fun loadLobbyAssets() {
         destroyModel(mapModel); mapModel = null
         destroyModel(tCharModel); tCharModel = null
         destroyModel(ctCharModel); ctCharModel = null
-        weaponModels.values.forEach { destroyModel(it) }; weaponModels.clear()
 
-        val customMap = registry.hasCustomFile(ModelSlot.MAP_MIRAGE)
-        mapModel = FilamentSceneHelpers.loadGlb(assetLoader, resourceLoader, registry.loadGlbBuffer(ModelSlot.MAP_MIRAGE))
+        mapModel = FilamentSceneHelpers.loadGlb(
+            assetLoader, resourceLoader,
+            registry.loadBundledAssetBuffer(ModelSlot.MAP_MIRAGE.bundledAssetPath)
+        )
         mapModel?.let { m ->
             FilamentSceneHelpers.setAssetVisible(scene, m, true)
             val tm = engine.transformManager
-            if (customMap) {
-                val s = 84f / maxOf(m.sizeX, m.sizeZ).coerceAtLeast(0.01f)
-                Matrix.setIdentityM(tmpMat, 0)
-                Matrix.scaleM(tmpMat, 0, s, s, s)
-                Matrix.translateM(tmpMat, 0, -m.centerX, -m.minY, -m.centerZ)
-                tm.setTransform(tm.getInstance(m.asset.root), tmpMat)
-            } else {
-                Matrix.setIdentityM(tmpMat, 0)
-                tm.setTransform(tm.getInstance(m.asset.root), tmpMat)
-            }
+            Matrix.setIdentityM(tmpMat, 0)
+            tm.setTransform(tm.getInstance(m.asset.root), tmpMat)
         }
 
-        tCharModel = FilamentSceneHelpers.loadGlb(assetLoader, resourceLoader, registry.loadGlbBuffer(ModelSlot.CHARACTER_T))
-        ctCharModel = FilamentSceneHelpers.loadGlb(assetLoader, resourceLoader, registry.loadGlbBuffer(ModelSlot.CHARACTER_CT))
-
-        listOf(
-            ModelSlot.WEAPON_KNIFE,
-            ModelSlot.WEAPON_PISTOL,
-            ModelSlot.WEAPON_AK47,
-            ModelSlot.WEAPON_M4A1_S,
-            ModelSlot.WEAPON_AWP,
-            ModelSlot.BOMB_C4
-        ).forEach { slot ->
-            FilamentSceneHelpers.loadGlb(assetLoader, resourceLoader, registry.loadGlbBuffer(slot))?.let {
-                weaponModels[slot] = it
-            }
-        }
-        loadedRevision = registry.revision.value
+        tCharModel = FilamentSceneHelpers.loadGlb(
+            assetLoader, resourceLoader,
+            registry.loadBundledAssetBuffer(ModelSlot.CHARACTER_T.bundledAssetPath)
+        )
+        ctCharModel = FilamentSceneHelpers.loadGlb(
+            assetLoader, resourceLoader,
+            registry.loadBundledAssetBuffer(ModelSlot.CHARACTER_CT.bundledAssetPath)
+        )
     }
 
     fun start() {
@@ -181,12 +173,12 @@ class FilamentLobbyController(
         if (isDestroyed) return
         isDestroyed = true
         stop()
+        if (!::engine.isInitialized) return
         uiHelper.detach()
 
         destroyModel(mapModel)
         destroyModel(tCharModel)
         destroyModel(ctCharModel)
-        weaponModels.values.forEach { destroyModel(it) }
 
         resourceLoader.destroy()
         assetLoader.destroy()
@@ -220,8 +212,12 @@ class FilamentLobbyController(
         lastNs = frameTimeNanos
         timeSec += dt
 
-        if (registry.revision.value != loadedRevision) {
-            reloadLobbyAssets()
+        // Smooth inertial spin deceleration after user swipes character
+        if (kotlin.math.abs(yawVelocityDegPerSec) > 0.15f) {
+            characterYawDeg = (characterYawDeg + yawVelocityDegPerSec * dt) % 360f
+            yawVelocityDegPerSec *= exp(-dt * 5.2f)
+        } else {
+            yawVelocityDegPerSec = 0f
         }
 
         val gfx = getGraphics()
@@ -233,19 +229,15 @@ class FilamentLobbyController(
         val aspect = surfaceWidth.toDouble() / surfaceHeight.toDouble().coerceAtLeast(1.0)
         camera.setProjection(40.0, aspect, 0.1, 200.0, Camera.Fov.VERTICAL)
 
-        val (sx, sy, sz) = if (registry.hasCustomFile(ModelSlot.MAP_MIRAGE)) {
-            Triple(0f, 0f, 0f)
-        } else {
-            mirageWorld.lobbyStandPos
-        }
+        val (sx, sy, sz) = mirageWorld.lobbyStandPos
+        val (baseCamX, baseCamY, baseCamZ) = mirageWorld.lobbyCamPos
+        val (lookX, lookY, lookZ) = mirageWorld.lobbyLookTarget
 
-        val sway = sin(timeSec * 0.45f) * 0.08f
-        val camX = sx - 3.35f + sway
-        val camY = sy + 1.24f
-        val camZ = sz + 1.55f
+        val swayZ = sin(timeSec * 0.55f) * 0.065f
+        val swayY = cos(timeSec * 0.42f) * 0.022f
         camera.lookAt(
-            camX.toDouble(), camY.toDouble(), camZ.toDouble(),
-            sx.toDouble(), (sy + 0.98f).toDouble(), sz.toDouble(),
+            baseCamX.toDouble(), (baseCamY + swayY).toDouble(), (baseCamZ + swayZ).toDouble(),
+            lookX.toDouble(), lookY.toDouble(), lookZ.toDouble(),
             0.0, 1.0, 0.0
         )
 
@@ -264,7 +256,8 @@ class FilamentLobbyController(
                 z = sz,
                 yawDeg = characterYawDeg,
                 deathProgress = 0f,
-                targetHeight = 1.80f
+                targetHeight = 1.76f,
+                isCustomImported = false
             )
             tm.setTransform(tm.getInstance(activeChar.asset.root), tmpMat)
 
@@ -273,28 +266,6 @@ class FilamentLobbyController(
                 val dur = anim.getAnimationDuration(activeChar.idleAnimIdx).coerceAtLeast(0.1f)
                 anim.applyAnimation(activeChar.idleAnimIdx, timeSec % dur)
                 anim.updateBoneMatrices()
-            }
-        }
-
-        // Floating showcase weapon beside the operative when inspecting Loadout!
-        val wSlot = ModelSlot.forWeapon(showcaseWeapon)
-        val showFloatingWeapon = showcaseWeapon != WeaponType.KNIFE
-        for ((slot, wModel) in weaponModels) {
-            val vis = showFloatingWeapon && slot == wSlot
-            FilamentSceneHelpers.setAssetVisible(scene, wModel, vis)
-            if (vis) {
-                val span = if (showcaseWeapon == WeaponType.AWP) 1.05f else 0.85f
-                FilamentSceneHelpers.buildNormalizedPropMatrix(
-                    out = tmpMat,
-                    model = wModel,
-                    targetMaxExtent = span,
-                    tx = sx - 0.65f,
-                    ty = sy + 1.05f + sin(timeSec * 1.8f) * 0.04f,
-                    tz = sz + 0.72f,
-                    yawDeg = (timeSec * 38f) % 360f,
-                    pitchDeg = 6f
-                )
-                tm.setTransform(tm.getInstance(wModel.asset.root), tmpMat)
             }
         }
 

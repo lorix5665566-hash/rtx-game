@@ -90,7 +90,9 @@ enum class WeaponType(
     val isAutomatic: Boolean,
     val hasSniperScope: Boolean,
     val isSuppressed: Boolean = false,
-    val killReward: Int = 300
+    val killReward: Int = 300,
+    val equipDurationSec: Float = 0.70f,
+    val muzzleOffsetZ: Float = -0.50f
 ) {
     KNIFE(
         slot = WeaponSlot.KNIFE,
@@ -112,7 +114,9 @@ enum class WeaponType(
         moveSpeedMult = 1.15f,
         isAutomatic = false,
         hasSniperScope = false,
-        killReward = 1500
+        killReward = 1500,
+        equipDurationSec = 0.45f,
+        muzzleOffsetZ = -0.22f
     ),
     C4_BOMB(
         slot = WeaponSlot.BOMB,
@@ -134,7 +138,9 @@ enum class WeaponType(
         moveSpeedMult = 1.10f,
         isAutomatic = false,
         hasSniperScope = false,
-        killReward = 0
+        killReward = 0,
+        equipDurationSec = 0.65f,
+        muzzleOffsetZ = -0.18f
     ),
     USP_S(
         slot = WeaponSlot.PISTOL,
@@ -156,7 +162,9 @@ enum class WeaponType(
         moveSpeedMult = 1.06f,
         isAutomatic = false,
         hasSniperScope = false,
-        isSuppressed = true
+        isSuppressed = true,
+        equipDurationSec = 0.60f,
+        muzzleOffsetZ = -0.34f
     ),
     GLOCK_18(
         slot = WeaponSlot.PISTOL,
@@ -177,7 +185,9 @@ enum class WeaponType(
         adsZoomFactor = 0.82f,
         moveSpeedMult = 1.06f,
         isAutomatic = false,
-        hasSniperScope = false
+        hasSniperScope = false,
+        equipDurationSec = 0.60f,
+        muzzleOffsetZ = -0.17f
     ),
     DESERT_EAGLE(
         slot = WeaponSlot.PISTOL,
@@ -198,7 +208,9 @@ enum class WeaponType(
         adsZoomFactor = 0.78f,
         moveSpeedMult = 1.02f,
         isAutomatic = false,
-        hasSniperScope = false
+        hasSniperScope = false,
+        equipDurationSec = 0.62f,
+        muzzleOffsetZ = -0.25f
     ),
     MP9(
         slot = WeaponSlot.PRIMARY,
@@ -220,7 +232,9 @@ enum class WeaponType(
         moveSpeedMult = 1.04f,
         isAutomatic = true,
         hasSniperScope = false,
-        killReward = 600
+        killReward = 600,
+        equipDurationSec = 0.70f,
+        muzzleOffsetZ = -0.25f
     ),
     P90(
         slot = WeaponSlot.PRIMARY,
@@ -242,7 +256,9 @@ enum class WeaponType(
         moveSpeedMult = 1.02f,
         isAutomatic = true,
         hasSniperScope = false,
-        killReward = 300
+        killReward = 300,
+        equipDurationSec = 0.72f,
+        muzzleOffsetZ = -0.29f
     ),
     M4A1_S(
         slot = WeaponSlot.PRIMARY,
@@ -264,7 +280,9 @@ enum class WeaponType(
         moveSpeedMult = 0.96f,
         isAutomatic = true,
         hasSniperScope = false,
-        isSuppressed = true
+        isSuppressed = true,
+        equipDurationSec = 0.85f,
+        muzzleOffsetZ = -0.70f
     ),
     AK47(
         slot = WeaponSlot.PRIMARY,
@@ -285,7 +303,9 @@ enum class WeaponType(
         adsZoomFactor = 0.68f,
         moveSpeedMult = 0.94f,
         isAutomatic = true,
-        hasSniperScope = false
+        hasSniperScope = false,
+        equipDurationSec = 0.85f,
+        muzzleOffsetZ = -0.62f
     ),
     AWP(
         slot = WeaponSlot.PRIMARY,
@@ -307,7 +327,9 @@ enum class WeaponType(
         moveSpeedMult = 0.86f,
         isAutomatic = false,
         hasSniperScope = true,
-        killReward = 100
+        killReward = 100,
+        equipDurationSec = 0.95f,
+        muzzleOffsetZ = -0.85f
     )
 }
 
@@ -490,6 +512,8 @@ data class HudSnapshot(
     val reserveAmmo: Int = 120,
     val isReloading: Boolean = false,
     val reloadProgress: Float = 0f,
+    val isEquipping: Boolean = false,
+    val equipProgress: Float = 1f,
     val isAds: Boolean = false,
     val adsBlend: Float = 0f,
     val isCrouching: Boolean = false,
@@ -499,6 +523,8 @@ data class HudSnapshot(
     val roundsToWin: Int = 8,
     val roundNumber: Int = 1,
     val roundTimeSec: Float = 105f,
+    val isWarmup: Boolean = false,
+    val warmupTimeSec: Float = 0f,
     val ctAlive: Int = 5,
     val tAlive: Int = 5,
     val bombState: BombState = BombState.CARRIED,

@@ -1,6 +1,14 @@
 package com.example.ui
 
 import androidx.activity.compose.BackHandler
+import androidx.compose.animation.AnimatedContent
+import androidx.compose.animation.animateColorAsState
+import androidx.compose.animation.core.tween
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.slideInHorizontally
+import androidx.compose.animation.slideOutHorizontally
+import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -130,13 +138,28 @@ fun SettingsScreen(
                     tabs.forEachIndexed { idx, label ->
                         val active = selectedTab == idx
                         val shape = CutCornerShape(topStart = 7.dp, bottomEnd = 7.dp)
+                        val tabBg by animateColorAsState(
+                            targetValue = if (active) RtxEmerald.copy(alpha = 0.22f) else TacticalSurface,
+                            animationSpec = tween(200),
+                            label = "settings_tab_bg_$idx"
+                        )
+                        val tabBorder by animateColorAsState(
+                            targetValue = if (active) RtxEmerald else BorderSteel,
+                            animationSpec = tween(200),
+                            label = "settings_tab_border_$idx"
+                        )
+                        val tabText by animateColorAsState(
+                            targetValue = if (active) RtxEmerald else TextSecondary,
+                            animationSpec = tween(200),
+                            label = "settings_tab_text_$idx"
+                        )
                         Box(
                             modifier = Modifier
                                 .clip(shape)
-                                .background(if (active) RtxEmerald.copy(alpha = 0.22f) else TacticalSurface)
+                                .background(tabBg)
                                 .border(
                                     width = if (active) 1.5.dp else 1.dp,
-                                    color = if (active) RtxEmerald else BorderSteel,
+                                    color = tabBorder,
                                     shape = shape
                                 )
                                 .clickable { selectedTab = idx }
@@ -147,7 +170,7 @@ fun SettingsScreen(
                             Text(
                                 text = label,
                                 style = MaterialTheme.typography.labelMedium,
-                                color = if (active) RtxEmerald else TextSecondary
+                                color = tabText
                             )
                         }
                     }
@@ -156,31 +179,42 @@ fun SettingsScreen(
 
             Spacer(modifier = Modifier.height(10.dp))
 
-            // Scrollable Tab Content
-            Column(
-                modifier = Modifier
-                    .weight(1f)
-                    .verticalScroll(rememberScrollState()),
-                verticalArrangement = Arrangement.spacedBy(10.dp)
-            ) {
-                when (selectedTab) {
-                    0 -> GraphicsSettingsSection(
-                        graphics = settings.graphics,
-                        onApplyPreset = onApplyPreset,
-                        onUpdate = onUpdateGraphics
-                    )
-                    1 -> SensitivitySettingsSection(
-                        sensitivity = settings.sensitivity,
-                        onUpdate = onUpdateSensitivity
-                    )
-                    else -> AudioAndHudSection(
-                        audio = settings.audio,
-                        onUpdateAudio = onUpdateAudio,
-                        onOpenControlEditor = onOpenControlEditor,
-                        onResetAll = onResetAll
-                    )
+            // Smooth Animated Tab Content
+            AnimatedContent(
+                targetState = selectedTab,
+                transitionSpec = {
+                    val dir = if (targetState > initialState) 1 else -1
+                    (slideInHorizontally(animationSpec = tween(220)) { it / 6 * dir } + fadeIn(tween(220)))
+                        .togetherWith(slideOutHorizontally(animationSpec = tween(180)) { -it / 6 * dir } + fadeOut(tween(180)))
+                },
+                modifier = Modifier.weight(1f),
+                label = "settings_tab_content"
+            ) { tab ->
+                Column(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .verticalScroll(rememberScrollState()),
+                    verticalArrangement = Arrangement.spacedBy(10.dp)
+                ) {
+                    when (tab) {
+                        0 -> GraphicsSettingsSection(
+                            graphics = settings.graphics,
+                            onApplyPreset = onApplyPreset,
+                            onUpdate = onUpdateGraphics
+                        )
+                        1 -> SensitivitySettingsSection(
+                            sensitivity = settings.sensitivity,
+                            onUpdate = onUpdateSensitivity
+                        )
+                        else -> AudioAndHudSection(
+                            audio = settings.audio,
+                            onUpdateAudio = onUpdateAudio,
+                            onOpenControlEditor = onOpenControlEditor,
+                            onResetAll = onResetAll
+                        )
+                    }
+                    Spacer(modifier = Modifier.height(14.dp))
                 }
-                Spacer(modifier = Modifier.height(14.dp))
             }
         }
     }

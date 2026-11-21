@@ -2,6 +2,10 @@ package com.example.ui
 
 import android.view.SurfaceView
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.animateColorAsState
+import androidx.compose.animation.core.Spring
+import androidx.compose.animation.core.spring
+import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.slideInHorizontally
@@ -74,7 +78,6 @@ import com.example.model.MatchConfig
 import com.example.model.ModelAssetRegistry
 import com.example.model.PlayerStats
 import com.example.model.TeamSide
-import com.example.model.WeaponType
 import com.example.ui.theme.BorderSteel
 import com.example.ui.theme.ElevatedGunmetal
 import com.example.ui.theme.IceCyan
@@ -85,7 +88,7 @@ import com.example.ui.theme.TacticalAmber
 import com.example.ui.theme.TextPrimary
 import com.example.ui.theme.TextSecondary
 
-private enum class MenuTab { HOME, LOADOUT, PLAY }
+private enum class MenuTab { HOME, PLAY }
 
 @Composable
 fun MainMenuScreen(
@@ -96,8 +99,7 @@ fun MainMenuScreen(
     onUpdateMatchConfig: ((MatchConfig) -> MatchConfig) -> Unit,
     onPlay: () -> Unit,
     onOpenSettings: () -> Unit,
-    onOpenControls: () -> Unit,
-    onOpenModelManager: () -> Unit
+    onOpenControls: () -> Unit
 ) {
     val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
@@ -105,7 +107,6 @@ fun MainMenuScreen(
     val latestGraphics by rememberUpdatedState(settings.graphics)
 
     var activeTab by remember { mutableStateOf(MenuTab.HOME) }
-    var showcaseWeapon by remember { mutableStateOf(WeaponType.KNIFE) }
 
     val lobbyController = remember(modelRegistry) {
         FilamentLobbyController(
@@ -115,9 +116,8 @@ fun MainMenuScreen(
         )
     }
 
-    LaunchedEffect(matchConfig.playerSide, showcaseWeapon) {
+    LaunchedEffect(matchConfig.playerSide) {
         lobbyController.showcaseSide = matchConfig.playerSide
-        lobbyController.showcaseWeapon = showcaseWeapon
     }
 
     val surfaceView = remember(lobbyController) {
@@ -155,8 +155,7 @@ fun MainMenuScreen(
                 .pointerInput(Unit) {
                     detectHorizontalDragGestures { change, dragAmount ->
                         change.consume()
-                        lobbyController.characterYawDeg =
-                            (lobbyController.characterYawDeg + dragAmount * 0.42f) % 360f
+                        lobbyController.addSpinDrag(dragAmount)
                     }
                 }
         )
@@ -262,19 +261,6 @@ fun MainMenuScreen(
                     selected = activeTab == MenuTab.HOME,
                     onClick = { activeTab = MenuTab.HOME },
                     tag = "nav_home"
-                )
-                Cs2NavTab(
-                    label = "3D-МОДЕЛИ",
-                    selected = false,
-                    accentOverride = IceCyan,
-                    onClick = onOpenModelManager,
-                    tag = "nav_models"
-                )
-                Cs2NavTab(
-                    label = "СНАРЯЖЕНИЕ",
-                    selected = activeTab == MenuTab.LOADOUT,
-                    onClick = { activeTab = if (activeTab == MenuTab.LOADOUT) MenuTab.HOME else MenuTab.LOADOUT },
-                    tag = "nav_loadout"
                 )
                 Cs2NavTab(
                     label = "ИГРАТЬ",
@@ -414,76 +400,17 @@ fun MainMenuScreen(
             }
         }
 
-        // 4. LOADOUT Weapon Showcase Bar (Inspect real .GLB weapons floating beside operative)
-        AnimatedVisibility(
-            visible = activeTab == MenuTab.LOADOUT,
-            enter = fadeIn(),
-            exit = fadeOut(),
-            modifier = Modifier
-                .align(Alignment.BottomCenter)
-                .safeDrawingPadding()
-                .padding(horizontal = m.s(14f), vertical = m.s(10f))
-        ) {
-            Surface(
-                color = Color(0xD40D1420),
-                shape = CutCornerShape(topStart = m.s(12f), bottomEnd = m.s(12f)),
-                border = BorderStroke(1.dp, Color.White.copy(alpha = 0.18f))
-            ) {
-                Row(
-                    modifier = Modifier
-                        .horizontalScroll(rememberScrollState())
-                        .padding(horizontal = m.s(12f), vertical = m.s(7f)),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(m.s(7f))
-                ) {
-                    Text(
-                        text = "3D ОСМОТР:",
-                        fontSize = m.sp(10f),
-                        fontWeight = FontWeight.Bold,
-                        color = TextSecondary
-                    )
-                    val showcaseList = listOf(
-                        WeaponType.KNIFE,
-                        WeaponType.DESERT_EAGLE,
-                        WeaponType.AK47,
-                        WeaponType.M4A1_S,
-                        WeaponType.AWP,
-                        WeaponType.C4_BOMB
-                    )
-                    showcaseList.forEach { w ->
-                        val active = showcaseWeapon == w
-                        Box(
-                            modifier = Modifier
-                                .clip(RoundedCornerShape(m.s(6f)))
-                                .background(
-                                    if (active) RtxEmerald.copy(alpha = 0.25f) else ElevatedGunmetal.copy(alpha = 0.72f)
-                                )
-                                .border(
-                                    1.dp,
-                                    if (active) RtxEmerald else BorderSteel,
-                                    RoundedCornerShape(m.s(6f))
-                                )
-                                .clickable { showcaseWeapon = w }
-                                .padding(horizontal = m.s(10f), vertical = m.s(6f))
-                                .testTag("showcase_weapon_${w.name.lowercase()}")
-                        ) {
-                            Text(
-                                text = w.shortLabel,
-                                fontSize = m.sp(10.5f),
-                                fontWeight = FontWeight.Bold,
-                                color = if (active) RtxEmerald else TextPrimary
-                            )
-                        }
-                    }
-                }
-            }
-        }
-
-        // 5. PLAY Match Configuration Side Drawer (Adaptive width across all phones/tablets)
+        // 4. PLAY Match Configuration Side Drawer (Smooth spring slide-in)
         AnimatedVisibility(
             visible = activeTab == MenuTab.PLAY,
-            enter = slideInHorizontally(initialOffsetX = { it }) + fadeIn(),
-            exit = slideOutHorizontally(targetOffsetX = { it }) + fadeOut(),
+            enter = slideInHorizontally(
+                initialOffsetX = { it },
+                animationSpec = spring(dampingRatio = Spring.DampingRatioNoBouncy, stiffness = Spring.StiffnessMediumLow)
+            ) + fadeIn(animationSpec = tween(220)),
+            exit = slideOutHorizontally(
+                targetOffsetX = { it },
+                animationSpec = tween(220)
+            ) + fadeOut(animationSpec = tween(180)),
             modifier = Modifier
                 .align(Alignment.CenterEnd)
                 .safeDrawingPadding()
@@ -718,25 +645,32 @@ private fun Cs2NavTab(
 ) {
     val m = LocalUiMetrics.current
     val baseAccent = accentOverride ?: RtxEmerald
-    val textColor = when {
-        selected -> baseAccent
-        accentOverride != null -> accentOverride
-        highlight -> Color(0xFFB5FFCC)
-        else -> Color.White.copy(alpha = 0.88f)
-    }
+    val textColor by animateColorAsState(
+        targetValue = when {
+            selected -> baseAccent
+            accentOverride != null -> accentOverride
+            highlight -> Color(0xFFB5FFCC)
+            else -> Color.White.copy(alpha = 0.88f)
+        },
+        animationSpec = tween(200),
+        label = "nav_tab_text"
+    )
+    val bgColor by animateColorAsState(
+        targetValue = when {
+            selected -> baseAccent.copy(alpha = 0.22f)
+            accentOverride != null -> accentOverride.copy(alpha = 0.12f)
+            highlight -> RtxEmerald.copy(alpha = 0.12f)
+            else -> Color.Transparent
+        },
+        animationSpec = tween(200),
+        label = "nav_tab_bg"
+    )
     Box(
         modifier = Modifier
             .clip(RoundedCornerShape(m.s(6f)))
-            .background(
-                when {
-                    selected -> baseAccent.copy(alpha = 0.20f)
-                    accentOverride != null -> accentOverride.copy(alpha = 0.12f)
-                    highlight -> RtxEmerald.copy(alpha = 0.12f)
-                    else -> Color.Transparent
-                }
-            )
+            .background(bgColor)
             .clickable(onClick = onClick)
-            .padding(horizontal = m.s(10f), vertical = m.s(6f))
+            .padding(horizontal = m.s(12f), vertical = m.s(6f))
             .testTag(tag),
         contentAlignment = Alignment.Center
     ) {
@@ -760,10 +694,20 @@ private fun FactionMiniChip(
     tag: String
 ) {
     val m = LocalUiMetrics.current
+    val bgColor by animateColorAsState(
+        targetValue = if (selected) accent.copy(alpha = 0.28f) else Color.Transparent,
+        animationSpec = tween(200),
+        label = "faction_bg"
+    )
+    val txtColor by animateColorAsState(
+        targetValue = if (selected) accent else TextSecondary,
+        animationSpec = tween(200),
+        label = "faction_txt"
+    )
     Box(
         modifier = Modifier
             .clip(RoundedCornerShape(m.s(4f)))
-            .background(if (selected) accent.copy(alpha = 0.28f) else Color.Transparent)
+            .background(bgColor)
             .clickable(onClick = onClick)
             .padding(horizontal = m.s(9f), vertical = m.s(4f))
             .testTag(tag),
@@ -773,7 +717,7 @@ private fun FactionMiniChip(
             text = label,
             fontSize = m.sp(10.5f),
             fontWeight = FontWeight.ExtraBold,
-            color = if (selected) accent else TextSecondary
+            color = txtColor
         )
     }
 }

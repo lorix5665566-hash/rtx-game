@@ -123,27 +123,27 @@ object FilamentSceneHelpers {
      * + shadow-casting directional sun + dynamic point light for muzzle flash / C4 explosion.
      */
     fun setupPbrLighting(engine: Engine, scene: Scene): Pair<Int, Int> {
-        // Warm CS2 Mirage daylight sky
+        // Bright sunlit Mediterranean CS2 Mirage daylight sky
         val skybox = Skybox.Builder()
-            .color(0.46f, 0.67f, 0.89f, 1.0f)
+            .color(0.54f, 0.74f, 0.94f, 1.0f)
             .build(engine)
         scene.skybox = skybox
 
-        // 3-band Spherical Harmonics IBL (9 RGB triplets = 27 floats): bright sky top + warm sand bounce
+        // 3-band Spherical Harmonics IBL: bright open sky + warm sunlit sandstone bounce so characters & walls never look dark
         val shBands = floatArrayOf(
-            0.88f, 0.84f, 0.78f,
-            0.22f, 0.28f, 0.36f,
-            0.16f, 0.14f, 0.11f,
-            -0.12f, -0.10f, -0.08f,
-            0.06f, 0.05f, 0.04f,
-            -0.05f, -0.04f, -0.03f,
+            1.15f, 1.10f, 1.04f,
+            0.26f, 0.32f, 0.40f,
+            0.22f, 0.19f, 0.15f,
+            -0.10f, -0.09f, -0.07f,
             0.08f, 0.07f, 0.06f,
             -0.04f, -0.03f, -0.02f,
-            0.05f, 0.05f, 0.04f
+            0.09f, 0.08f, 0.07f,
+            -0.03f, -0.02f, -0.02f,
+            0.06f, 0.06f, 0.05f
         )
         val ibl = IndirectLight.Builder()
             .irradiance(3, shBands)
-            .intensity(36_000f)
+            .intensity(54_000f)
             .build(engine)
         scene.indirectLight = ibl
 
@@ -155,9 +155,9 @@ object FilamentSceneHelpers {
             stable = true
         }
         LightManager.Builder(LightManager.Type.DIRECTIONAL)
-            .color(1.0f, 0.94f, 0.84f)
-            .intensity(105_000f)
-            .direction(-0.48f, -0.82f, -0.32f)
+            .color(1.0f, 0.96f, 0.88f)
+            .intensity(138_000f)
+            .direction(-0.46f, -0.82f, -0.34f)
             .castShadows(true)
             .shadowOptions(shadowOpts)
             .build(engine, sunEntity)
@@ -223,8 +223,13 @@ object FilamentSceneHelpers {
 
     /**
      * Builds a transform matrix that places a loaded character .GLB standing at (x, y, z)
-     * with exact 1.78m real human height, bottom anchored cleanly at y, facing yawDeg,
-     * with optional backward death fall tilt.
+     * with exact real human height (~1.76m), feet anchored cleanly on floor y, facing yawDeg,
+     * with smooth backward death fall tilt.
+     *
+     * CRITICAL: Bundled Mixamo skeletal GLBs have a 0.01 scale root node canceled by 100.0
+     * inverseBindMatrices, so Filament's unskinned asset.boundingBox reads 0.0047m while the
+     * actual animated skeleton stands at 1.93m with feet at y=0! Using native 1.93m calibration
+     * completely prevents the 378x giant-character bug!
      */
     fun buildCharacterMatrix(
         out: FloatArray,
@@ -234,21 +239,54 @@ object FilamentSceneHelpers {
         z: Float,
         yawDeg: Float,
         deathProgress: Float = 0f,
-        targetHeight: Float = 1.78f
+        targetHeight: Float = 1.76f,
+        isCustomImported: Boolean = false
     ) {
-        val scale = targetHeight / model.sizeY.coerceAtLeast(0.01f)
         Matrix.setIdentityM(out, 0)
         Matrix.translateM(out, 0, x, y + deathProgress * 0.14f, z)
-        Matrix.rotateM(out, 0, yawDeg, 0f, 1f, 0f)
+        // Bundled Mixamo rigs face -Z natively -> +180° aligns forward strictly to +Z (atan2(dx, dz))!
+        val correctedYaw = if (!isCustomImported) yawDeg + 180f else yawDeg
+        Matrix.rotateM(out, 0, correctedYaw, 0f, 1f, 0f)
         if (deathProgress > 0.001f) {
             Matrix.rotateM(out, 0, -deathProgress * 86f, 1f, 0f, 0f)
         }
-        Matrix.scaleM(out, 0, scale, scale, scale)
-        Matrix.translateM(out, 0, -model.centerX, -model.minY, -model.centerZ)
+        if (!isCustomImported) {
+            // Calibrated Mixamo rigged character: native animated height = 1.93m, feet at y = 0.0
+            val nativeScale = targetHeight / 1.93f
+            Matrix.scaleM(out, 0, nativeScale, nativeScale, nativeScale)
+        } else {
+            // Safe clamped auto-normalization for user-imported Sketchfab characters
+            val safeHeight = maxOf(model.sizeY, model.sizeZ).coerceAtLeast(0.45f)
+            val scale = (targetHeight / safeHeight).coerceIn(0.02f, 4.0f)
+            Matrix.scaleM(out, 0, scale, scale, scale)
+            Matrix.translateM(out, 0, -model.centerX, -model.minY, -model.centerZ)
+        }
     }
 
     /**
-     * Builds a normalized transform matrix for any object/weapon/prop .GLB centered at its bounding box.
+     * Exact 1:1 local-space weapon & first-person hands transform matrix for our calibrated CS2
+     * PBR .GLB weapons (already authored in meters with barrel strictly along -Z and grip at origin).
+     */
+    fun buildDirectWeaponMatrix(
+        out: FloatArray,
+        tx: Float,
+        ty: Float,
+        tz: Float,
+        yawDeg: Float = 0f,
+        pitchDeg: Float = 0f,
+        rollDeg: Float = 0f,
+        scale: Float = 1.0f
+    ) {
+        Matrix.setIdentityM(out, 0)
+        Matrix.translateM(out, 0, tx, ty, tz)
+        if (yawDeg != 0f) Matrix.rotateM(out, 0, yawDeg, 0f, 1f, 0f)
+        if (pitchDeg != 0f) Matrix.rotateM(out, 0, pitchDeg, 1f, 0f, 0f)
+        if (rollDeg != 0f) Matrix.rotateM(out, 0, rollDeg, 0f, 0f, 1f)
+        if (scale != 1.0f) Matrix.scaleM(out, 0, scale, scale, scale)
+    }
+
+    /**
+     * Builds a normalized transform matrix for custom Sketchfab props/weapons/VFX centered at bounding box.
      */
     fun buildNormalizedPropMatrix(
         out: FloatArray,

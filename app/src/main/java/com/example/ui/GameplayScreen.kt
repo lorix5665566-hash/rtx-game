@@ -3,6 +3,15 @@ package com.example.ui
 import android.graphics.BitmapFactory
 import android.view.SurfaceView
 import androidx.activity.compose.BackHandler
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.core.animateIntAsState
+import androidx.compose.animation.core.tween
+import androidx.compose.animation.expandVertically
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.scaleIn
+import androidx.compose.animation.scaleOut
+import androidx.compose.animation.shrinkVertically
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
@@ -31,13 +40,13 @@ import androidx.compose.foundation.shape.CutCornerShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.FastForward
 import androidx.compose.material.icons.filled.Gamepad
 import androidx.compose.material.icons.filled.Home
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.ShoppingCart
-import androidx.compose.material.icons.filled.ViewInAr
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Icon
@@ -122,7 +131,6 @@ fun GameplayScreen(
     onRestart: () -> Unit,
     onOpenSettings: () -> Unit,
     onOpenControlEditor: () -> Unit,
-    onOpenModelManager: () -> Unit,
     onExitToMenu: () -> Unit
 ) {
     val context = LocalContext.current
@@ -328,7 +336,7 @@ fun GameplayScreen(
             }
         }
 
-        // 7. Top-Center CS2 Round Scoreboard (CT vs T + Timer / C4 Countdown + Alive Counts)
+        // 7. Top-Center CS2 Round Scoreboard + Warmup Skip Banner + Animated Match Banners / Killfeed
         Column(
             modifier = Modifier
                 .align(Alignment.TopCenter)
@@ -339,7 +347,61 @@ fun GameplayScreen(
         ) {
             Cs2ScoreboardBar(hud = hud)
 
-            if (hud.bannerText.isNotEmpty()) {
+            AnimatedVisibility(
+                visible = hud.isWarmup && !isPaused && !hud.isMatchFinished,
+                enter = fadeIn(tween(220)) + expandVertically(),
+                exit = fadeOut(tween(180)) + shrinkVertically()
+            ) {
+                val secsLeft = hud.warmupTimeSec.roundToInt().coerceAtLeast(0)
+                val warmupTimeFormatted = String.format("0:%02d", secsLeft)
+                Surface(
+                    color = Color(0xDC0C1622),
+                    shape = CutCornerShape(topStart = m.s(9f), bottomEnd = m.s(9f)),
+                    border = BorderStroke(1.2.dp, TacticalAmber.copy(alpha = 0.85f))
+                ) {
+                    Row(
+                        modifier = Modifier.padding(horizontal = m.s(10f), vertical = m.s(4f)),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(m.s(10f))
+                    ) {
+                        Text(
+                            text = "РАЗМИНКА • $warmupTimeFormatted • $16 000",
+                            fontSize = m.sp(10.5f),
+                            fontWeight = FontWeight.ExtraBold,
+                            color = TacticalAmber
+                        )
+                        Row(
+                            modifier = Modifier
+                                .clip(RoundedCornerShape(m.s(6f)))
+                                .background(RtxEmerald)
+                                .clickable { engine.skipWarmup() }
+                                .padding(horizontal = m.s(9f), vertical = m.s(4f))
+                                .testTag("warmup_skip_button"),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(m.s(3f))
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.FastForward,
+                                contentDescription = "Пропустить разминку",
+                                tint = ObsidianVoid,
+                                modifier = Modifier.size(m.s(13f))
+                            )
+                            Text(
+                                text = "ПРОПУСТИТЬ",
+                                fontSize = m.sp(9.5f),
+                                fontWeight = FontWeight.Black,
+                                color = ObsidianVoid
+                            )
+                        }
+                    }
+                }
+            }
+
+            AnimatedVisibility(
+                visible = hud.bannerText.isNotEmpty() && !hud.isWarmup,
+                enter = fadeIn(tween(200)) + scaleIn(initialScale = 0.94f, animationSpec = tween(200)),
+                exit = fadeOut(tween(200)) + scaleOut(targetScale = 0.96f, animationSpec = tween(200))
+            ) {
                 Surface(
                     color = Color(0xD10A111A),
                     shape = CutCornerShape(topStart = m.s(8f), bottomEnd = m.s(8f)),
@@ -355,7 +417,11 @@ fun GameplayScreen(
                 }
             }
 
-            if (hud.killFeedText.isNotEmpty()) {
+            AnimatedVisibility(
+                visible = hud.killFeedText.isNotEmpty(),
+                enter = fadeIn(tween(180)) + expandVertically(),
+                exit = fadeOut(tween(220)) + shrinkVertically()
+            ) {
                 Surface(
                     color = Color(0xAD14090C),
                     shape = RoundedCornerShape(m.s(5f)),
@@ -371,7 +437,9 @@ fun GameplayScreen(
             }
         }
 
-        // 8. Bottom-Left Compact Vitals Strip (HP + Armor + Defuse Kit)
+        // 8. Bottom-Left Compact Vitals Strip (Smooth animated HP + Armor + Defuse Kit)
+        val smoothHp by animateIntAsState(targetValue = hud.hp, animationSpec = tween(180), label = "hp_anim")
+        val smoothArmor by animateIntAsState(targetValue = hud.armor, animationSpec = tween(180), label = "armor_anim")
         Row(
             modifier = Modifier
                 .align(Alignment.BottomStart)
@@ -391,18 +459,18 @@ fun GameplayScreen(
                     horizontalArrangement = Arrangement.spacedBy(m.s(9f))
                 ) {
                     val hpColor = when {
-                        hud.hp > 50 -> RtxEmerald
-                        hud.hp > 25 -> TacticalAmber
+                        smoothHp > 50 -> RtxEmerald
+                        smoothHp > 25 -> TacticalAmber
                         else -> ThreatCrimson
                     }
                     Text(
-                        text = "+ ${hud.hp}",
+                        text = "+ $smoothHp",
                         fontSize = m.sp(13f),
                         fontWeight = FontWeight.Black,
                         color = hpColor
                     )
                     Text(
-                        text = "БР ${hud.armor}",
+                        text = "БР $smoothArmor",
                         fontSize = m.sp(11f),
                         fontWeight = FontWeight.Bold,
                         color = IceCyan
@@ -418,7 +486,11 @@ fun GameplayScreen(
                 }
             }
 
-            if (hud.isReloading) {
+            AnimatedVisibility(
+                visible = hud.isReloading,
+                enter = fadeIn(tween(150)) + scaleIn(initialScale = 0.92f, animationSpec = tween(150)),
+                exit = fadeOut(tween(150)) + scaleOut(targetScale = 0.92f, animationSpec = tween(150))
+            ) {
                 Surface(
                     color = Color(0xCC0D1420),
                     shape = RoundedCornerShape(m.s(6f)),
@@ -450,26 +522,34 @@ fun GameplayScreen(
         }
 
         // 9. Contextual C4 Plant / Defuse Hold Button
-        if (!isPaused && !isShopOpen && !hud.isPlayerDead && (hud.canPlantBomb || hud.canDefuseBomb)) {
+        AnimatedVisibility(
+            visible = !isPaused && !isShopOpen && !hud.isPlayerDead && (hud.canPlantBomb || hud.canDefuseBomb),
+            enter = fadeIn(tween(180)) + scaleIn(initialScale = 0.92f, animationSpec = tween(180)),
+            exit = fadeOut(tween(150)) + scaleOut(targetScale = 0.92f, animationSpec = tween(150)),
+            modifier = Modifier
+                .align(Alignment.BottomCenter)
+                .safeDrawingPadding()
+                .padding(bottom = m.s(16f))
+        ) {
             BombActionHoldButton(
                 isPlant = hud.canPlantBomb,
                 siteLabel = if (hud.canPlantBomb) hud.inPlantZoneLabel else hud.bombSiteLabel,
                 progress = hud.bombActionProgress,
-                onHeldChange = { held -> engine.isBombActionHeld = held },
-                modifier = Modifier
-                    .align(Alignment.BottomCenter)
-                    .safeDrawingPadding()
-                    .padding(bottom = m.s(16f))
+                onHeldChange = { held -> engine.isBombActionHeld = held }
             )
         }
 
         // 10. Dead Spectator Banner
-        if (hud.isPlayerDead && !hud.isMatchFinished && !isPaused) {
+        AnimatedVisibility(
+            visible = hud.isPlayerDead && !hud.isMatchFinished && !isPaused,
+            enter = fadeIn(tween(220)) + scaleIn(initialScale = 0.92f, animationSpec = tween(220)),
+            exit = fadeOut(tween(180)),
+            modifier = Modifier.align(Alignment.Center)
+        ) {
             Surface(
                 color = Color(0xCC12090D),
                 shape = CutCornerShape(topStart = m.s(10f), bottomEnd = m.s(10f)),
-                border = BorderStroke(1.dp, ThreatCrimson.copy(alpha = 0.72f)),
-                modifier = Modifier.align(Alignment.Center)
+                border = BorderStroke(1.dp, ThreatCrimson.copy(alpha = 0.72f))
             ) {
                 Column(
                     modifier = Modifier.padding(horizontal = m.s(20f), vertical = m.s(11f)),
@@ -482,10 +562,10 @@ fun GameplayScreen(
                         color = ThreatCrimson
                     )
                     Text(
-                        text = if (hud.mode == GameMode.BOMB_DEFUSAL) {
-                            "Ожидание завершения раунда (CT: ${hud.ctAlive} • T: ${hud.tAlive})"
-                        } else {
-                            "Возрождение..."
+                        text = when {
+                            hud.isWarmup -> "Возрождение (разминка)..."
+                            hud.mode == GameMode.BOMB_DEFUSAL -> "Ожидание завершения раунда (CT: ${hud.ctAlive} • T: ${hud.tAlive})"
+                            else -> "Возрождение..."
                         },
                         fontSize = m.sp(10.5f),
                         color = TextSecondary
@@ -528,8 +608,8 @@ fun GameplayScreen(
                     HoldActionButton(
                         id = fireId,
                         sizeDp = sizeDp,
-                        opacity = cfg.opacity,
-                        accent = ThreatCrimson,
+                        opacity = cfg.opacity * if (hud.isEquipping) 0.42f else 1f,
+                        accent = if (hud.isEquipping) BorderSteel else ThreatCrimson,
                         modifier = Modifier
                             .offset {
                                 IntOffset(
@@ -636,8 +716,12 @@ fun GameplayScreen(
             }
         }
 
-        // 12. Compact In-Game Buy Menu Overlay
-        if (isShopOpen && !isPaused && !hud.isMatchFinished) {
+        // 12. Compact In-Game Buy Menu Overlay (Smooth scale + fade)
+        AnimatedVisibility(
+            visible = isShopOpen && !isPaused && !hud.isMatchFinished,
+            enter = fadeIn(tween(180)) + scaleIn(initialScale = 0.94f, animationSpec = tween(180)),
+            exit = fadeOut(tween(150)) + scaleOut(targetScale = 0.95f, animationSpec = tween(150))
+        ) {
             CompactBuyMenuOverlay(
                 hud = hud,
                 onBuyWeapon = { weapon -> engine.buyWeapon(weapon) },
@@ -647,20 +731,27 @@ fun GameplayScreen(
             )
         }
 
-        // 13. Pause Overlay
-        if (isPaused && !hud.isMatchFinished) {
+        // 13. Pause Overlay (Smooth fade + scale, clean without 3D-models viewer)
+        AnimatedVisibility(
+            visible = isPaused && !hud.isMatchFinished,
+            enter = fadeIn(tween(200)) + scaleIn(initialScale = 0.94f, animationSpec = tween(200)),
+            exit = fadeOut(tween(160)) + scaleOut(targetScale = 0.95f, animationSpec = tween(160))
+        ) {
             PauseOverlay(
                 onResume = { onSetPaused(false) },
                 onRestart = onRestart,
                 onSettings = onOpenSettings,
                 onControls = onOpenControlEditor,
-                onModels = onOpenModelManager,
                 onExit = onExitToMenu
             )
         }
 
         // 14. Match Finished Summary Overlay
-        if (hud.isMatchFinished) {
+        AnimatedVisibility(
+            visible = hud.isMatchFinished,
+            enter = fadeIn(tween(260)) + scaleIn(initialScale = 0.92f, animationSpec = tween(260)),
+            exit = fadeOut(tween(180))
+        ) {
             MatchEndOverlay(
                 hud = hud,
                 onReplay = onRestart,
@@ -673,10 +764,10 @@ fun GameplayScreen(
 @Composable
 private fun Cs2ScoreboardBar(hud: HudSnapshot) {
     val m = LocalUiMetrics.current
-    val timeSecInt = if (hud.bombState == BombState.PLANTED) {
-        hud.bombCountdownSec.roundToInt().coerceAtLeast(0)
-    } else {
-        hud.roundTimeSec.roundToInt().coerceAtLeast(0)
+    val timeSecInt = when {
+        hud.isWarmup -> hud.warmupTimeSec.roundToInt().coerceAtLeast(0)
+        hud.bombState == BombState.PLANTED -> hud.bombCountdownSec.roundToInt().coerceAtLeast(0)
+        else -> hud.roundTimeSec.roundToInt().coerceAtLeast(0)
     }
     val mins = timeSecInt / 60
     val secs = timeSecInt % 60
@@ -687,7 +778,11 @@ private fun Cs2ScoreboardBar(hud: HudSnapshot) {
         shape = CutCornerShape(topStart = m.s(10f), bottomEnd = m.s(10f)),
         border = BorderStroke(
             width = 1.dp,
-            color = if (hud.bombState == BombState.PLANTED) ThreatCrimson else Color.White.copy(alpha = 0.16f)
+            color = when {
+                hud.isWarmup -> TacticalAmber.copy(alpha = 0.85f)
+                hud.bombState == BombState.PLANTED -> ThreatCrimson
+                else -> Color.White.copy(alpha = 0.16f)
+            }
         )
     ) {
         Row(
@@ -712,7 +807,20 @@ private fun Cs2ScoreboardBar(hud: HudSnapshot) {
             }
 
             Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                if (hud.bombState == BombState.PLANTED) {
+                if (hud.isWarmup) {
+                    Text(
+                        text = timeText,
+                        fontSize = m.sp(12.5f),
+                        fontWeight = FontWeight.Black,
+                        color = TacticalAmber
+                    )
+                    Text(
+                        text = "РАЗМИНКА",
+                        fontSize = m.sp(7.5f),
+                        fontWeight = FontWeight.Bold,
+                        color = TacticalAmber
+                    )
+                } else if (hud.bombState == BombState.PLANTED) {
                     Text(
                         text = "C4 ${hud.bombSiteLabel} • $timeText",
                         fontSize = m.sp(11.5f),
@@ -824,7 +932,18 @@ private fun WeaponSwipeControl(
             }
             .padding(horizontal = m.s(8f), vertical = m.s(4f))
     ) {
-        if (hud.mode == GameMode.BOMB_DEFUSAL && hud.hasBomb) {
+        if (hud.isEquipping) {
+            LinearProgressIndicator(
+                progress = { hud.equipProgress },
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(m.s(2.5f))
+                    .align(Alignment.TopCenter)
+                    .clip(RoundedCornerShape(2.dp)),
+                color = accentColor,
+                trackColor = Color.White.copy(alpha = 0.14f)
+            )
+        } else if (hud.mode == GameMode.BOMB_DEFUSAL && hud.hasBomb) {
             Text(
                 text = "▲ C4",
                 fontSize = m.sp(7.5f),
@@ -843,7 +962,7 @@ private fun WeaponSwipeControl(
         ) {
             WeaponSilhouetteIcon(
                 weapon = hud.activeWeapon,
-                tint = TextPrimary,
+                tint = if (hud.isEquipping) TextPrimary.copy(alpha = 0.65f) else TextPrimary,
                 modifier = Modifier
                     .width(widthDp * 0.44f)
                     .height(heightDp * 0.56f)
@@ -857,15 +976,16 @@ private fun WeaponSwipeControl(
                     color = accentColor,
                     maxLines = 1
                 )
-                val ammoLabel = when (hud.activeWeapon) {
-                    WeaponType.KNIFE -> "БЛИЖНИЙ"
-                    WeaponType.C4_BOMB -> "ЗАРЯД C4"
+                val ammoLabel = when {
+                    hud.isEquipping -> "ДОСТАЁТ..."
+                    hud.activeWeapon == WeaponType.KNIFE -> "БЛИЖНИЙ"
+                    hud.activeWeapon == WeaponType.C4_BOMB -> "ЗАРЯД C4"
                     else -> "${hud.ammo} / ${hud.reserveAmmo}"
                 }
                 Text(
                     text = ammoLabel,
                     fontSize = m.sp(9.5f),
-                    color = TextPrimary
+                    color = if (hud.isEquipping) TacticalAmber else TextPrimary
                 )
             }
         }
@@ -964,7 +1084,7 @@ private fun CompactBuyMenuOverlay(
     onClose: () -> Unit
 ) {
     val m = LocalUiMetrics.current
-    val isFreeTdm = hud.mode == GameMode.TEAM_DEATHMATCH
+    val isFreeTdm = hud.isWarmup || hud.mode == GameMode.TEAM_DEATHMATCH
     val pistols = WeaponType.entries.filter { it.category == WeaponCategory.PISTOLS }
     val smgs = WeaponType.entries.filter { it.category == WeaponCategory.SMGS }
     val rifles = WeaponType.entries.filter { it.category == WeaponCategory.RIFLES }
@@ -1014,7 +1134,11 @@ private fun CompactBuyMenuOverlay(
                             border = BorderStroke(1.dp, RtxEmerald.copy(alpha = 0.6f))
                         ) {
                             Text(
-                                text = if (isFreeTdm) "БЕСПЛАТНО (DM)" else "$${hud.money}",
+                                text = when {
+                                    hud.isWarmup -> "РАЗМИНКА • БЕСПЛАТНО"
+                                    isFreeTdm -> "БЕСПЛАТНО (DM)"
+                                    else -> "$${hud.money}"
+                                },
                                 fontSize = m.sp(12f),
                                 fontWeight = FontWeight.Black,
                                 color = RtxEmerald,
@@ -1562,7 +1686,6 @@ private fun PauseOverlay(
     onRestart: () -> Unit,
     onSettings: () -> Unit,
     onControls: () -> Unit,
-    onModels: () -> Unit,
     onExit: () -> Unit
 ) {
     val m = LocalUiMetrics.current
@@ -1598,7 +1721,7 @@ private fun PauseOverlay(
                     Text("ПРОДОЛЖИТЬ", fontSize = m.sp(12.5f), fontWeight = FontWeight.Black)
                 }
 
-                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(m.s(7f))) {
+                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(m.s(8f))) {
                     OutlinedButton(
                         onClick = onSettings,
                         modifier = Modifier.weight(1f).height(m.s(42f).coerceAtLeast(44.dp)).testTag("pause_settings_button"),
@@ -1607,7 +1730,7 @@ private fun PauseOverlay(
                     ) {
                         Icon(Icons.Default.Settings, contentDescription = null, tint = TextPrimary, modifier = Modifier.size(m.s(16f)))
                         Spacer(modifier = Modifier.width(m.s(4f)))
-                        Text("НАСТР.", color = TextPrimary, fontSize = m.sp(10f))
+                        Text("НАСТРОЙКИ", color = TextPrimary, fontSize = m.sp(10.5f))
                     }
                     OutlinedButton(
                         onClick = onControls,
@@ -1617,17 +1740,7 @@ private fun PauseOverlay(
                     ) {
                         Icon(Icons.Default.Gamepad, contentDescription = null, tint = TacticalAmber, modifier = Modifier.size(m.s(16f)))
                         Spacer(modifier = Modifier.width(m.s(4f)))
-                        Text("HUD", color = TacticalAmber, fontSize = m.sp(10f))
-                    }
-                    OutlinedButton(
-                        onClick = onModels,
-                        modifier = Modifier.weight(1f).height(m.s(42f).coerceAtLeast(44.dp)).testTag("pause_models_button"),
-                        shape = CutCornerShape(topStart = m.s(8f), bottomEnd = m.s(8f)),
-                        border = BorderStroke(1.dp, IceCyan.copy(alpha = 0.7f))
-                    ) {
-                        Icon(Icons.Default.ViewInAr, contentDescription = null, tint = IceCyan, modifier = Modifier.size(m.s(16f)))
-                        Spacer(modifier = Modifier.width(m.s(4f)))
-                        Text("3D .GLB", color = IceCyan, fontSize = m.sp(10f))
+                        Text("УПРАВЛЕНИЕ", color = TacticalAmber, fontSize = m.sp(10.5f))
                     }
                 }
 

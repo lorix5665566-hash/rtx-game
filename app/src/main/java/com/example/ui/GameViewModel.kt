@@ -2,7 +2,6 @@ package com.example.ui
 
 import android.app.Application
 import android.content.Context
-import android.net.Uri
 import android.os.Build
 import android.os.VibrationEffect
 import android.os.Vibrator
@@ -17,7 +16,6 @@ import com.example.model.GraphicsPreset
 import com.example.model.GraphicsSettings
 import com.example.model.MatchConfig
 import com.example.model.ModelAssetRegistry
-import com.example.model.ModelSlot
 import com.example.model.PlayerStats
 import com.example.model.SensitivitySettings
 import com.example.model.SettingsRepository
@@ -30,7 +28,6 @@ sealed interface AppScreen {
     data object Playing : AppScreen
     data class Settings(val returnToGame: Boolean) : AppScreen
     data class ControlEditor(val returnToGame: Boolean) : AppScreen
-    data class ModelManager(val returnToGame: Boolean) : AppScreen
 }
 
 class GameViewModel(application: Application) : AndroidViewModel(application) {
@@ -101,15 +98,6 @@ class GameViewModel(application: Application) : AndroidViewModel(application) {
     fun openControlEditor(fromGame: Boolean) {
         if (fromGame) engine.isPaused = true
         _screen.value = AppScreen.ControlEditor(returnToGame = fromGame)
-    }
-
-    fun openModelManager(fromGame: Boolean) {
-        if (fromGame) engine.isPaused = true
-        _screen.value = AppScreen.ModelManager(returnToGame = fromGame)
-    }
-
-    fun importModelGlb(slot: ModelSlot, uri: Uri, friendlyName: String?): Result<String> {
-        return modelRegistry.importGlbFromUri(slot, uri, friendlyName)
     }
 
     fun navigateBackToOrigin(returnToGame: Boolean) {
