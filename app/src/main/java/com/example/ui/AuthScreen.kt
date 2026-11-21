@@ -73,11 +73,19 @@ fun AuthScreen(
     val scope = rememberCoroutineScope()
     val m = LocalUiMetrics.current
 
-    var isCheckingAuto by remember { mutableStateOf(true) }
+    var isCheckingAuto by remember { mutableStateOf(authManager.isFirebaseConfigured) }
     var isSigningIn by remember { mutableStateOf(false) }
-    var errorMessage by remember { mutableStateOf<String?>(null) }
+    var errorMessage by remember {
+        mutableStateOf(
+            if (authManager.isFirebaseConfigured) null else FirebaseAuthManager.MISSING_CONFIG_MESSAGE
+        )
+    }
 
     LaunchedEffect(authManager) {
+        if (!authManager.isFirebaseConfigured) {
+            isCheckingAuto = false
+            return@LaunchedEffect
+        }
         when (authManager.restoreSessionOrAutoSignIn(context)) {
             is GoogleSignInResult.Success -> {
                 isCheckingAuto = false

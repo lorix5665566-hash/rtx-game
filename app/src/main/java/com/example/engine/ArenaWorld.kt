@@ -231,7 +231,7 @@ class ArenaWorld(
                 var i = 0
                 while (i + 1 < wallRle.length() && wIdx < totalWallCells) {
                     val count = wallRle.getInt(i)
-                    val mask = wallRle.getInt(i + 1)
+                    val mask = wallRle.getLong(i + 1).toInt()
                     val end = (wIdx + count).coerceAtMost(totalWallCells)
                     if (mask != 0) {
                         for (k in wIdx until end) decodedWalls[k] = mask

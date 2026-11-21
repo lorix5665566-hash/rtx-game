@@ -15,6 +15,7 @@ import com.google.android.libraries.identity.googleid.GetSignInWithGoogleOption
 import com.google.android.libraries.identity.googleid.GoogleIdTokenCredential
 import com.google.android.libraries.identity.googleid.GoogleIdTokenCredential.Companion.TYPE_GOOGLE_ID_TOKEN_CREDENTIAL
 import com.google.firebase.Firebase
+import com.google.firebase.FirebaseApp
 import com.google.firebase.auth.FirebaseAuth
 import com.google.firebase.auth.FirebaseUser
 import com.google.firebase.auth.GoogleAuthProvider
@@ -51,6 +52,8 @@ sealed interface AuthSessionState {
  * via Jetpack Credential Manager and persisting user sessions across application restarts.
  *
  * Security & Lifecycle invariants:
+ * - Safely guards against missing Firebase configuration (e.g., CI APKs built without
+ *   `google-services.json`) so the app never crashes on startup.
  * - Relies on Firebase Auth's built-in persistent session storage (`auth.currentUser`) and
  *   exposes reactive updates via `FirebaseAuth.AuthStateListener`.
  * - Startup silent sign-in uses exclusively `GetGoogleIdOption` (one option per request).
@@ -60,38 +63,54 @@ sealed interface AuthSessionState {
  */
 class FirebaseAuthManager(
     context: Context,
-    private val auth: FirebaseAuth = Firebase.auth,
+    authOverride: FirebaseAuth? = null,
     private val credentialManager: CredentialManager = CredentialManager.create(context.applicationContext)
 ) {
     private val appContext: Context = context.applicationContext
 
+    private val auth: FirebaseAuth? = authOverride ?: resolveFirebaseAuth(appContext)
+
     /**
-     * Returns the currently persisted signed-in [FirebaseUser], or `null` if unauthenticated.
+     * Returns `true` when both FirebaseApp (from `google-services.json`) and
+     * `R.string.default_web_client_id` are present in this APK build.
+     */
+    val isFirebaseConfigured: Boolean
+        get() = auth != null && resolveWebClientId() != null
+
+    /**
+     * Returns the currently persisted signed-in [FirebaseUser], or `null` if unauthenticated
+     * or if Firebase is not configured in this build.
      */
     val currentUser: FirebaseUser?
-        get() = auth.currentUser
+        get() = auth?.currentUser
 
     /**
      * Returns `true` if a persisted Firebase Auth user session is currently active.
      */
     val isSignedIn: Boolean
-        get() = auth.currentUser != null
+        get() = auth?.currentUser != null
 
     /**
      * Observes persisted Firebase Auth user changes in real time using [FirebaseAuth.AuthStateListener].
      * Immediately emits the persisted session on subscription so returning users stay signed in.
      */
     fun observeAuthState(): Flow<AuthSessionState> = callbackFlow {
-        val listener = FirebaseAuth.AuthStateListener { firebaseAuth ->
-            val user = firebaseAuth.currentUser
+        val firebaseAuth = auth
+        if (firebaseAuth == null) {
+            trySend(AuthSessionState.Unauthenticated)
+            awaitClose { }
+            return@callbackFlow
+        }
+        val listener = FirebaseAuth.AuthStateListener { instance ->
+            val user = instance.currentUser
             trySend(
                 if (user != null) AuthSessionState.Authenticated(user)
                 else AuthSessionState.Unauthenticated
             )
         }
-        auth.addAuthStateListener(listener)
+        firebaseAuth.addAuthStateListener(listener)
         awaitClose {
-            auth.removeAuthStateListener(listener)
+            firebaseAuth.removeAuthStateListener(listener)
         }
     }.distinctUntilChanged { old, new ->
         when {
@@ -107,14 +126,15 @@ class FirebaseAuthManager(
      * (one option per [GetCredentialRequest]) for previously authorized Google accounts.
      */
     suspend fun restoreSessionOrAutoSignIn(uiContext: Context): GoogleSignInResult {
-        auth.currentUser?.let { persistedUser ->
+        val firebaseAuth = auth
+            ?: return GoogleSignInResult.Error(MISSING_CONFIG_MESSAGE)
+
+        firebaseAuth.currentUser?.let { persistedUser ->
             return GoogleSignInResult.Success(persistedUser)
         }
 
         val clientId = resolveWebClientId()
-            ?: return GoogleSignInResult.Error(
-                "Конфигурация Google Sign-In не найдена (default_web_client_id)."
-            )
+            ?: return GoogleSignInResult.Error(MISSING_CONFIG_MESSAGE)
 
         val googleIdOption = GetGoogleIdOption.Builder()
             .setFilterByAuthorizedAccounts(true)
@@ -129,7 +149,7 @@ class FirebaseAuthManager(
         return try {
             val requestContext = uiContext.findActivity() ?: uiContext
             val credential = credentialManager.getCredential(requestContext, request).credential
-            exchangeGoogleCredentialForFirebaseUser(credential)
+            exchangeGoogleCredentialForFirebaseUser(firebaseAuth, credential)
         } catch (e: CancellationException) {
             throw e
         } catch (e: GetCredentialCancellationException) {
@@ -150,10 +170,11 @@ class FirebaseAuthManager(
      * On success, Firebase Auth automatically persists the user session on-device.
      */
     suspend fun signInWithGoogle(uiContext: Context): GoogleSignInResult {
+        val firebaseAuth = auth
+            ?: return GoogleSignInResult.Error(MISSING_CONFIG_MESSAGE)
+
         val clientId = resolveWebClientId()
-            ?: return GoogleSignInResult.Error(
-                "Конфигурация Google Sign-In не найдена (default_web_client_id)."
-            )
+            ?: return GoogleSignInResult.Error(MISSING_CONFIG_MESSAGE)
 
         val activity = uiContext.findActivity()
             ?: return GoogleSignInResult.Error("Activity context недоступен для входа через Google.")
@@ -165,7 +186,7 @@ class FirebaseAuthManager(
 
         return try {
             val credential = credentialManager.getCredential(activity, request).credential
-            exchangeGoogleCredentialForFirebaseUser(credential)
+            exchangeGoogleCredentialForFirebaseUser(firebaseAuth, credential)
         } catch (e: CancellationException) {
             throw e
         } catch (e: GetCredentialCancellationException) {
@@ -199,21 +220,22 @@ class FirebaseAuthManager(
             } catch (e: Exception) {
                 Log.w(TAG, "Failed to clear credential state: ${e.message}")
             } finally {
-                auth.signOut()
+                auth?.signOut()
                 onSignOutComplete()
             }
         }
     }
 
     private suspend fun exchangeGoogleCredentialForFirebaseUser(
+        firebaseAuth: FirebaseAuth,
         credential: androidx.credentials.Credential
     ): GoogleSignInResult {
         if (credential is CustomCredential && credential.type == TYPE_GOOGLE_ID_TOKEN_CREDENTIAL) {
             val googleIdToken = GoogleIdTokenCredential.createFrom(credential.data).idToken
-            val authResult = auth.signInWithCredential(
+            val authResult = firebaseAuth.signInWithCredential(
                 GoogleAuthProvider.getCredential(googleIdToken, null)
             ).await()
-            val signedInUser = authResult.user ?: auth.currentUser
+            val signedInUser = authResult.user ?: firebaseAuth.currentUser
             return if (signedInUser != null) {
                 GoogleSignInResult.Success(signedInUser)
             } else {
@@ -222,6 +244,15 @@ class FirebaseAuthManager(
         }
         return GoogleSignInResult.Error("Неожиданный тип учётных данных Google.")
     }
+
+    private fun resolveFirebaseAuth(context: Context): FirebaseAuth? = runCatching {
+        if (FirebaseApp.getApps(context).isEmpty()) {
+            FirebaseApp.initializeApp(context)
+        }
+        if (FirebaseApp.getApps(context).isNotEmpty()) Firebase.auth else null
+    }.onFailure { err ->
+        Log.e(TAG, "FirebaseApp is not initialized (missing google-services.json in APK build)", err)
+    }.getOrNull()
 
     private fun resolveWebClientId(): String? = try {
         appContext.getString(R.string.default_web_client_id).takeIf { it.isNotBlank() }
@@ -237,5 +268,7 @@ class FirebaseAuthManager(
 
     companion object {
         private const val TAG = "Auth"
+        const val MISSING_CONFIG_MESSAGE =
+            "В этой сборке APK отсутствует google-services.json. Добавьте секрет GOOGLE_SERVICES_JSON в GitHub Actions (Settings → Secrets → Actions) и пересоберите APK, либо скачайте APK напрямую из AI Studio."
     }
 }
