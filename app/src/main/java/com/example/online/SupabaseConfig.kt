@@ -1,6 +1,7 @@
 package com.example.online
 
 import com.example.BuildConfig
+import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import okhttp3.OkHttpClient
 import java.util.concurrent.TimeUnit
 
@@ -10,11 +11,22 @@ import java.util.concurrent.TimeUnit
  */
 object SupabaseConfig {
     val baseUrl: String
-        get() = BuildConfig.SUPABASE_URL
-            .trim()
-            .trim('"', '\'')
-            .trim()
-            .trimEnd('/')
+        get() {
+            val raw = BuildConfig.SUPABASE_URL
+                .trim()
+                .trim('"', '\'')
+                .trim()
+                .trimEnd('/')
+            val parsed = raw.toHttpUrlOrNull()
+            return if (parsed != null && parsed.host.endsWith(".supabase.co", ignoreCase = true)) {
+                "${parsed.scheme}://${parsed.host}"
+            } else {
+                raw
+                    .removeSuffix("/rest/v1")
+                    .removeSuffix("/auth/v1")
+                    .trimEnd('/')
+            }
+        }
 
     val anonKey: String
         get() = BuildConfig.SUPABASE_ANON_KEY

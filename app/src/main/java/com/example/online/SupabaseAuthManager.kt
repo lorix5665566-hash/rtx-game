@@ -267,7 +267,7 @@ class SupabaseAuthManager(context: Context) {
             msg.contains("signups not allowed") || msg.contains("signup_disabled") ->
                 "В Supabase отключена регистрация. Включите «Allow new users to sign up» в Authentication → Sign In / Providers → Email."
             statusCode == 404 ->
-                "Неверный адрес SUPABASE_URL (HTTP 404). Нужен Project URL вида https://xxxx.supabase.co из Project Settings → Data API."
+                "Неверный адрес SUPABASE_URL (HTTP 404: ${SupabaseConfig.baseUrl}). Проверьте, что ссылка скопирована полностью через кнопку Copy в Data API."
             msg.contains("password") && msg.contains("6") ->
                 "Пароль должен быть не короче 6 символов."
             msg.contains("rate limit") ->
