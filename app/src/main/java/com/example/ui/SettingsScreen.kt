@@ -13,6 +13,7 @@ import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -57,6 +58,8 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.example.model.AudioSettings
 import com.example.model.GameSettings
@@ -65,6 +68,7 @@ import com.example.model.GraphicsSettings
 import com.example.model.SensitivitySettings
 import com.example.ui.theme.BorderSteel
 import com.example.ui.theme.ElevatedGunmetal
+import com.example.ui.theme.LocalUiMetrics
 import com.example.ui.theme.ObsidianVoid
 import com.example.ui.theme.RtxEmerald
 import com.example.ui.theme.TacticalAmber
@@ -87,8 +91,9 @@ fun SettingsScreen(
 ) {
     BackHandler { onBack() }
 
+    val m = LocalUiMetrics.current
     var selectedTab by remember { mutableIntStateOf(0) }
-    val tabs = listOf("ГРАФИКА RTX", "ЧУВСТВИТЕЛЬНОСТЬ", "ЗВУК И УПРАВЛЕНИЕ")
+    val tabs = listOf("ГРАФИКА", "ЧУВСТВИТЕЛЬНОСТЬ", "ЗВУК И HUD")
 
     Box(
         modifier = Modifier
@@ -99,20 +104,25 @@ fun SettingsScreen(
         Column(
             modifier = Modifier
                 .fillMaxSize()
-                .widthIn(max = 820.dp)
+                .widthIn(max = 880.dp)
                 .align(Alignment.TopCenter)
-                .padding(horizontal = 20.dp, vertical = 10.dp)
+                .padding(horizontal = m.s(14f), vertical = m.s(8f))
         ) {
-            // Compact landscape header + tabs
+            // Compact responsive landscape header + scrollable tabs
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.SpaceBetween
+                horizontalArrangement = Arrangement.spacedBy(m.s(10f))
             ) {
-                Row(verticalAlignment = Alignment.CenterVertically) {
+                Row(
+                    modifier = Modifier.weight(1f),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
                     IconButton(
                         onClick = onBack,
-                        modifier = Modifier.testTag("settings_back_button")
+                        modifier = Modifier
+                            .size(48.dp)
+                            .testTag("settings_back_button")
                     ) {
                         Icon(
                             imageVector = Icons.AutoMirrored.Filled.ArrowBack,
@@ -120,24 +130,32 @@ fun SettingsScreen(
                             tint = TextPrimary
                         )
                     }
-                    Column {
+                    Column(modifier = Modifier.weight(1f)) {
                         Text(
                             text = "НАСТРОЙКИ",
-                            style = MaterialTheme.typography.headlineSmall,
-                            color = TextPrimary
+                            fontSize = m.sp(15.5f),
+                            fontWeight = FontWeight.Black,
+                            color = TextPrimary,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
                         )
                         Text(
-                            text = "Применяются к 3D-движку мгновенно • Без помощи в прицеливании",
-                            style = MaterialTheme.typography.labelSmall,
-                            color = TextSecondary
+                            text = "Применяются мгновенно",
+                            fontSize = m.sp(9.5f),
+                            color = TextSecondary,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
                         )
                     }
                 }
 
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Row(
+                    modifier = Modifier.horizontalScroll(rememberScrollState()),
+                    horizontalArrangement = Arrangement.spacedBy(m.s(6f))
+                ) {
                     tabs.forEachIndexed { idx, label ->
                         val active = selectedTab == idx
-                        val shape = CutCornerShape(topStart = 7.dp, bottomEnd = 7.dp)
+                        val shape = CutCornerShape(topStart = m.s(7f), bottomEnd = m.s(7f))
                         val tabBg by animateColorAsState(
                             targetValue = if (active) RtxEmerald.copy(alpha = 0.22f) else TacticalSurface,
                             animationSpec = tween(200),
@@ -163,21 +181,23 @@ fun SettingsScreen(
                                     shape = shape
                                 )
                                 .clickable { selectedTab = idx }
-                                .padding(horizontal = 14.dp, vertical = 9.dp)
+                                .padding(horizontal = m.s(12f), vertical = m.s(8f))
                                 .testTag("settings_tab_$idx"),
                             contentAlignment = Alignment.Center
                         ) {
                             Text(
                                 text = label,
-                                style = MaterialTheme.typography.labelMedium,
-                                color = tabText
+                                fontSize = m.sp(10.5f),
+                                fontWeight = FontWeight.ExtraBold,
+                                color = tabText,
+                                maxLines = 1
                             )
                         }
                     }
                 }
             }
 
-            Spacer(modifier = Modifier.height(10.dp))
+            Spacer(modifier = Modifier.height(m.s(8f)))
 
             // Smooth Animated Tab Content
             AnimatedContent(
@@ -487,7 +507,9 @@ private fun PresetChip(
         Text(
             text = preset.titleRu,
             style = MaterialTheme.typography.labelMedium,
-            color = if (selected) accent else TextPrimary
+            color = if (selected) accent else TextPrimary,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis
         )
     }
 }

@@ -104,12 +104,14 @@ class FilamentLobbyController(
         uiHelper = UiHelper(UiHelper.ContextErrorPolicy.DONT_CHECK)
         uiHelper.renderCallback = object : UiHelper.RendererCallback {
             override fun onNativeWindowChanged(surface: Surface) {
+                if (isDestroyed) return
                 swapChain?.let { engine.destroySwapChain(it) }
                 swapChain = engine.createSwapChain(surface)
                 surfaceView.display?.let { displayHelper.attach(renderer, it) }
             }
 
             override fun onDetachedFromSurface() {
+                if (isDestroyed) return
                 displayHelper.detach()
                 swapChain?.let {
                     engine.destroySwapChain(it)
@@ -119,6 +121,7 @@ class FilamentLobbyController(
             }
 
             override fun onResized(width: Int, height: Int) {
+                if (isDestroyed) return
                 surfaceWidth = width.coerceAtLeast(1)
                 surfaceHeight = height.coerceAtLeast(1)
                 view.viewport = Viewport(0, 0, surfaceWidth, surfaceHeight)
@@ -189,28 +192,52 @@ class FilamentLobbyController(
         isDestroyed = true
         stop()
         if (!::engine.isInitialized) return
-        uiHelper.detach()
+        runCatching { displayHelper.detach() }
+        runCatching { uiHelper.renderCallback = null }
+        runCatching { uiHelper.detach() }
+        swapChain?.let {
+            runCatching {
+                engine.destroySwapChain(it)
+                engine.flushAndWait()
+            }
+            swapChain = null
+        }
 
-        destroyModel(mapModel)
-        destroyModel(tCharModel)
-        destroyModel(ctCharModel)
+        destroyModel(mapModel); mapModel = null
+        destroyModel(tCharModel); tCharModel = null
+        destroyModel(ctCharModel); ctCharModel = null
 
-        resourceLoader.destroy()
-        assetLoader.destroy()
-        materialProvider.destroyMaterials()
-        materialProvider.destroy()
+        runCatching { resourceLoader.destroy() }
+        runCatching { assetLoader.destroy() }
+        runCatching { materialProvider.destroyMaterials() }
+        runCatching { materialProvider.destroy() }
 
-        view.colorGrading?.let { runCatching { engine.destroyColorGrading(it) } }
-        scene.skybox?.let { engine.destroySkybox(it) }
-        scene.indirectLight?.let { engine.destroyIndirectLight(it) }
-        engine.destroyEntity(sunEntity)
-        engine.destroyEntity(fxLightEntity)
-        engine.destroyRenderer(renderer)
-        engine.destroyView(view)
-        engine.destroyScene(scene)
-        engine.destroyCameraComponent(camera.entity)
-        EntityManager.get().destroy(camera.entity)
-        engine.destroy()
+        view.colorGrading?.let {
+            runCatching {
+                view.colorGrading = null
+                engine.destroyColorGrading(it)
+            }
+        }
+        scene.skybox?.let {
+            runCatching {
+                scene.skybox = null
+                engine.destroySkybox(it)
+            }
+        }
+        scene.indirectLight?.let {
+            runCatching {
+                scene.indirectLight = null
+                engine.destroyIndirectLight(it)
+            }
+        }
+        runCatching { scene.removeEntity(sunEntity); engine.destroyEntity(sunEntity); EntityManager.get().destroy(sunEntity) }
+        runCatching { scene.removeEntity(fxLightEntity); engine.destroyEntity(fxLightEntity); EntityManager.get().destroy(fxLightEntity) }
+        runCatching { engine.destroyRenderer(renderer) }
+        runCatching { engine.destroyView(view) }
+        runCatching { engine.destroyScene(scene) }
+        runCatching { engine.destroyCameraComponent(camera.entity) }
+        runCatching { EntityManager.get().destroy(camera.entity) }
+        runCatching { engine.destroy() }
     }
 
     private fun destroyModel(model: LoadedGlbModel?) {

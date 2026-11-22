@@ -26,18 +26,20 @@ import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.WindowInsetsSides
+import androidx.compose.foundation.layout.only
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.safeDrawing
 import androidx.compose.foundation.layout.safeDrawingPadding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.CutCornerShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
-import android.content.ClipData
-import android.content.ClipboardManager
-import android.content.Context
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Close
@@ -206,42 +208,55 @@ fun MainMenuScreen(
                 )
         )
 
-        // 2. Crisp Adaptive CS2 Frosted Top Navigation Bar
+        // 2. Crisp Adaptive Frosted Top Navigation Bar (top + horizontal cutouts only, no bottom-inset bloat)
         Row(
             modifier = Modifier
                 .fillMaxWidth()
                 .align(Alignment.TopCenter)
                 .background(
                     Brush.horizontalGradient(
-                        listOf(Color(0xB50C121C), Color(0x9E101826), Color(0xB50C121C))
+                        listOf(Color(0xB80C121C), Color(0xA4101826), Color(0xB80C121C))
                     )
                 )
                 .border(0.6.dp, Color.White.copy(alpha = 0.14f))
-                .safeDrawingPadding()
-                .padding(horizontal = m.s(12f), vertical = m.s(4f)),
+                .windowInsetsPadding(
+                    WindowInsets.safeDrawing.only(WindowInsetsSides.Top + WindowInsetsSides.Horizontal)
+                )
+                .padding(horizontal = m.s(10f), vertical = m.s(2f)),
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.SpaceBetween
         ) {
-            // Top-Left: Settings Gear + Faction Switcher (T / CT)
+            // Top-Left: Sleek Settings Button (48dp touch area) + Faction Switcher (T / CT)
             Row(
                 verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(m.s(7f))
+                horizontalArrangement = Arrangement.spacedBy(m.s(6f))
             ) {
-                IconButton(
-                    onClick = onOpenSettings,
+                Box(
                     modifier = Modifier
-                        .size(m.s(38f).coerceAtLeast(44.dp))
-                        .clip(CircleShape)
-                        .background(Color.White.copy(alpha = 0.10f))
-                        .border(0.8.dp, Color.White.copy(alpha = 0.18f), CircleShape)
-                        .testTag("menu_settings_button")
+                        .size(48.dp)
+                        .clip(RoundedCornerShape(m.s(8f)))
+                        .clickable {
+                            activeTab = MenuTab.HOME
+                            onOpenSettings()
+                        }
+                        .testTag("menu_settings_button"),
+                    contentAlignment = Alignment.Center
                 ) {
-                    Icon(
-                        imageVector = Icons.Default.Settings,
-                        contentDescription = "Настройки",
-                        tint = TextPrimary,
-                        modifier = Modifier.size(m.s(19f))
-                    )
+                    Box(
+                        modifier = Modifier
+                            .size(m.s(32f).coerceAtLeast(30.dp))
+                            .clip(RoundedCornerShape(m.s(7f)))
+                            .background(Color(0xB8111A29))
+                            .border(1.dp, Color.White.copy(alpha = 0.22f), RoundedCornerShape(m.s(7f))),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Settings,
+                            contentDescription = "Настройки",
+                            tint = TextPrimary,
+                            modifier = Modifier.size(m.s(18f))
+                        )
+                    }
                 }
 
                 Row(

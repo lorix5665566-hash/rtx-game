@@ -215,8 +215,16 @@ fun VanguardRtxApp(
                     }
                 },
                 onDeclineInvite = onlineVm::declineLobbyInvite,
-                onOpenSettings = { vm.openSettings(fromGame = false) },
-                onOpenControls = { vm.openControlEditor(fromGame = false) }
+                onOpenSettings = {
+                    isFriendsOpen = false
+                    isProfileOpen = false
+                    vm.openSettings(fromGame = false)
+                },
+                onOpenControls = {
+                    isFriendsOpen = false
+                    isProfileOpen = false
+                    vm.openControlEditor(fromGame = false)
+                }
             )
 
             AppScreen.MultiplayerLobby -> {

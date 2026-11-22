@@ -30,13 +30,24 @@ class SupabaseOnlineRepository(
     suspend fun ensurePlayerProfile(userId: String, fallbackName: String): Result<PlayerProfile> =
         withContext(Dispatchers.IO) {
             runCatching {
-                val existing = fetchProfileByUid(userId)
-                if (existing != null) {
-                    setOnlineStatus(userId, true)
-                    return@runCatching existing.copy(online = true)
+                val cleanName = sanitizeDisplayName(fallbackName)
+
+                // Fast path: check existing profile directly
+                val existingResult = runCatching { fetchProfileByUid(userId) }
+                if (existingResult.isSuccess) {
+                    val existing = existingResult.getOrNull()
+                    if (existing != null) {
+                        setOnlineStatus(userId, true)
+                        return@runCatching existing.copy(online = true)
+                    }
+                } else {
+                    // If direct SELECT failed with 403/RLS, try server-verified ensure_my_profile RPC
+                    val rpcProfile = tryEnsureProfileViaRpc(cleanName)
+                    if (rpcProfile != null) return@runCatching rpcProfile
+                    throw existingResult.exceptionOrNull()
+                        ?: IllegalStateException("Не удалось загрузить облачный профиль.")
                 }
 
-                val cleanName = sanitizeDisplayName(fallbackName)
                 var lastError: Throwable? = null
                 repeat(8) {
                     val candidateId = Random.nextInt(100_000, 1_000_000).toString()
@@ -73,7 +84,11 @@ class SupabaseOnlineRepository(
                             }
                             // Otherwise short_id collided -> continue loop with a fresh 6-digit ID
                         } else {
-                            // Non-conflict error (e.g. missing profiles table, RLS policy, network) -> fail fast so UI shows reason
+                            // If direct INSERT failed with 403/RLS, attempt atomic server RPC before surfacing error
+                            if (errMsg.contains("403") || errMsg.contains("RLS", ignoreCase = true)) {
+                                val rpcProfile = tryEnsureProfileViaRpc(cleanName)
+                                if (rpcProfile != null) return@runCatching rpcProfile
+                            }
                             throw err ?: IllegalStateException("Не удалось создать облачный профиль игрока.")
                         }
                     }
@@ -81,6 +96,22 @@ class SupabaseOnlineRepository(
                 throw lastError ?: IllegalStateException("Не удалось создать облачный профиль игрока.")
             }
         }
+
+    private suspend fun tryEnsureProfileViaRpc(cleanName: String): PlayerProfile? {
+        val rpcRes = callRpc(
+            fnName = "ensure_my_profile",
+            body = JSONObject().apply { put("p_display_name", cleanName) }
+        )
+        if (rpcRes.isFailure) return null
+        val text = rpcRes.getOrNull()?.trim().orEmpty()
+        if (text.isBlank()) return null
+        val obj = runCatching {
+            if (text.startsWith("[")) JSONArray(text).optJSONObject(0) else JSONObject(text)
+        }.getOrNull() ?: return null
+        val uid = obj.optString("user_id")
+        val sid = obj.optString("short_id")
+        return if (uid.isNotBlank() && sid.isNotBlank()) parseProfile(obj) else null
+    }
 
     suspend fun updatePlayerProfile(
         userId: String,
@@ -779,8 +810,10 @@ class SupabaseOnlineRepository(
                 "Таблицы Supabase не найдены (HTTP ${raw.code}). Выполните скрипт supabase_schema.sql в SQL Editor вашего проекта Supabase."
             raw.code == 401 ->
                 "Ошибка авторизации Supabase (HTTP 401): $rawMsg. Попробуйте выйти и войти снова."
-            raw.code == 403 || rawMsg.contains("row-level security", ignoreCase = true) ->
-                "Нет прав доступа RLS (HTTP ${raw.code}). Выполните полный скрипт supabase_schema.sql в SQL Editor."
+            raw.code == 403 || rawMsg.contains("row-level security", ignoreCase = true) -> {
+                val detail = if (rawMsg.isNotBlank()) " ($rawMsg)" else ""
+                "Нет прав доступа RLS (HTTP ${raw.code})$detail. Выполните полный скрипт supabase_schema.sql в SQL Editor."
+            }
             rawMsg.isNotBlank() -> "Ошибка сервера (HTTP ${raw.code}): $rawMsg"
             else -> "Ошибка сервера (HTTP ${raw.code})"
         }

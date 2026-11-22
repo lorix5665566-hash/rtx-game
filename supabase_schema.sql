@@ -248,5 +248,69 @@ begin
 end;
 $$;
 
+grant usage on schema public to anon, authenticated;
+grant select, insert, update, delete on table
+    public.profiles,
+    public.friend_requests,
+    public.friendships,
+    public.lobbies,
+    public.lobby_members,
+    public.lobby_invites
+to authenticated;
+
+create or replace function public.ensure_my_profile(p_display_name text default null)
+returns public.profiles
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+    v_uid uuid := auth.uid();
+    v_existing public.profiles%rowtype;
+    v_name text;
+    v_short_id text;
+begin
+    if v_uid is null then
+        raise exception 'Not authenticated';
+    end if;
+
+    select * into v_existing from public.profiles where user_id = v_uid;
+    if found then
+        update public.profiles
+        set online = true, updated_at = now()
+        where user_id = v_uid
+        returning * into v_existing;
+        return v_existing;
+    end if;
+
+    v_name := trim(coalesce(p_display_name, ''));
+    if char_length(v_name) < 3 then
+        v_name := 'Player_' || lpad((floor(random() * 900) + 100)::int::text, 3, '0');
+    elsif char_length(v_name) > 20 then
+        v_name := left(v_name, 20);
+    end if;
+
+    for i in 1..12 loop
+        v_short_id := (floor(random() * 900000) + 100000)::int::text;
+        begin
+            insert into public.profiles (user_id, short_id, display_name, avatar_data, online)
+            values (v_uid, v_short_id, v_name, 'preset:ghost', true)
+            returning * into v_existing;
+            return v_existing;
+        exception when unique_violation then
+            select * into v_existing from public.profiles where user_id = v_uid;
+            if found then
+                return v_existing;
+            end if;
+        end;
+    end loop;
+
+    raise exception 'Could not allocate unique 6-digit short_id';
+end;
+$$;
+
+grant execute on function public.ensure_my_profile(text) to authenticated;
 grant execute on function public.accept_friend_request(uuid) to authenticated;
 grant execute on function public.remove_friendship(uuid) to authenticated;
+
+notify pgrst, 'reload schema';
