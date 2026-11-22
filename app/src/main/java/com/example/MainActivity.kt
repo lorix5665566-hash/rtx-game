@@ -1,7 +1,9 @@
 package com.example
 
 import android.graphics.Color
+import android.os.Build
 import android.os.Bundle
+import android.view.WindowManager
 import androidx.activity.ComponentActivity
 import androidx.activity.SystemBarStyle
 import androidx.activity.compose.setContent
@@ -21,10 +23,14 @@ import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color as ComposeColor
 import androidx.compose.ui.platform.LocalContext
+import androidx.core.view.WindowCompat
+import androidx.core.view.WindowInsetsCompat
+import androidx.core.view.WindowInsetsControllerCompat
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.example.model.ArenaMapId
@@ -57,6 +63,7 @@ class MainActivity : ComponentActivity() {
             statusBarStyle = SystemBarStyle.dark(Color.TRANSPARENT),
             navigationBarStyle = SystemBarStyle.dark(Color.TRANSPARENT)
         )
+        applyImmersiveFullscreen()
         setContent {
             VanguardTheme {
                 ResponsiveUiProvider {
@@ -64,6 +71,31 @@ class MainActivity : ComponentActivity() {
                 }
             }
         }
+    }
+
+    override fun onResume() {
+        super.onResume()
+        applyImmersiveFullscreen()
+    }
+
+    override fun onWindowFocusChanged(hasFocus: Boolean) {
+        super.onWindowFocusChanged(hasFocus)
+        if (hasFocus) {
+            applyImmersiveFullscreen()
+        }
+    }
+
+    private fun applyImmersiveFullscreen() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+            window.attributes = window.attributes.apply {
+                layoutInDisplayCutoutMode =
+                    WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES
+            }
+        }
+        val controller = WindowCompat.getInsetsController(window, window.decorView)
+        controller.systemBarsBehavior =
+            WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+        controller.hide(WindowInsetsCompat.Type.systemBars())
     }
 }
 
@@ -126,9 +158,10 @@ fun VanguardRtxApp(
     val activeLobbyId by onlineVm.activeLobbyId.collectAsStateWithLifecycle()
     val activeLobby by onlineVm.activeLobby.collectAsStateWithLifecycle()
     val lobbyMemberStates by onlineVm.lobbyMemberStates.collectAsStateWithLifecycle()
+    val pingMs by onlineVm.pingMs.collectAsStateWithLifecycle()
 
-    var isFriendsOpen by remember { mutableStateOf(false) }
-    var isProfileOpen by remember { mutableStateOf(false) }
+    var isFriendsOpen by rememberSaveable { mutableStateOf(false) }
+    var isProfileOpen by rememberSaveable { mutableStateOf(false) }
 
     // Automatically launch match for ALL players in the cloud lobby when Host starts the match
     LaunchedEffect(activeLobby?.status, screen) {
@@ -261,6 +294,7 @@ fun VanguardRtxApp(
                 currentUserId = currentUserId,
                 activeLobbyId = activeLobbyId,
                 remoteMemberStates = lobbyMemberStates,
+                pingMs = pingMs,
                 onPublishLiveState = onlineVm::publishMatchTick,
                 onSetPaused = vm::setPaused,
                 onRestart = vm::restartMatch,

@@ -73,6 +73,10 @@ data class RemoteHumanPlayer(
     var targetX: Float = 0f,
     var targetY: Float = 0f,
     var targetZ: Float = 0f,
+    var vx: Float = 0f,
+    var vy: Float = 0f,
+    var vz: Float = 0f,
+    var lastSyncMs: Long = 0L,
     var yawDeg: Float = 0f,
     var targetYawDeg: Float = 0f,
     var hp: Int = 100,
@@ -83,6 +87,21 @@ data class RemoteHumanPlayer(
     var weapon: WeaponType = WeaponType.AK47,
     var kills: Int = 0,
     var deaths: Int = 0
+)
+
+data class ScoreboardRow(
+    val id: String,
+    val name: String,
+    val team: TeamSide,
+    val kills: Int,
+    val deaths: Int,
+    val money: Int,
+    val pingMs: Int,
+    val isAlive: Boolean,
+    val isLocalPlayer: Boolean,
+    val isAlly: Boolean,
+    val isBot: Boolean,
+    val weaponLabel: String = ""
 )
 
 data class OutgoingHitEvent(
@@ -592,7 +611,9 @@ data class HudSnapshot(
     val radarBlips: List<RadarBlip> = emptyList(),
     val playerYawDeg: Float = 0f,
     val isMultiplayer: Boolean = false,
-    val onlinePlayersCount: Int = 1
+    val onlinePlayersCount: Int = 1,
+    val pingMs: Int = 0,
+    val scoreboardRows: List<ScoreboardRow> = emptyList()
 ) {
     val accuracyPercent: Int
         get() = if (shotsFired <= 0) 0 else ((shotsHit * 100f) / shotsFired).toInt().coerceIn(0, 100)

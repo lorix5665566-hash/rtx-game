@@ -3,7 +3,9 @@ package com.example.ui
 import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
+import android.graphics.ImageDecoder
 import android.net.Uri
+import android.os.Build
 import android.util.Base64
 import android.util.LruCache
 import androidx.compose.foundation.Image
@@ -44,7 +46,9 @@ import com.example.ui.theme.ThreatCrimson
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.io.ByteArrayOutputStream
+import kotlin.math.max
 import kotlin.math.min
+import kotlin.math.roundToInt
 
 private val avatarBitmapCache = LruCache<String, ImageBitmap>(48)
 
@@ -60,43 +64,68 @@ private fun decodeCachedAvatarBitmap(avatarData: String): ImageBitmap? {
 }
 
 /**
- * Center-crops and compresses a user-selected gallery image (from zero-permission Android Photo Picker)
- * into a compact 160x160 JPEG data URI (< 45 KB) safe for Supabase profile storage.
+ * Center-crops and compresses a user-selected gallery image (from zero-permission Android Photo Picker / SAF)
+ * into a compact 144x144 JPEG data URI (< 48 KB) safe for Supabase profile storage.
+ * Uses ImageDecoder on API 28+ (supports HEIC/WebP/PNG/JPEG + EXIF rotation) with a single-pass
+ * ByteArray BitmapFactory fallback for older devices and single-shot ContentProviders.
  */
 suspend fun encodeGalleryPhotoToAvatarData(context: Context, uri: Uri): Result<String> =
     withContext(Dispatchers.IO) {
         runCatching {
             val resolver = context.contentResolver
-            val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
-            resolver.openInputStream(uri)?.use { stream ->
-                BitmapFactory.decodeStream(stream, null, bounds)
-            } ?: error("Не удалось открыть выбранное изображение.")
 
-            val srcW = bounds.outWidth
-            val srcH = bounds.outHeight
-            require(srcW > 0 && srcH > 0) { "Файл не является корректным изображением." }
+            val decoded: Bitmap = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+                runCatching {
+                    val source = ImageDecoder.createSource(resolver, uri)
+                    ImageDecoder.decodeBitmap(source) { decoder, info, _ ->
+                        decoder.allocator = ImageDecoder.ALLOCATOR_SOFTWARE
+                        decoder.isMutableRequired = false
+                        val w = info.size.width.coerceAtLeast(1)
+                        val h = info.size.height.coerceAtLeast(1)
+                        val maxSide = max(w, h)
+                        if (maxSide > 512) {
+                            val scale = 512f / maxSide.toFloat()
+                            decoder.setTargetSize(
+                                (w * scale).roundToInt().coerceAtLeast(1),
+                                (h * scale).roundToInt().coerceAtLeast(1)
+                            )
+                        }
+                    }
+                }.getOrNull()
+            } else {
+                null
+            } ?: run {
+                // Single-pass stream read so one-shot MIUI / HyperOS / cloud ContentProviders never fail on 2nd open
+                val rawBytes = resolver.openInputStream(uri)?.use { it.readBytes() }
+                    ?: error("Не удалось открыть выбранное изображение.")
+                require(rawBytes.isNotEmpty()) { "Выбранный файл пуст." }
 
-            var sample = 1
-            while ((srcW / sample) > 512 && (srcH / sample) > 512) {
-                sample *= 2
+                val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+                BitmapFactory.decodeByteArray(rawBytes, 0, rawBytes.size, bounds)
+                val srcW = bounds.outWidth
+                val srcH = bounds.outHeight
+                require(srcW > 0 && srcH > 0) { "Файл не является корректным изображением." }
+
+                var sample = 1
+                while ((srcW / sample) > 512 && (srcH / sample) > 512) {
+                    sample *= 2
+                }
+                val decodeOpts = BitmapFactory.Options().apply {
+                    inSampleSize = sample
+                    inPreferredConfig = Bitmap.Config.ARGB_8888
+                }
+                BitmapFactory.decodeByteArray(rawBytes, 0, rawBytes.size, decodeOpts)
+                    ?: error("Не удалось декодировать выбранное фото.")
             }
 
-            val decodeOpts = BitmapFactory.Options().apply {
-                inSampleSize = sample
-                inPreferredConfig = Bitmap.Config.ARGB_8888
-            }
-            val decoded = resolver.openInputStream(uri)?.use { stream ->
-                BitmapFactory.decodeStream(stream, null, decodeOpts)
-            } ?: error("Не удалось декодировать фото.")
-
-            val side = min(decoded.width, decoded.height)
-            val cropX = (decoded.width - side) / 2
-            val cropY = (decoded.height - side) / 2
+            val side = min(decoded.width, decoded.height).coerceAtLeast(1)
+            val cropX = ((decoded.width - side) / 2).coerceAtLeast(0)
+            val cropY = ((decoded.height - side) / 2).coerceAtLeast(0)
             val cropped = Bitmap.createBitmap(decoded, cropX, cropY, side, side)
-            if (cropped != decoded) decoded.recycle()
+            if (cropped !== decoded) decoded.recycle()
 
-            val scaled = Bitmap.createScaledBitmap(cropped, 160, 160, true)
-            if (scaled != cropped) cropped.recycle()
+            val scaled = Bitmap.createScaledBitmap(cropped, 144, 144, true)
+            if (scaled !== cropped) cropped.recycle()
 
             val out = ByteArrayOutputStream()
             var quality = 78
@@ -107,8 +136,8 @@ suspend fun encodeGalleryPhotoToAvatarData(context: Context, uri: Uri): Result<S
                     scaled.compress(Bitmap.CompressFormat.JPEG, quality, out)
                     val b64 = Base64.encodeToString(out.toByteArray(), Base64.NO_WRAP)
                     encoded = "data:image/jpeg;base64,$b64"
-                    if (encoded.length <= 55_000 || quality <= 42) break
-                    quality -= 12
+                    if (encoded.length <= 48_000 || quality <= 38) break
+                    quality -= 10
                 }
             } finally {
                 scaled.recycle()

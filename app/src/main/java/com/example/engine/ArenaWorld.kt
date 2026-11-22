@@ -29,8 +29,13 @@ data class BombsiteZone(
 
 data class BotOperative(
     val id: Int,
+    val name: String,
     val team: TeamSide,
     var weapon: WeaponType,
+    var money: Int = 800,
+    var armor: Float = 0f,
+    var kills: Int = 0,
+    var deaths: Int = 0,
     var x: Float,
     var y: Float = 0f,
     var z: Float,
@@ -47,6 +52,7 @@ data class BotOperative(
     var moveForwardRatio: Float = 0f,
     var moveStrafeRatio: Float = 0f,
     var isMoving: Boolean = false,
+    var hasLineOfSight: Boolean = false,
     var hitFlinch: Float = 0f,
     var fireCooldown: Float = 0.6f,
     var strafeDir: Float = 1f,
@@ -56,6 +62,8 @@ data class BotOperative(
     var targetSiteIndex: Int = 0,
     var targetBombsiteIdx: Int = 0,
     var waypointIndex: Int = 0,
+    var tacticRole: Int = 0,
+    var holdTimer: Float = 0f,
     var plantProgress: Float = 0f,
     var defuseProgress: Float = 0f,
     var bombBeepTimer: Float = 0f,
@@ -822,7 +830,37 @@ class ArenaWorld(
     }
 
     /**
+     * If a crate/box top is present in the vertical wall-bitmask with full standing headroom above it,
+     * returns the crate's top surface height so players can cleanly jump onto and stand on climbable crates.
+     */
+    private fun sampleCrateTopHeight(x: Float, z: Float, minTopY: Float, maxTopY: Float): Float? {
+        val bits = wallBits ?: return null
+        if (wallSize <= 0) return null
+        val gx = floor((x - wallMin) / wallSpan * wallSize).toInt()
+        val gz = floor((z - wallMin) / wallSpan * wallSize).toInt()
+        if (gx !in 0 until wallSize || gz !in 0 until wallSize) return null
+        val cellMask = bits[gz * wallSize + gx]
+        if (cellMask == 0) return null
+
+        val minBit = floor((minTopY - wallMinY) / wallStepY).toInt().coerceIn(0, 30)
+        val maxBit = floor((maxTopY - wallMinY) / wallStepY).toInt().coerceIn(minBit, 30)
+        var highestSolid = -1
+        for (bit in minBit..maxBit) {
+            if ((cellMask and (1 shl bit)) != 0) {
+                highestSolid = bit
+            }
+        }
+        if (highestSolid < 0) return null
+        val topH = wallMinY + (highestSolid + 1) * wallStepY
+        if (topH < minTopY || topH > maxTopY) return null
+        // Require at least 1.5m of clear standing headroom above the crate top (rejects full walls!)
+        if (hasWallAt(x, z, topH + 0.08f, topH + 1.52f)) return null
+        return topH
+    }
+
+    /**
      * Swept multi-step solid wall & floor collision.
+     * Supports jumping cleanly onto climbable crates when [actualFeetY] is elevated mid-jump.
      */
     fun resolveMovement(
         curX: Float,
@@ -830,23 +868,34 @@ class ArenaWorld(
         curZ: Float,
         targetX: Float,
         targetZ: Float,
-        radius: Float = 0.36f
+        radius: Float = 0.36f,
+        actualFeetY: Float = curY
     ): Triple<Float, Float, Float> {
         var rx = curX
         var rz = curZ
-        var ry = sampleNearestFloorHeight(curX, curZ, curY, maxStepUp = 1.1f, maxDrop = 3.5f)
+        val baseGroundY = sampleNearestFloorHeight(curX, curZ, curY, maxStepUp = 1.1f, maxDrop = 3.5f)
             ?: sampleFloorHeight(curX, curZ)
             ?: curY
+        val curCrateTop = sampleCrateTopHeight(curX, curZ, baseGroundY + 0.30f, actualFeetY + 0.25f)
+        var ry = if (curCrateTop != null && curCrateTop > baseGroundY && actualFeetY >= curCrateTop - 0.30f) {
+            curCrateTop
+        } else {
+            baseGroundY
+        }
 
         val totalDx = targetX - curX
         val totalDz = targetZ - curZ
         val totalDist = sqrt(totalDx * totalDx + totalDz * totalDz)
         if (totalDist < 0.0001f) return Triple(rx, ry, rz)
 
+        val isAirborne = actualFeetY > ry + 0.10f
+
         fun isBlockedByWall(px: Float, pz: Float, floorH: Float): Boolean {
             if (wallBits == null) return false
-            val bodyLow = floorH + 0.58f
-            val bodyHigh = floorH + 1.52f
+            // Use the higher of target surface or mid-air feet so jumping clears low crates cleanly
+            val effFeet = maxOf(floorH, actualFeetY)
+            val bodyLow = effFeet + if (isAirborne) 0.34f else 0.56f
+            val bodyHigh = effFeet + 1.52f
             val rDiag = radius * 0.7071f
             return hasWallAt(px, pz, bodyLow, bodyHigh) ||
                 hasWallAt(px + radius, pz, bodyLow, bodyHigh) ||
@@ -860,18 +909,40 @@ class ArenaWorld(
         }
 
         fun canStandAt(px: Float, pz: Float, refFloor: Float): Float? {
-            val c = sampleNearestFloorHeight(px, pz, refFloor, maxStepUp = 0.88f, maxDrop = 3.20f)
-                ?: return null
-            if (isBlockedByWall(px, pz, c)) return null
-            val p1 = sampleNearestFloorHeight(px + radius * 0.75f, pz, c, 0.92f, 3.2f)
-            val p2 = sampleNearestFloorHeight(px - radius * 0.75f, pz, c, 0.92f, 3.2f)
-            val p3 = sampleNearestFloorHeight(px, pz + radius * 0.75f, c, 0.92f, 3.2f)
-            val p4 = sampleNearestFloorHeight(px, pz - radius * 0.75f, c, 0.92f, 3.2f)
+            // Allow climbing higher surfaces while airborne (jumping onto crates up to ~1.55m)
+            val stepUpAllowed = if (isAirborne) maxOf(1.05f, (actualFeetY - refFloor) + 0.45f).coerceAtMost(1.65f) else 0.88f
+            val floorCandidate = sampleNearestFloorHeight(px, pz, refFloor, maxStepUp = stepUpAllowed, maxDrop = 3.50f)
+
+            // Check if there is a climbable crate top right under our elevated feet
+            val minCrateY = (floorCandidate ?: refFloor) + 0.30f
+            val maxCrateY = maxOf(actualFeetY + 0.34f, refFloor + 0.25f)
+            val crateTop = if (isAirborne || refFloor > baseGroundY + 0.22f) {
+                sampleCrateTopHeight(px, pz, minCrateY, maxCrateY)
+            } else null
+
+            val chosenH = when {
+                crateTop != null && (floorCandidate == null || crateTop > floorCandidate + 0.15f) && actualFeetY >= crateTop - 0.36f ->
+                    crateTop
+                floorCandidate != null -> floorCandidate
+                else -> return null
+            }
+
+            if (isBlockedByWall(px, pz, chosenH)) return null
+
+            // Relax corner neighbor floor check when landing/walking on narrow crate tops
+            if (crateTop != null && chosenH == crateTop) {
+                return chosenH
+            }
+            val p1 = sampleNearestFloorHeight(px + radius * 0.75f, pz, chosenH, 1.05f, 3.5f)
+            val p2 = sampleNearestFloorHeight(px - radius * 0.75f, pz, chosenH, 1.05f, 3.5f)
+            val p3 = sampleNearestFloorHeight(px, pz + radius * 0.75f, chosenH, 1.05f, 3.5f)
+            val p4 = sampleNearestFloorHeight(px, pz - radius * 0.75f, chosenH, 1.05f, 3.5f)
             val valid = (if (p1 != null) 1 else 0) +
                 (if (p2 != null) 1 else 0) +
                 (if (p3 != null) 1 else 0) +
                 (if (p4 != null) 1 else 0)
-            return if (valid >= 2) c else null
+            val minValid = if (chosenH > refFloor + 0.25f) 1 else 2
+            return if (valid >= minValid) chosenH else null
         }
 
         val steps = kotlin.math.ceil((totalDist / 0.14f).toDouble()).toInt().coerceIn(1, 12)
@@ -902,7 +973,9 @@ class ArenaWorld(
     }
 
     /**
-     * Marches a 3D ray through the multi-layer floors AND 512x512 vertical wall grid.
+     * Marches a 3D bullet/LOS ray through the exact 512x512 vertical wall bitmask and floor surfaces.
+     * Uses exact point-slice wall checks (no inflated ±0.14m box above crates) and allows shots to fly
+     * cleanly through open air over crates, balconies, and gaps without invisible blockers.
      */
     fun raycastWalls(
         ox: Float, oy: Float, oz: Float,
@@ -910,20 +983,23 @@ class ArenaWorld(
         maxDist: Float
     ): Float {
         if (floorLayers.isEmpty()) return maxDist
-        var dist = 0.35f
-        val step = 0.24f
+        var dist = 0.30f
+        val step = 0.20f
+        val maxBound = gridMin + gridSpan
         while (dist < maxDist) {
             val px = ox + dx * dist
             val py = oy + dy * dist
             val pz = oz + dz * dist
-            if (hasWallAt(px, pz, py - 0.14f, py + 0.14f)) {
+            if (px < gridMin || px > maxBound || pz < gridMin || pz > maxBound) {
                 return dist
             }
-            val floorH = sampleNearestFloorHeight(px, pz, py - 1.35f, maxStepUp = 2.6f, maxDrop = 4.2f)
-            if (floorH == null) {
+            // Exact point-height slice check so bullets pass crisply over crate tops without an invisible tall box
+            if (hasWallAt(px, pz, py, py)) {
                 return dist
             }
-            if (py < floorH + 0.04f) {
+            // Only stop on floor if an actual floor surface exists above the ray (never block mid-air over gaps/crates!)
+            val floorH = sampleNearestFloorHeight(px, pz, py, maxStepUp = 0.45f, maxDrop = 0.65f)
+            if (floorH != null && py < floorH - 0.02f) {
                 return dist
             }
             dist += step

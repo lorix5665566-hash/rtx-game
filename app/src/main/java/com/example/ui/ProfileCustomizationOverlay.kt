@@ -3,6 +3,7 @@ package com.example.ui
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
+import android.net.Uri
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.PickVisualMediaRequest
@@ -55,6 +56,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -98,9 +100,9 @@ fun ProfileCustomizationOverlay(
     val m = LocalUiMetrics.current
 
     val loadedProfile = (profileState as? OnlineUiState.Success)?.data
-    var nameInput by remember { mutableStateOf(loadedProfile?.displayName ?: fallbackLoginName) }
-    var selectedAvatar by remember { mutableStateOf(loadedProfile?.avatarData ?: AvatarPresets.DEFAULT_KEY) }
-    var initializedForUid by remember { mutableStateOf(loadedProfile?.userId) }
+    var nameInput by rememberSaveable { mutableStateOf(loadedProfile?.displayName ?: fallbackLoginName) }
+    var selectedAvatar by rememberSaveable { mutableStateOf(loadedProfile?.avatarData ?: AvatarPresets.DEFAULT_KEY) }
+    var initializedForUid by rememberSaveable { mutableStateOf(loadedProfile?.userId) }
 
     LaunchedEffect(loadedProfile?.userId) {
         if (loadedProfile != null && initializedForUid != loadedProfile.userId) {
@@ -113,24 +115,34 @@ fun ProfileCustomizationOverlay(
     var copiedId by remember { mutableStateOf(false) }
     var isProcessingPhoto by remember { mutableStateOf(false) }
     var localError by remember { mutableStateOf<String?>(null) }
+    var localSuccess by remember { mutableStateOf<String?>(null) }
 
-    // Zero-permission Android Photo Picker (Google Play compliant — no storage permission needed)
-    val photoPickerLauncher = rememberLauncherForActivityResult(
-        contract = ActivityResultContracts.PickVisualMedia()
-    ) { uri ->
-        if (uri == null) return@rememberLauncherForActivityResult
+    fun handlePickedUri(uri: Uri?) {
+        if (uri == null) return
         localError = null
+        localSuccess = null
         isProcessingPhoto = true
         scope.launch {
             val encoded = encodeGalleryPhotoToAvatarData(context, uri)
             isProcessingPhoto = false
             encoded.onSuccess { dataUri ->
                 selectedAvatar = dataUri
+                localSuccess = "Фото загружено! Нажмите «СОХРАНИТЬ», чтобы применить."
             }.onFailure { err ->
                 localError = err.localizedMessage ?: "Не удалось обработать фото."
             }
         }
     }
+
+    // Zero-permission Android Photo Picker (Google Play compliant — no storage permission needed)
+    val photoPickerLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.PickVisualMedia()
+    ) { uri -> handlePickedUri(uri) }
+
+    // Zero-permission SAF fallback for Android devices/ROMs where Photo Picker activity is absent
+    val safImageLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.OpenDocument()
+    ) { uri -> handlePickedUri(uri) }
 
     val fieldColors = OutlinedTextFieldDefaults.colors(
         focusedBorderColor = RtxEmerald,
@@ -337,9 +349,20 @@ fun ProfileCustomizationOverlay(
 
                                     Button(
                                         onClick = {
-                                            photoPickerLauncher.launch(
-                                                PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)
-                                            )
+                                            localError = null
+                                            localSuccess = null
+                                            val launchedPicker = runCatching {
+                                                photoPickerLauncher.launch(
+                                                    PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)
+                                                )
+                                            }.isSuccess
+                                            if (!launchedPicker) {
+                                                runCatching {
+                                                    safImageLauncher.launch(arrayOf("image/*"))
+                                                }.onFailure {
+                                                    localError = "Не удалось открыть выбор фото на этом устройстве."
+                                                }
+                                            }
                                         },
                                         enabled = !isProcessingPhoto && !isSaving,
                                         shape = CutCornerShape(topStart = m.s(8f), bottomEnd = m.s(8f)),
@@ -454,7 +477,7 @@ fun ProfileCustomizationOverlay(
                                     }
                                 }
 
-                                val displayNotice = localError ?: statusBanner
+                                val displayNotice = localError ?: localSuccess ?: statusBanner
                                 if (!displayNotice.isNullOrBlank()) {
                                     Text(
                                         text = displayNotice,

@@ -56,6 +56,7 @@ class FilamentGameplayController(
     private var swapChain: SwapChain? = null
     private var sunEntity: Int = 0
     private var fxLightEntity: Int = 0
+    private var skyRig: SkyboxRig? = null
 
     private var loadedMapId: ArenaMapId? = null
     private var loadedRegistryRevision: Int = -1
@@ -65,6 +66,10 @@ class FilamentGameplayController(
     // Character pools (5 CT + 5 T rigged skeletal .GLB instances!)
     private val ctPool = ArrayList<LoadedGlbModel>(5)
     private val tPool = ArrayList<LoadedGlbModel>(5)
+
+    // Lazy 3rd-person weapon instance pools so EVERY visible enemy & teammate holds their real equipped weapon!
+    private val tpWeaponPools = HashMap<WeaponType, MutableList<LoadedGlbModel>>()
+    private val tpWeaponUsedCount = HashMap<WeaponType, Int>()
 
     // First-person weapon models mapped by ModelSlot
     private val fpWeapons = HashMap<ModelSlot, LoadedGlbModel>()
@@ -112,9 +117,10 @@ class FilamentGameplayController(
         assetLoader = AssetLoader(engine, materialProvider, EntityManager.get())
         resourceLoader = ResourceLoader(engine)
 
-        val (sun, fx) = FilamentSceneHelpers.setupPbrLighting(engine, scene)
+        val (sun, fx, rig) = FilamentSceneHelpers.setupPbrLighting(engine, scene, gameEngine.world.mapId)
         sunEntity = sun
         fxLightEntity = fx
+        skyRig = rig
 
         displayHelper = DisplayHelper(context)
         uiHelper = UiHelper(UiHelper.ContextErrorPolicy.DONT_CHECK)
@@ -198,6 +204,8 @@ class FilamentGameplayController(
         // Clear old dynamic assets cleanly
         destroyModel(plantedBombModel); plantedBombModel = null
         fpWeapons.values.forEach { destroyModel(it) }; fpWeapons.clear()
+        tpWeaponPools.values.forEach { list -> list.forEach { destroyModel(it) } }
+        tpWeaponPools.clear()
         ctPool.forEach { destroyModel(it) }; ctPool.clear()
         tPool.forEach { destroyModel(it) }; tPool.clear()
 
@@ -267,6 +275,13 @@ class FilamentGameplayController(
                     tm.setTransform(rootInst, tmpMat)
                 }
             }
+            // Swap procedural skybox to match Mirage or Dust 2 atmosphere
+            val prevRig = skyRig
+            val newRig = FilamentSceneHelpers.createProceduralSkyRig(engine, targetMap)
+            scene.skybox = newRig.skybox
+            skyRig = newRig
+            FilamentSceneHelpers.destroySkyRig(engine, scene, prevRig)
+
             loadedMapId = targetMap
         }
     }
@@ -313,6 +328,8 @@ class FilamentGameplayController(
         destroyModel(handsCtPistol); handsCtPistol = null
         destroyModel(handsCtKnife); handsCtKnife = null
         fpWeapons.values.forEach { destroyModel(it) }; fpWeapons.clear()
+        tpWeaponPools.values.forEach { list -> list.forEach { destroyModel(it) } }
+        tpWeaponPools.clear()
         ctPool.forEach { destroyModel(it) }; ctPool.clear()
         tPool.forEach { destroyModel(it) }; tPool.clear()
 
@@ -327,6 +344,8 @@ class FilamentGameplayController(
                 engine.destroyColorGrading(it)
             }
         }
+        FilamentSceneHelpers.destroySkyRig(engine, scene, skyRig)
+        skyRig = null
         scene.skybox?.let {
             runCatching {
                 scene.skybox = null
@@ -418,12 +437,52 @@ class FilamentGameplayController(
         Matrix.rotateM(camMat, 0, Math.toDegrees(gameEngine.playerPitchRad.toDouble()).toFloat(), 1f, 0f, 0f)
     }
 
+    private fun acquireThirdPersonWeapon(weapon: WeaponType): LoadedGlbModel? {
+        val pool = tpWeaponPools.getOrPut(weapon) { ArrayList(4) }
+        val used = tpWeaponUsedCount[weapon] ?: 0
+        if (used >= 10) return null
+        if (used >= pool.size) {
+            val slot = ModelSlot.forWeapon(weapon)
+            val created = FilamentSceneHelpers.loadGlb(
+                assetLoader, resourceLoader, registry.loadGlbBuffer(slot)
+            ) ?: return null
+            pool.add(created)
+        }
+        tpWeaponUsedCount[weapon] = used + 1
+        return pool[used]
+    }
+
+    private fun placeThirdPersonWeapon(
+        weapon: WeaponType,
+        charX: Float,
+        charY: Float,
+        charZ: Float,
+        charYawDeg: Float,
+        deathProgress: Float,
+        isShooting: Boolean
+    ) {
+        val wModel = acquireThirdPersonWeapon(weapon) ?: return
+        FilamentSceneHelpers.setAssetVisible(scene, wModel, true)
+        FilamentSceneHelpers.buildThirdPersonWeaponMatrix(
+            out = tmpMat,
+            weapon = weapon,
+            charX = charX,
+            charY = charY,
+            charZ = charZ,
+            charYawDeg = charYawDeg,
+            deathProgress = deathProgress,
+            isShooting = isShooting
+        )
+        engine.transformManager.setTransform(engine.transformManager.getInstance(wModel.asset.root), tmpMat)
+    }
+
     private fun updateBots() {
         val tm = engine.transformManager
         var ctIdx = 0
         var tIdx = 0
         val px = gameEngine.playerX
         val pz = gameEngine.playerZ
+        tpWeaponUsedCount.clear()
 
         // 1. Render remote human players FIRST so friends/opponents always get priority in character pools!
         if (gameEngine.matchConfig.isMultiplayer) {
@@ -434,6 +493,9 @@ class FilamentGameplayController(
                 if (slotIdx >= pool.size) continue
                 val model = pool[slotIdx]
                 val charSlot = if (rp.team == TeamSide.CT) ModelSlot.CHARACTER_CT else ModelSlot.CHARACTER_T
+                // Local camera looks along -Z at yaw=0 while rigged character meshes face +Z natively -> +180° aligns eyes directly toward us!
+                val visualYawDeg = rp.yawDeg + 180f
+
                 FilamentSceneHelpers.setAssetVisible(scene, model, true)
                 FilamentSceneHelpers.buildCharacterMatrix(
                     out = tmpMat,
@@ -441,7 +503,7 @@ class FilamentGameplayController(
                     x = rp.x,
                     y = rp.y,
                     z = rp.z,
-                    yawDeg = rp.yawDeg,
+                    yawDeg = visualYawDeg,
                     deathProgress = rp.deathProgress,
                     targetHeight = 1.76f,
                     isCustomImported = registry.hasCustomFile(charSlot)
@@ -449,18 +511,37 @@ class FilamentGameplayController(
                 tm.setTransform(tm.getInstance(model.asset.root), tmpMat)
 
                 val animator = model.asset.instance.animator
-                if (animator.animationCount > 0 && !rp.isDead) {
-                    val animIdx = if (rp.isMoving) model.runAnimIdx else model.idleAnimIdx
-                    if (animIdx >= 0) {
-                        val dur = animator.getAnimationDuration(animIdx).coerceAtLeast(0.1f)
-                        animator.applyAnimation(animIdx, (gameEngine.timeSec + idx * 0.41f) % dur)
-                        animator.updateBoneMatrices()
+                if (animator.animationCount > 0) {
+                    if (rp.isDead) {
+                        if (model.deathAnimIdx >= 0) {
+                            val dur = animator.getAnimationDuration(model.deathAnimIdx).coerceAtLeast(0.1f)
+                            animator.applyAnimation(model.deathAnimIdx, rp.deathProgress.coerceIn(0f, 0.995f) * dur)
+                            animator.updateBoneMatrices()
+                        }
+                    } else {
+                        val animIdx = if (rp.isMoving) model.runAnimIdx else model.idleAnimIdx
+                        if (animIdx >= 0) {
+                            val dur = animator.getAnimationDuration(animIdx).coerceAtLeast(0.1f)
+                            animator.applyAnimation(animIdx, (gameEngine.timeSec + idx * 0.41f) % dur)
+                            animator.updateBoneMatrices()
+                        }
                     }
                 }
+
+                // Render remote player's real equipped 3D weapon in hands (or dropped beside them on death)
+                placeThirdPersonWeapon(
+                    weapon = rp.weapon,
+                    charX = rp.x,
+                    charY = rp.y,
+                    charZ = rp.z,
+                    charYawDeg = visualYawDeg,
+                    deathProgress = rp.deathProgress,
+                    isShooting = rp.isShooting
+                )
             }
         }
 
-        // 2. Render AI bots (skipping skeletal skinning on dead or distant > 38m bots for max FPS!)
+        // 2. Render AI bots (with biomechanical knees, skeletal Death collapse, and equipped 3D weapons!)
         for (b in gameEngine.bots) {
             val pool = if (b.team == TeamSide.CT) ctPool else tPool
             val slotIdx = if (b.team == TeamSide.CT) ctIdx++ else tIdx++
@@ -486,24 +567,51 @@ class FilamentGameplayController(
             val dz = b.z - pz
             val distSq = dx * dx + dz * dz
             val animator = model.asset.instance.animator
-            if (animator.animationCount > 0 && !b.isDead && distSq < 38f * 38f) {
-                val animIdx = when {
-                    !b.isMoving -> model.idleAnimIdx
-                    kotlin.math.abs(b.moveForwardRatio) > 0.65f -> model.runAnimIdx
-                    else -> model.walkAnimIdx
+            if (animator.animationCount > 0 && distSq < 46f * 46f) {
+                if (b.isDead) {
+                    if (model.deathAnimIdx >= 0) {
+                        val dur = animator.getAnimationDuration(model.deathAnimIdx).coerceAtLeast(0.1f)
+                        animator.applyAnimation(model.deathAnimIdx, b.deathProgress.coerceIn(0f, 0.995f) * dur)
+                        animator.updateBoneMatrices()
+                    }
+                } else {
+                    val animIdx = when {
+                        !b.isMoving -> model.idleAnimIdx
+                        kotlin.math.abs(b.moveForwardRatio) > 0.65f -> model.runAnimIdx
+                        else -> model.walkAnimIdx
+                    }
+                    if (animIdx >= 0) {
+                        val dur = animator.getAnimationDuration(animIdx).coerceAtLeast(0.1f)
+                        val animTime = (gameEngine.timeSec + b.id * 0.37f) % dur
+                        animator.applyAnimation(animIdx, animTime)
+                        animator.updateBoneMatrices()
+                    }
                 }
-                if (animIdx >= 0) {
-                    val dur = animator.getAnimationDuration(animIdx).coerceAtLeast(0.1f)
-                    val animTime = (gameEngine.timeSec + b.id * 0.37f) % dur
-                    animator.applyAnimation(animIdx, animTime)
-                    animator.updateBoneMatrices()
-                }
+            }
+
+            // Render every teammate & enemy bot's real bought/equipped 3D weapon!
+            if (distSq < 54f * 54f) {
+                placeThirdPersonWeapon(
+                    weapon = b.weapon,
+                    charX = b.x,
+                    charY = b.y,
+                    charZ = b.z,
+                    charYawDeg = b.visualYawDeg,
+                    deathProgress = b.deathProgress,
+                    isShooting = b.fireCooldown > b.weapon.fireIntervalSec * 0.55f && b.hasLineOfSight
+                )
             }
         }
 
-        // Hide unused pool instances
+        // Hide unused pool instances (characters & 3rd-person weapons)
         for (i in ctIdx until ctPool.size) FilamentSceneHelpers.setAssetVisible(scene, ctPool[i], false)
         for (i in tIdx until tPool.size) FilamentSceneHelpers.setAssetVisible(scene, tPool[i], false)
+        for ((wType, list) in tpWeaponPools) {
+            val used = tpWeaponUsedCount[wType] ?: 0
+            for (i in used until list.size) {
+                FilamentSceneHelpers.setAssetVisible(scene, list[i], false)
+            }
+        }
     }
 
     private fun updateFirstPersonWeaponAndMuzzle() {

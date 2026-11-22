@@ -1,5 +1,6 @@
 package com.example.online
 
+import android.os.SystemClock
 import com.example.model.ArenaMapId
 import com.example.model.GameMode
 import com.example.model.OutgoingHitEvent
@@ -445,6 +446,32 @@ class SupabaseOnlineRepository(
             }
         }
 
+    /**
+     * Ultra-lightweight single-GET match tick fetch omitting base64 avatar blobs.
+     * Returns parsed member states paired with measured round-trip time (RTT) in ms.
+     */
+    suspend fun fetchLobbyMembersFast(lobbyId: String): Result<Pair<List<PlayerMatchState>, Int>> =
+        withContext(Dispatchers.IO) {
+            runCatching {
+                val startMs = SystemClock.elapsedRealtime()
+                val membersRaw = getRest(
+                    table = "lobby_members",
+                    query = mapOf(
+                        "select" to FAST_MEMBER_SELECT,
+                        "lobby_id" to "eq.$lobbyId"
+                    )
+                ).getOrThrow()
+                val rttMs = (SystemClock.elapsedRealtime() - startMs).toInt().coerceIn(1, 999)
+                val membersArr = JSONArray(membersRaw)
+                val members = ArrayList<PlayerMatchState>(membersArr.length())
+                for (i in 0 until membersArr.length()) {
+                    val o = membersArr.optJSONObject(i) ?: continue
+                    members.add(parseMemberState(o))
+                }
+                members.sortedBy { it.displayName.lowercase() } to rttMs
+            }
+        }
+
     suspend fun updateLobbyConfig(
         lobbyId: String,
         map: ArenaMapId,
@@ -613,35 +640,39 @@ class SupabaseOnlineRepository(
         kills: Int,
         deaths: Int,
         outgoingHit: OutgoingHitEvent?
-    ) {
-        withContext(Dispatchers.IO) {
-            val payload = JSONObject().apply {
-                put("team", team.name)
-                put("x", x.toDouble())
-                put("y", y.toDouble())
-                put("z", z.toDouble())
-                put("yaw_deg", yawDeg.toDouble())
-                put("pitch_deg", pitchDeg.toDouble())
-                put("hp", hp.coerceIn(0, 100))
-                put("dead", dead)
-                put("moving", moving)
-                put("shooting", shooting)
-                put("weapon", weaponName.take(32))
-                put("kills", kills.coerceIn(0, 500))
-                put("deaths", deaths.coerceIn(0, 500))
-                if (outgoingHit != null) {
-                    put("hit_target_uid", outgoingHit.targetUid.take(64))
-                    put("hit_damage", outgoingHit.damage.coerceIn(0, 200))
-                    put("hit_headshot", outgoingHit.headshot)
-                    put("hit_weapon", outgoingHit.weaponName.take(32))
-                    put("hit_seq", outgoingHit.seq.coerceIn(0, 1_000_000))
-                }
+    ): Int? = withContext(Dispatchers.IO) {
+        val payload = JSONObject().apply {
+            put("team", team.name)
+            put("x", x.toDouble())
+            put("y", y.toDouble())
+            put("z", z.toDouble())
+            put("yaw_deg", yawDeg.toDouble())
+            put("pitch_deg", pitchDeg.toDouble())
+            put("hp", hp.coerceIn(0, 100))
+            put("dead", dead)
+            put("moving", moving)
+            put("shooting", shooting)
+            put("weapon", weaponName.take(32))
+            put("kills", kills.coerceIn(0, 500))
+            put("deaths", deaths.coerceIn(0, 500))
+            if (outgoingHit != null) {
+                put("hit_target_uid", outgoingHit.targetUid.take(64))
+                put("hit_damage", outgoingHit.damage.coerceIn(0, 200))
+                put("hit_headshot", outgoingHit.headshot)
+                put("hit_weapon", outgoingHit.weaponName.take(32))
+                put("hit_seq", outgoingHit.seq.coerceIn(0, 1_000_000))
             }
-            patchRest(
-                table = "lobby_members",
-                query = mapOf("lobby_id" to "eq.$lobbyId", "user_id" to "eq.$userId"),
-                body = payload
-            )
+        }
+        val startMs = SystemClock.elapsedRealtime()
+        val res = patchRest(
+            table = "lobby_members",
+            query = mapOf("lobby_id" to "eq.$lobbyId", "user_id" to "eq.$userId"),
+            body = payload
+        )
+        if (res.isSuccess) {
+            (SystemClock.elapsedRealtime() - startMs).toInt().coerceIn(1, 999)
+        } else {
+            null
         }
     }
 
@@ -881,6 +912,8 @@ class SupabaseOnlineRepository(
 
     companion object {
         private val JSON_MEDIA = "application/json; charset=utf-8".toMediaType()
+        private const val FAST_MEMBER_SELECT =
+            "user_id,short_id,display_name,team,ready,x,y,z,yaw_deg,pitch_deg,hp,dead,moving,shooting,weapon,kills,deaths,hit_target_uid,hit_damage,hit_headshot,hit_weapon,hit_seq"
         private val SHORT_ID_REGEX = Regex("^[1-9][0-9]{5}$")
         private val DISPLAY_NAME_REGEX = Regex("^[a-zA-Z0-9_\\- а-яА-ЯёЁ]+$")
         private val UUID_REGEX = Regex("^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$")

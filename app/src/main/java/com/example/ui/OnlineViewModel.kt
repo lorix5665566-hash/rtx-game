@@ -76,6 +76,9 @@ class OnlineViewModel(
     private val _lobbyMemberStates = MutableStateFlow<List<PlayerMatchState>>(emptyList())
     val lobbyMemberStates: StateFlow<List<PlayerMatchState>> = _lobbyMemberStates.asStateFlow()
 
+    private val _pingMs = MutableStateFlow(0)
+    val pingMs: StateFlow<Int> = _pingMs.asStateFlow()
+
     private var lobbyPollJob: Job? = null
     private val tickInFlight = AtomicBoolean(false)
 
@@ -376,6 +379,7 @@ class OnlineViewModel(
         _activeLobbyId.value = null
         _activeLobby.value = null
         _lobbyMemberStates.value = emptyList()
+        _pingMs.value = 0
         viewModelScope.launch {
             if (!lobbyId.isNullOrBlank()) {
                 repository.leaveLobby(lobbyId, currentUserId, isHost = lobby?.hostUid == currentUserId)
@@ -406,7 +410,7 @@ class OnlineViewModel(
         if (outgoingHit == null && !tickInFlight.compareAndSet(false, true)) return
         viewModelScope.launch {
             try {
-                repository.publishMatchTick(
+                val rtt = repository.publishMatchTick(
                     lobbyId = lobbyId,
                     userId = currentUserId,
                     team = team,
@@ -424,6 +428,9 @@ class OnlineViewModel(
                     deaths = deaths,
                     outgoingHit = outgoingHit
                 )
+                if (rtt != null && _pingMs.value == 0) {
+                    recordRtt(rtt)
+                }
             } finally {
                 if (outgoingHit == null) tickInFlight.set(false)
             }
@@ -438,30 +445,66 @@ class OnlineViewModel(
         _activeLobbyId.value = null
         _activeLobby.value = null
         _lobbyMemberStates.value = emptyList()
+        _pingMs.value = 0
         if (!lobbyId.isNullOrBlank()) {
             repository.leaveLobby(lobbyId, currentUserId, isHost = lobby?.hostUid == currentUserId)
         }
         repository.setOnlineStatus(currentUserId, online = false)
     }
 
+    private fun recordRtt(rttMs: Int) {
+        val clamped = rttMs.coerceIn(1, 999)
+        val prev = _pingMs.value
+        _pingMs.value = if (prev <= 0) {
+            clamped
+        } else {
+            (prev * 0.65f + clamped * 0.35f).toInt().coerceIn(1, 999)
+        }
+    }
+
     private fun startLobbyPolling(lobbyId: String) {
         lobbyPollJob?.cancel()
         lobbyPollJob = viewModelScope.launch {
+            var matchTickCount = 0
             while (isActive && _activeLobbyId.value == lobbyId) {
-                repository.fetchLobbySnapshot(lobbyId)
-                    .onSuccess { snapshot ->
-                        if (snapshot == null) {
-                            _statusBanner.value = "Хост закрыл лобби."
-                            _activeLobbyId.value = null
-                            _activeLobby.value = null
-                            _lobbyMemberStates.value = emptyList()
-                            return@launch
-                        }
-                        _activeLobby.value = snapshot.first
-                        _lobbyMemberStates.value = snapshot.second
-                    }
                 val inMatch = _activeLobby.value?.status == "playing"
-                delay(if (inMatch) 160L else 1_100L)
+                if (inMatch && matchTickCount % 20 != 0) {
+                    repository.fetchLobbyMembersFast(lobbyId)
+                        .onSuccess { (fastMembers, rttMs) ->
+                            recordRtt(rttMs)
+                            val cachedAvatars = _lobbyMemberStates.value.associate { it.userId to it.avatarData }
+                            _lobbyMemberStates.value = fastMembers.map { m ->
+                                val preserved = cachedAvatars[m.userId]
+                                if (!preserved.isNullOrBlank()) m.copy(avatarData = preserved) else m
+                            }
+                        }
+                    matchTickCount++
+                    delay(65L)
+                } else {
+                    val t0 = android.os.SystemClock.elapsedRealtime()
+                    repository.fetchLobbySnapshot(lobbyId)
+                        .onSuccess { snapshot ->
+                            val rtt = ((android.os.SystemClock.elapsedRealtime() - t0) / 2L).toInt().coerceIn(1, 999)
+                            recordRtt(rtt)
+                            if (snapshot == null) {
+                                _statusBanner.value = "Хост закрыл лобби."
+                                _activeLobbyId.value = null
+                                _activeLobby.value = null
+                                _lobbyMemberStates.value = emptyList()
+                                _pingMs.value = 0
+                                return@launch
+                            }
+                            _activeLobby.value = snapshot.first
+                            _lobbyMemberStates.value = snapshot.second
+                        }
+                    if (_activeLobby.value?.status == "playing") {
+                        matchTickCount++
+                        delay(65L)
+                    } else {
+                        matchTickCount = 0
+                        delay(550L)
+                    }
+                }
             }
         }
     }

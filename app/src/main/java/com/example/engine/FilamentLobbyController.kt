@@ -58,6 +58,7 @@ class FilamentLobbyController(
     private var swapChain: SwapChain? = null
     private var sunEntity: Int = 0
     private var fxLightEntity: Int = 0
+    private var skyRig: SkyboxRig? = null
 
     private var loadedMap: ArenaMapId? = null
     private var activeWorld: ArenaWorld = ArenaWorld(context, ArenaMapId.MIRAGE)
@@ -96,9 +97,10 @@ class FilamentLobbyController(
         assetLoader = AssetLoader(engine, materialProvider, EntityManager.get())
         resourceLoader = ResourceLoader(engine)
 
-        val (sun, fx) = FilamentSceneHelpers.setupPbrLighting(engine, scene)
+        val (sun, fx, rig) = FilamentSceneHelpers.setupPbrLighting(engine, scene, showcaseMap)
         sunEntity = sun
         fxLightEntity = fx
+        skyRig = rig
 
         displayHelper = DisplayHelper(context)
         uiHelper = UiHelper(UiHelper.ContextErrorPolicy.DONT_CHECK)
@@ -169,6 +171,13 @@ class FilamentLobbyController(
             Matrix.setIdentityM(tmpMat, 0)
             tm.setTransform(tm.getInstance(m.asset.root), tmpMat)
         }
+        // Swap procedural skybox to match Mirage / Dust 2 lighting mood
+        val prevRig = skyRig
+        val newRig = FilamentSceneHelpers.createProceduralSkyRig(engine, targetMap)
+        scene.skybox = newRig.skybox
+        skyRig = newRig
+        FilamentSceneHelpers.destroySkyRig(engine, scene, prevRig)
+
         loadedMap = targetMap
         characterYawDeg = activeWorld.lobbyDefaultCharYawDeg
         yawVelocityDegPerSec = 0f
@@ -218,6 +227,8 @@ class FilamentLobbyController(
                 engine.destroyColorGrading(it)
             }
         }
+        FilamentSceneHelpers.destroySkyRig(engine, scene, skyRig)
+        skyRig = null
         scene.skybox?.let {
             runCatching {
                 scene.skybox = null

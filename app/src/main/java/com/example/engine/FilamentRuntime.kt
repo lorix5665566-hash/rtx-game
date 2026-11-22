@@ -1,8 +1,10 @@
 package com.example.engine
 
 import android.opengl.Matrix
+import com.example.model.ArenaMapId
 import com.example.model.GraphicsPreset
 import com.example.model.GraphicsSettings
+import com.example.model.WeaponType
 import com.google.android.filament.ColorGrading
 import com.google.android.filament.Engine
 import com.google.android.filament.EntityManager
@@ -11,12 +13,19 @@ import com.google.android.filament.IndirectLight
 import com.google.android.filament.LightManager
 import com.google.android.filament.Scene
 import com.google.android.filament.Skybox
+import com.google.android.filament.Texture
 import com.google.android.filament.View
 import com.google.android.filament.gltfio.AssetLoader
 import com.google.android.filament.gltfio.FilamentAsset
 import com.google.android.filament.gltfio.ResourceLoader
 import com.google.android.filament.utils.Utils
 import java.nio.ByteBuffer
+import java.nio.ByteOrder
+import kotlin.math.floor
+import kotlin.math.max
+import kotlin.math.min
+import kotlin.math.pow
+import kotlin.math.sqrt
 
 object FilamentBootstrap {
     @Volatile
@@ -50,11 +59,17 @@ class LoadedGlbModel(
     val sizeZ: Float,
     val idleAnimIdx: Int,
     val walkAnimIdx: Int,
-    val runAnimIdx: Int
+    val runAnimIdx: Int,
+    val deathAnimIdx: Int = -1
 ) {
     val maxExtent: Float = maxOf(sizeX, maxOf(sizeY, sizeZ)).coerceAtLeast(0.001f)
     var inScene: Boolean = false
 }
+
+data class SkyboxRig(
+    val skybox: Skybox,
+    val cubemapTexture: Texture?
+)
 
 object FilamentSceneHelpers {
 
@@ -75,10 +90,12 @@ object FilamentSceneHelpers {
             var idleIdx = -1
             var walkIdx = -1
             var runIdx = -1
+            var deathIdx = -1
             val count = animator.animationCount
             for (i in 0 until count) {
                 val n = animator.getAnimationName(i).lowercase()
                 when {
+                    n.contains("death") || n.contains("die") || n.contains("fall") -> deathIdx = i
                     n.contains("idle") -> idleIdx = i
                     n.contains("walk") -> walkIdx = i
                     n.contains("run") || n.contains("sprint") -> runIdx = i
@@ -99,7 +116,8 @@ object FilamentSceneHelpers {
                 sizeZ = (h[2] * 2f).coerceAtLeast(0.001f),
                 idleAnimIdx = idleIdx,
                 walkAnimIdx = walkIdx,
-                runAnimIdx = runIdx
+                runAnimIdx = runIdx,
+                deathAnimIdx = deathIdx
             )
         }.getOrElse {
             runCatching { assetLoader.destroyAsset(asset) }
@@ -119,35 +137,258 @@ object FilamentSceneHelpers {
     }
 
     /**
-     * Creates warm sunlit Mediterranean skybox + 3-band Spherical Harmonics IndirectLight (IBL)
+     * Generates a rich procedural 6-face skybox cubemap with Rayleigh sky gradient,
+     * sunlit layered cumulus clouds, horizon haze, and solar corona tailored to Mirage or Dust 2.
+     */
+    fun createProceduralSkyRig(engine: Engine, mapId: ArenaMapId): SkyboxRig {
+        return runCatching {
+            val size = 128
+            val facePixels = size * size
+            val faceBytes = facePixels * 4
+            val buffer = ByteBuffer.allocateDirect(faceBytes * 6).order(ByteOrder.nativeOrder())
+
+            // Sun sits opposite the directional sun travel vector (-0.46, -0.82, -0.34)
+            val sunLen = sqrt(0.46f * 0.46f + 0.82f * 0.82f + 0.34f * 0.34f)
+            val sx = 0.46f / sunLen
+            val sy = 0.82f / sunLen
+            val sz = 0.34f / sunLen
+
+            val isDust = mapId == ArenaMapId.DUST2
+            // Mirage: vivid Mediterranean azure + crisp cream clouds
+            // Dust 2: golden sunlit desert sky + warm amber horizon
+            val zenR = if (isDust) 0.14f else 0.10f
+            val zenG = if (isDust) 0.36f else 0.34f
+            val zenB = if (isDust) 0.68f else 0.76f
+
+            val midR = if (isDust) 0.44f else 0.34f
+            val midG = if (isDust) 0.66f else 0.62f
+            val midB = if (isDust) 0.86f else 0.90f
+
+            val horR = if (isDust) 0.96f else 0.84f
+            val horG = if (isDust) 0.85f else 0.88f
+            val horB = if (isDust) 0.70f else 0.92f
+
+            val gndR = if (isDust) 0.68f else 0.56f
+            val gndG = if (isDust) 0.56f else 0.51f
+            val gndB = if (isDust) 0.42f else 0.44f
+
+            val cloudLitR = if (isDust) 1.00f else 1.00f
+            val cloudLitG = if (isDust) 0.95f else 0.98f
+            val cloudLitB = if (isDust) 0.86f else 0.94f
+
+            val cloudShdR = if (isDust) 0.76f else 0.68f
+            val cloudShdG = if (isDust) 0.74f else 0.76f
+            val cloudShdB = if (isDust) 0.78f else 0.86f
+
+            val invSize = 2.0f / size.toFloat()
+
+            for (face in 0 until 6) {
+                for (py in 0 until size) {
+                    val v = (py + 0.5f) * invSize - 1.0f
+                    for (px in 0 until size) {
+                        val u = (px + 0.5f) * invSize - 1.0f
+                        var dx: Float
+                        var dy: Float
+                        var dz: Float
+                        when (face) {
+                            0 -> { dx = 1f; dy = -v; dz = -u }   // +X
+                            1 -> { dx = -1f; dy = -v; dz = u }   // -X
+                            2 -> { dx = u; dy = 1f; dz = v }     // +Y
+                            3 -> { dx = u; dy = -1f; dz = -v }   // -Y
+                            4 -> { dx = u; dy = -v; dz = 1f }    // +Z
+                            else -> { dx = -u; dy = -v; dz = -1f } // -Z
+                        }
+                        val invLen = 1.0f / sqrt(dx * dx + dy * dy + dz * dz)
+                        dx *= invLen
+                        dy *= invLen
+                        dz *= invLen
+
+                        var r: Float
+                        var g: Float
+                        var b: Float
+                        if (dy >= 0f) {
+                            // Smooth atmospheric curve: horizon -> mid-sky -> deep zenith
+                            val h = dy.coerceIn(0f, 1f)
+                            val tLow = (h / 0.28f).coerceIn(0f, 1f)
+                            val sLow = tLow * tLow * (3f - 2f * tLow)
+                            val tHigh = ((h - 0.14f) / 0.86f).coerceIn(0f, 1f)
+                            val sHigh = tHigh.pow(0.75f)
+
+                            val baseR = lerpF(horR, midR, sLow)
+                            val baseG = lerpF(horG, midG, sLow)
+                            val baseB = lerpF(horB, midB, sLow)
+                            r = lerpF(baseR, zenR, sHigh)
+                            g = lerpF(baseG, zenG, sHigh)
+                            b = lerpF(baseB, zenB, sHigh)
+
+                            // Sun disc + warm atmospheric Mie scattering corona
+                            val sunDot = (dx * sx + dy * sy + dz * sz).coerceIn(-1f, 1f)
+                            if (sunDot > 0f) {
+                                val halo = sunDot.pow(7f) * (if (isDust) 0.42f else 0.30f)
+                                val tightGlow = sunDot.pow(48f) * 0.65f
+                                val disc = if (sunDot > 0.9975f) {
+                                    ((sunDot - 0.9975f) / 0.0025f).coerceIn(0f, 1f)
+                                } else 0f
+                                r += halo * 1.0f + tightGlow * 1.0f + disc * 0.9f
+                                g += halo * 0.86f + tightGlow * 0.94f + disc * 0.88f
+                                b += halo * 0.62f + tightGlow * 0.78f + disc * 0.72f
+                            }
+
+                            // Volumetric-style sunlit cumulus clouds projected onto curved sky plane
+                            if (h > 0.035f) {
+                                val proj = 1.0f / (h + 0.18f)
+                                val cx = dx * proj * 1.15f + (if (isDust) 4.2f else 1.3f)
+                                val cz = dz * proj * 1.15f + (if (isDust) 2.7f else -0.8f)
+                                val n = fbm2d(cx, cz)
+                                val threshold = if (isDust) 0.56f else 0.51f
+                                val coverage = ((n - threshold) / (0.86f - threshold)).coerceIn(0f, 1f)
+                                val horizonFade = ((h - 0.035f) / 0.14f).coerceIn(0f, 1f)
+                                val cloudAlpha = (coverage * coverage * (3f - 2f * coverage) * horizonFade * 0.88f)
+                                    .coerceIn(0f, 0.92f)
+                                if (cloudAlpha > 0.005f) {
+                                    // Fake self-shadowing: sample slightly toward sun for sunlit rims!
+                                    val nSun = fbm2d(cx + sx * 0.16f, cz + sz * 0.16f)
+                                    val litFactor = (0.58f + (n - nSun) * 1.8f + max(0f, sunDot) * 0.35f)
+                                        .coerceIn(0.18f, 1.0f)
+                                    val cr = lerpF(cloudShdR, cloudLitR, litFactor)
+                                    val cg = lerpF(cloudShdG, cloudLitG, litFactor)
+                                    val cb = lerpF(cloudShdB, cloudLitB, litFactor)
+                                    r = lerpF(r, cr, cloudAlpha)
+                                    g = lerpF(g, cg, cloudAlpha)
+                                    b = lerpF(b, cb, cloudAlpha)
+                                }
+                            }
+                        } else {
+                            val tDown = (-dy / 0.32f).coerceIn(0f, 1f)
+                            val sDown = tDown * tDown * (3f - 2f * tDown)
+                            r = lerpF(horR, gndR, sDown)
+                            g = lerpF(horG, gndG, sDown)
+                            b = lerpF(horB, gndB, sDown)
+                        }
+
+                        buffer.put((r.coerceIn(0f, 1f) * 255f).toInt().toByte())
+                        buffer.put((g.coerceIn(0f, 1f) * 255f).toInt().toByte())
+                        buffer.put((b.coerceIn(0f, 1f) * 255f).toInt().toByte())
+                        buffer.put(255.toByte())
+                    }
+                }
+            }
+            buffer.flip()
+
+            val tex = Texture.Builder()
+                .width(size)
+                .height(size)
+                .levels(1)
+                .sampler(Texture.Sampler.SAMPLER_CUBEMAP)
+                .format(Texture.InternalFormat.SRGB8_A8)
+                .build(engine)
+
+            val offsets = intArrayOf(
+                0,
+                faceBytes,
+                faceBytes * 2,
+                faceBytes * 3,
+                faceBytes * 4,
+                faceBytes * 5
+            )
+            val pbd = Texture.PixelBufferDescriptor(
+                buffer,
+                Texture.Format.RGBA,
+                Texture.Type.UBYTE
+            )
+            tex.setImage(engine, 0, pbd, offsets)
+
+            val skybox = Skybox.Builder()
+                .environment(tex)
+                .intensity(34_000f)
+                .build(engine)
+            SkyboxRig(skybox, tex)
+        }.getOrElse {
+            val fallback = Skybox.Builder()
+                .color(0.48f, 0.72f, 0.94f, 1.0f)
+                .build(engine)
+            SkyboxRig(fallback, null)
+        }
+    }
+
+    fun destroySkyRig(engine: Engine, scene: Scene, rig: SkyboxRig?) {
+        if (rig == null) return
+        if (scene.skybox == rig.skybox) {
+            scene.skybox = null
+        }
+        runCatching { engine.destroySkybox(rig.skybox) }
+        rig.cubemapTexture?.let { tex ->
+            runCatching { engine.destroyTexture(tex) }
+        }
+    }
+
+    private fun lerpF(a: Float, b: Float, t: Float): Float = a + (b - a) * t
+
+    private fun hash2d(ix: Int, iz: Int): Float {
+        var n = ix * 374761393 + iz * 668265263
+        n = (n xor (n ushr 13)) * 1274126177
+        return ((n xor (n ushr 16)) and 0x7fffffff).toFloat() / 2147483647.0f
+    }
+
+    private fun valueNoise2d(x: Float, z: Float): Float {
+        val ix = floor(x).toInt()
+        val iz = floor(z).toInt()
+        val fx = x - ix
+        val fz = z - iz
+        val ux = fx * fx * (3f - 2f * fx)
+        val uz = fz * fz * (3f - 2f * fz)
+        val a = hash2d(ix, iz)
+        val b = hash2d(ix + 1, iz)
+        val c = hash2d(ix, iz + 1)
+        val d = hash2d(ix + 1, iz + 1)
+        return lerpF(lerpF(a, b, ux), lerpF(c, d, ux), uz)
+    }
+
+    private fun fbm2d(x: Float, z: Float): Float {
+        var amp = 0.52f
+        var freq = 1.0f
+        var sum = 0f
+        var norm = 0f
+        for (i in 0 until 4) {
+            sum += amp * valueNoise2d(x * freq, z * freq)
+            norm += amp
+            freq *= 2.07f
+            amp *= 0.5f
+        }
+        return sum / norm
+    }
+
+    /**
+     * Creates warm sunlit procedural skybox + 3-band Spherical Harmonics IndirectLight (IBL)
      * + shadow-casting directional sun + dynamic point light for muzzle flash / C4 explosion.
      */
-    fun setupPbrLighting(engine: Engine, scene: Scene): Pair<Int, Int> {
-        // Bright sunlit Mediterranean CS2 Mirage daylight sky
-        val skybox = Skybox.Builder()
-            .color(0.54f, 0.74f, 0.94f, 1.0f)
-            .build(engine)
-        scene.skybox = skybox
+    fun setupPbrLighting(
+        engine: Engine,
+        scene: Scene,
+        mapId: ArenaMapId = ArenaMapId.MIRAGE
+    ): Triple<Int, Int, SkyboxRig> {
+        val skyRig = createProceduralSkyRig(engine, mapId)
+        scene.skybox = skyRig.skybox
 
-        // 3-band Spherical Harmonics IBL: bright open sky + warm sunlit sandstone bounce so characters & walls never look dark
+        // Bright balanced 3-band Spherical Harmonics IBL so operatives & maps look crisp & vivid
         val shBands = floatArrayOf(
-            1.15f, 1.10f, 1.04f,
-            0.26f, 0.32f, 0.40f,
-            0.22f, 0.19f, 0.15f,
+            1.28f, 1.24f, 1.18f,
+            0.28f, 0.34f, 0.42f,
+            0.24f, 0.21f, 0.17f,
             -0.10f, -0.09f, -0.07f,
-            0.08f, 0.07f, 0.06f,
-            -0.04f, -0.03f, -0.02f,
             0.09f, 0.08f, 0.07f,
+            -0.04f, -0.03f, -0.02f,
+            0.10f, 0.09f, 0.08f,
             -0.03f, -0.02f, -0.02f,
-            0.06f, 0.06f, 0.05f
+            0.07f, 0.07f, 0.06f
         )
         val ibl = IndirectLight.Builder()
             .irradiance(3, shBands)
-            .intensity(54_000f)
+            .intensity(60_000f)
             .build(engine)
         scene.indirectLight = ibl
 
-        // Primary Sun DirectionalLight with real-time shadow maps
+        // Primary Sun DirectionalLight with real-time 2K 2-cascade shadow maps
         val sunEntity = EntityManager.get().create()
         val shadowOpts = LightManager.ShadowOptions().apply {
             mapSize = 2048
@@ -155,8 +396,8 @@ object FilamentSceneHelpers {
             stable = true
         }
         LightManager.Builder(LightManager.Type.DIRECTIONAL)
-            .color(1.0f, 0.96f, 0.88f)
-            .intensity(138_000f)
+            .color(1.0f, 0.96f, 0.89f)
+            .intensity(142_000f)
             .direction(-0.46f, -0.82f, -0.34f)
             .castShadows(true)
             .shadowOptions(shadowOpts)
@@ -173,7 +414,7 @@ object FilamentSceneHelpers {
             .build(engine, fxLightEntity)
         scene.addEntity(fxLightEntity)
 
-        return sunEntity to fxLightEntity
+        return Triple(sunEntity, fxLightEntity, skyRig)
     }
 
     fun applyGraphicsSettings(engine: Engine, view: View, gfx: GraphicsSettings) {
@@ -216,8 +457,8 @@ object FilamentSceneHelpers {
                 if (gfx.bloomAndAces) ColorGrading.ToneMapping.ACES
                 else ColorGrading.ToneMapping.LINEAR
             )
-            .contrast(if (gfx.bloomAndAces) 1.07f else 1.0f)
-            .saturation(if (gfx.bloomAndAces) 1.06f else 1.0f)
+            .contrast(if (gfx.bloomAndAces) 1.06f else 1.0f)
+            .saturation(if (gfx.bloomAndAces) 1.08f else 1.0f)
             .build(engine)
         view.colorGrading = grading
         if (prevGrading != null && prevGrading != grading) {
@@ -227,8 +468,9 @@ object FilamentSceneHelpers {
 
     /**
      * Builds a transform matrix that places a loaded character .GLB standing at (x, y, z)
-     * with exact real human height (1.76m), feet anchored cleanly on floor y, facing yawDeg (+Z forward),
-     * with smooth backward death fall tilt.
+     * with exact real human height (1.76m), feet anchored cleanly on floor y, facing yawDeg (+Z forward).
+     * When the model has a dedicated skeletal Death clip (deathAnimIdx >= 0), death collapse is
+     * driven smoothly by the skeleton (knees buckling, limp arms) rather than a stiff root tilt.
      */
     fun buildCharacterMatrix(
         out: FloatArray,
@@ -241,11 +483,13 @@ object FilamentSceneHelpers {
         targetHeight: Float = 1.76f,
         isCustomImported: Boolean = false
     ) {
+        val useSkeletalDeath = !isCustomImported && model.deathAnimIdx >= 0
         Matrix.setIdentityM(out, 0)
-        Matrix.translateM(out, 0, x, y + deathProgress * 0.14f, z)
+        val liftY = if (!useSkeletalDeath && deathProgress > 0.001f) deathProgress * 0.14f else 0f
+        Matrix.translateM(out, 0, x, y + liftY, z)
         // Bundled anatomical human operatives face +Z natively (aligned 1:1 with atan2(dx, dz))
         Matrix.rotateM(out, 0, yawDeg, 0f, 1f, 0f)
-        if (deathProgress > 0.001f) {
+        if (!useSkeletalDeath && deathProgress > 0.001f) {
             Matrix.rotateM(out, 0, -deathProgress * 86f, 1f, 0f, 0f)
         }
         if (!isCustomImported) {
@@ -259,6 +503,66 @@ object FilamentSceneHelpers {
             Matrix.scaleM(out, 0, scale, scale, scale)
             Matrix.translateM(out, 0, -model.centerX, -model.minY, -model.centerZ)
         }
+    }
+
+    /**
+     * Positions a 3rd-person equipped weapon .GLB cleanly in a standing/moving operative's hands
+     * (facing character +Z) and smoothly drops it flat onto the floor when the operative dies.
+     */
+    fun buildThirdPersonWeaponMatrix(
+        out: FloatArray,
+        weapon: WeaponType,
+        charX: Float,
+        charY: Float,
+        charZ: Float,
+        charYawDeg: Float,
+        deathProgress: Float,
+        isShooting: Boolean = false
+    ) {
+        val dp = deathProgress.coerceIn(0f, 1f)
+        val drop = dp * dp * (3f - 2f * dp)
+
+        // Character-local hold offset (+Z forward, +Y up, -X right hand)
+        val baseX: Float
+        val baseY: Float
+        val baseZ: Float
+        val baseScale: Float
+        when (weapon) {
+            WeaponType.AWP -> {
+                baseX = -0.15f; baseY = 1.24f; baseZ = 0.28f; baseScale = 1.06f
+            }
+            WeaponType.AK47, WeaponType.M4A1_S -> {
+                baseX = -0.15f; baseY = 1.24f; baseZ = 0.30f; baseScale = 1.08f
+            }
+            WeaponType.P90, WeaponType.MP9 -> {
+                baseX = -0.14f; baseY = 1.23f; baseZ = 0.32f; baseScale = 1.06f
+            }
+            WeaponType.USP_S, WeaponType.GLOCK_18, WeaponType.DESERT_EAGLE -> {
+                baseX = -0.15f; baseY = 1.25f; baseZ = 0.40f; baseScale = 1.10f
+            }
+            WeaponType.KNIFE -> {
+                baseX = -0.17f; baseY = 1.20f; baseZ = 0.38f; baseScale = 1.05f
+            }
+            WeaponType.C4_BOMB -> {
+                baseX = 0.0f; baseY = 1.18f; baseZ = 0.35f; baseScale = 0.90f
+            }
+        }
+
+        val recoilBack = if (isShooting && dp < 0.05f) -0.035f else 0f
+        val localX = lerpF(baseX, -0.44f, drop)
+        val localY = lerpF(baseY, 0.06f, drop)
+        val localZ = lerpF(baseZ + recoilBack, 0.14f, drop)
+
+        Matrix.setIdentityM(out, 0)
+        Matrix.translateM(out, 0, charX, charY, charZ)
+        Matrix.rotateM(out, 0, charYawDeg, 0f, 1f, 0f)
+        Matrix.translateM(out, 0, localX, localY, localZ)
+        // Bundled weapons have barrel along -Z; rotate 180° around Y to point straight along character +Z!
+        Matrix.rotateM(out, 0, 180f + drop * 34f, 0f, 1f, 0f)
+        val pitchKick = if (isShooting && dp < 0.05f) 4.5f else 0f
+        Matrix.rotateM(out, 0, lerpF(-2.5f + pitchKick, 0f, drop), 1f, 0f, 0f)
+        Matrix.rotateM(out, 0, lerpF(4f, 88f, drop), 0f, 0f, 1f)
+        Matrix.scaleM(out, 0, baseScale, baseScale, baseScale)
     }
 
     /**

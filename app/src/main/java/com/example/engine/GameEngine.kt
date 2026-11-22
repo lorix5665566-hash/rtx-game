@@ -1,6 +1,7 @@
 package com.example.engine
 
 import android.content.Context
+import android.os.SystemClock
 import com.example.audio.SoundEngine
 import com.example.model.ArenaMapId
 import com.example.model.BombState
@@ -11,6 +12,7 @@ import com.example.model.MatchConfig
 import com.example.model.OutgoingHitEvent
 import com.example.model.RadarBlip
 import com.example.model.RemoteHumanPlayer
+import com.example.model.ScoreboardRow
 import com.example.model.TeamSide
 import com.example.model.WeaponSlot
 import com.example.model.WeaponType
@@ -186,10 +188,13 @@ class GameEngine(
     private var killFeedText: String = ""
     private var killFeedTimer: Float = 0f
     private var nextBotId: Int = 1
+    private var lastTStrategy: Int = -1
+    private var lastCtStrategy: Int = -1
+    @Volatile var livePingMs: Int = 0
 
     val bots = mutableListOf<BotOperative>()
 
-    // Real-time multiplayer remote human players (thread-safe bridge with Firestore)
+    // Real-time multiplayer remote human players (thread-safe bridge with Supabase)
     private val remoteLock = Any()
     private val remotePlayersMap = LinkedHashMap<String, RemoteHumanPlayer>()
     private val lastProcessedHitSeq = HashMap<String, Int>()
@@ -216,6 +221,7 @@ class GameEngine(
         localUid: String,
         remoteStates: List<com.example.online.PlayerMatchState>
     ) {
+        val nowMs = SystemClock.elapsedRealtime()
         val incomingHits = ArrayList<Triple<String, com.example.online.PlayerMatchState, Float>>()
         synchronized(remoteLock) {
             val activeUids = HashSet<String>()
@@ -224,6 +230,9 @@ class GameEngine(
                 activeUids.add(st.userId)
                 val side = if (st.team == "CT") TeamSide.CT else TeamSide.T
                 val wep = WeaponType.entries.firstOrNull { it.name == st.weapon } ?: WeaponType.AK47
+                val newX = st.x.toFloat()
+                val newY = st.y.toFloat()
+                val newZ = st.z.toFloat()
                 val existing = remotePlayersMap[st.userId]
                 if (existing == null) {
                     remotePlayersMap[st.userId] = RemoteHumanPlayer(
@@ -231,12 +240,13 @@ class GameEngine(
                         shortId = st.shortId,
                         displayName = st.displayName,
                         team = side,
-                        x = st.x.toFloat(),
-                        y = st.y.toFloat(),
-                        z = st.z.toFloat(),
-                        targetX = st.x.toFloat(),
-                        targetY = st.y.toFloat(),
-                        targetZ = st.z.toFloat(),
+                        x = newX,
+                        y = newY,
+                        z = newZ,
+                        targetX = newX,
+                        targetY = newY,
+                        targetZ = newZ,
+                        lastSyncMs = nowMs,
                         yawDeg = st.yawDeg.toFloat(),
                         targetYawDeg = st.yawDeg.toFloat(),
                         hp = st.hp,
@@ -251,9 +261,32 @@ class GameEngine(
                     // Baseline hitSeq on first observe so old hits aren't replayed on join
                     lastProcessedHitSeq[st.userId] = st.hitSeq
                 } else {
-                    existing.targetX = st.x.toFloat()
-                    existing.targetY = st.y.toFloat()
-                    existing.targetZ = st.z.toFloat()
+                    val dtSync = ((nowMs - existing.lastSyncMs) / 1000f).coerceIn(0.035f, 0.50f)
+                    val dx = newX - existing.targetX
+                    val dy = newY - existing.targetY
+                    val dz = newZ - existing.targetZ
+                    val jumpDistSq = dx * dx + dz * dz
+                    if (jumpDistSq > 36f) {
+                        // Large respawn/teleport delta -> snap cleanly instead of interpolating across map
+                        existing.x = newX
+                        existing.y = newY
+                        existing.z = newZ
+                        existing.vx = 0f
+                        existing.vy = 0f
+                        existing.vz = 0f
+                    } else if (st.moving && !st.dead) {
+                        existing.vx = (dx / dtSync).coerceIn(-7.5f, 7.5f)
+                        existing.vy = (dy / dtSync).coerceIn(-8.0f, 8.0f)
+                        existing.vz = (dz / dtSync).coerceIn(-7.5f, 7.5f)
+                    } else {
+                        existing.vx = 0f
+                        existing.vy = 0f
+                        existing.vz = 0f
+                    }
+                    existing.targetX = newX
+                    existing.targetY = newY
+                    existing.targetZ = newZ
+                    existing.lastSyncMs = nowMs
                     existing.targetYawDeg = st.yawDeg.toFloat()
                     existing.hp = st.hp
                     existing.isDead = st.dead
@@ -285,19 +318,28 @@ class GameEngine(
     }
 
     private fun updateRemotePlayersInterpolation(dt: Float) {
-        val posAlpha = (dt * 12f).coerceAtMost(1f)
-        val rotAlpha = (dt * 14f).coerceAtMost(1f)
+        val nowMs = SystemClock.elapsedRealtime()
+        val posAlpha = (dt * 19f).coerceAtMost(1f)
+        val rotAlpha = (dt * 21f).coerceAtMost(1f)
         synchronized(remoteLock) {
             for (rp in remotePlayersMap.values) {
-                rp.x += (rp.targetX - rp.x) * posAlpha
-                rp.y += (rp.targetY - rp.y) * posAlpha
-                rp.z += (rp.targetZ - rp.z) * posAlpha
+                // Bounded dead-reckoning prediction (up to 130ms) dramatically cuts perceived opponent lag
+                val leadSec = if (rp.isMoving && !rp.isDead) {
+                    ((nowMs - rp.lastSyncMs) / 1000f).coerceIn(0f, 0.13f)
+                } else 0f
+                val predX = rp.targetX + rp.vx * leadSec
+                val predY = rp.targetY + rp.vy * leadSec * 0.4f
+                val predZ = rp.targetZ + rp.vz * leadSec
+
+                rp.x += (predX - rp.x) * posAlpha
+                rp.y += (predY - rp.y) * posAlpha
+                rp.z += (predZ - rp.z) * posAlpha
                 var diff = (rp.targetYawDeg - rp.yawDeg) % 360f
                 if (diff > 180f) diff -= 360f
                 if (diff < -180f) diff += 360f
                 rp.yawDeg += diff * rotAlpha
                 if (rp.isDead) {
-                    rp.deathProgress = (rp.deathProgress + dt * 2.2f).coerceAtMost(1f)
+                    rp.deathProgress = (rp.deathProgress + dt * 1.45f).coerceAtMost(1f)
                 } else {
                     rp.deathProgress = 0f
                 }
@@ -479,7 +521,10 @@ class GameEngine(
         pistolWeapon = if (matchConfig.playerSide == TeamSide.CT) WeaponType.USP_S else WeaponType.GLOCK_18
         armor = 100f
         hasDefuseKit = matchConfig.playerSide == TeamSide.CT
-        startNewRound(keepPlayerGear = true)
+        bots.clear()
+        lastTStrategy = -1
+        lastCtStrategy = -1
+        startNewRound(keepPlayerGear = true, resetBotsEconomy = true)
     }
 
     private fun endWarmupAndStartLiveMatch() {
@@ -503,7 +548,10 @@ class GameEngine(
         armor = if (matchConfig.mode == GameMode.TEAM_DEATHMATCH) 100f else 0f
         hasDefuseKit = false
         soundEngine.playBombPlanted()
-        startNewRound(keepPlayerGear = false)
+        bots.clear()
+        lastTStrategy = -1
+        lastCtStrategy = -1
+        startNewRound(keepPlayerGear = false, resetBotsEconomy = true)
         bannerText = "МАТЧ НАЧАЛСЯ • РАУНД 1 • ${matchConfig.map.titleRu}"
         bannerTimer = 3.0f
     }
@@ -532,7 +580,7 @@ class GameEngine(
         }
     }
 
-    private fun startNewRound(keepPlayerGear: Boolean) {
+    private fun startNewRound(keepPlayerGear: Boolean, resetBotsEconomy: Boolean = false) {
         isRoundOver = false
         roundOverTimer = 0f
         roundTimeSec = if (matchConfig.mode == GameMode.BOMB_DEFUSAL) 105f else 300f
@@ -607,30 +655,56 @@ class GameEngine(
         playerPitchRad = 0f
         playerYawRad = atan2(sx.toDouble(), sz.toDouble()).toFloat()
 
-        // Spawn CT & T Bots with coordinated round bombsite plan (A or B)
-        bots.clear()
-        val roundPrimarySite = rng.nextInt(world.bombsites.size.coerceAtLeast(1))
-        if (allowAnyBots) {
+        // Pick varied per-round team strategies (guaranteed different from the previous round!)
+        val tStrategy = pickDistinctStrategy(lastTStrategy, 5) // 0=RushA, 1=RushB, 2=SplitA, 3=SplitB, 4=SlowDefault
+        lastTStrategy = tStrategy
+        val ctStrategy = pickDistinctStrategy(lastCtStrategy, 4) // 0=2-1-2, 1=StackA, 2=StackB, 3=MidPush
+        lastCtStrategy = ctStrategy
+
+        if (!allowAnyBots) {
+            bots.clear()
+        } else {
+            val prevAllies = if (resetBotsEconomy) emptyList() else bots.filter { it.team == matchConfig.playerSide }
+            val prevEnemies = if (resetBotsEconomy) emptyList() else bots.filter { it.team == enemySide }
+            val updatedBots = ArrayList<BotOperative>(allyBotsCount + enemyBotsCount)
+
+            val allyBombCarrierIdx = if (giveBombToAllyBot) rng.nextInt(allyBotsCount) else -1
+            val enemyBombCarrierIdx = if (giveBombToEnemyBot) rng.nextInt(enemyBotsCount) else -1
+
+            var allyAwpCount = 0
             for (i in 0 until allyBotsCount) {
-                bots.add(
-                    createBot(
-                        side = matchConfig.playerSide,
-                        spawnIdx = i + 1,
-                        assignBomb = giveBombToAllyBot && i == 0,
-                        preferredBombsiteIdx = if (i < 2) roundPrimarySite else (1 - roundPrimarySite).coerceIn(0, world.bombsites.lastIndex)
-                    )
+                val existing = prevAllies.getOrNull(i)
+                val bot = prepareBotForRound(
+                    existing = existing,
+                    side = matchConfig.playerSide,
+                    slotIdx = i,
+                    spawnIdx = i + 1,
+                    assignBomb = (i == allyBombCarrierIdx),
+                    teamStrategy = if (matchConfig.playerSide == TeamSide.T) tStrategy else ctStrategy,
+                    teamHasAwp = allyAwpCount > 0
                 )
+                if (bot.weapon == WeaponType.AWP) allyAwpCount++
+                updatedBots.add(bot)
             }
+
+            var enemyAwpCount = 0
             for (i in 0 until enemyBotsCount) {
-                bots.add(
-                    createBot(
-                        side = enemySide,
-                        spawnIdx = i,
-                        assignBomb = giveBombToEnemyBot && i == 0,
-                        preferredBombsiteIdx = if (i < 3) roundPrimarySite else (1 - roundPrimarySite).coerceIn(0, world.bombsites.lastIndex)
-                    )
+                val existing = prevEnemies.getOrNull(i)
+                val bot = prepareBotForRound(
+                    existing = existing,
+                    side = enemySide,
+                    slotIdx = i,
+                    spawnIdx = i,
+                    assignBomb = (i == enemyBombCarrierIdx),
+                    teamStrategy = if (enemySide == TeamSide.T) tStrategy else ctStrategy,
+                    teamHasAwp = enemyAwpCount > 0
                 )
+                if (bot.weapon == WeaponType.AWP) enemyAwpCount++
+                updatedBots.add(bot)
             }
+
+            bots.clear()
+            bots.addAll(updatedBots)
         }
 
         bannerText = when {
@@ -642,65 +716,234 @@ class GameEngine(
         publishHud()
     }
 
-    private fun createBot(
+    private fun pickDistinctStrategy(prev: Int, count: Int): Int {
+        if (count <= 1) return 0
+        var next = rng.nextInt(count)
+        if (next == prev) next = (next + 1 + rng.nextInt(count - 1)) % count
+        return next
+    }
+
+    private fun prepareBotForRound(
+        existing: BotOperative?,
         side: TeamSide,
+        slotIdx: Int,
         spawnIdx: Int,
         assignBomb: Boolean,
-        preferredBombsiteIdx: Int = 0
+        teamStrategy: Int,
+        teamHasAwp: Boolean
     ): BotOperative {
         val (sx, sy, sz) = world.getSpawnPoint(side, spawnIdx)
-        val botWeapon = if (roundNumber == 1 && matchConfig.mode == GameMode.BOMB_DEFUSAL) {
-            if (side == TeamSide.CT) WeaponType.USP_S else WeaponType.GLOCK_18
-        } else {
-            when (rng.nextInt(4)) {
-                0 -> if (side == TeamSide.CT) WeaponType.M4A1_S else WeaponType.AK47
-                1 -> WeaponType.P90
-                2 -> if (side == TeamSide.CT) WeaponType.M4A1_S else WeaponType.AK47
-                else -> WeaponType.MP9
-            }
-        }
-        val routes = if (side == TeamSide.T) world.tAttackRoutes else world.ctDefenseRoutes
-        val chosenRouteIdx = if (side == TeamSide.T) {
-            val matching = world.tRouteBombsiteIdx.indices.filter {
-                world.tRouteBombsiteIdx[it] == preferredBombsiteIdx
-            }
-            if (matching.isNotEmpty()) matching[rng.nextInt(matching.size)] else rng.nextInt(routes.size)
-        } else {
-            spawnIdx % routes.size
-        }
-        val resolvedBombsiteIdx = if (side == TeamSide.T) {
-            world.tRouteBombsiteIdx.getOrElse(chosenRouteIdx) { preferredBombsiteIdx }
-                .coerceIn(0, world.bombsites.lastIndex)
-        } else {
-            preferredBombsiteIdx.coerceIn(0, world.bombsites.lastIndex)
-        }
         val yaw = Math.toDegrees(atan2(-sx.toDouble(), -sz.toDouble())).toFloat()
-        return BotOperative(
+        val survivedPrev = existing != null && !existing.isDead && !isWarmup && matchConfig.mode == GameMode.BOMB_DEFUSAL
+
+        val bot = existing ?: BotOperative(
             id = nextBotId++,
+            name = botCallsign(side, slotIdx),
             team = side,
-            weapon = botWeapon,
+            weapon = if (side == TeamSide.CT) WeaponType.USP_S else WeaponType.GLOCK_18,
+            money = if (isWarmup || matchConfig.mode == GameMode.TEAM_DEATHMATCH) 16000 else 800,
+            armor = 0f,
             x = sx,
             y = sy,
             z = sz,
             yawDeg = yaw,
             visualYawDeg = yaw,
             aimYawDeg = yaw,
-            hp = 100f,
-            maxHp = 100f,
-            hasBomb = assignBomb,
-            targetSiteIndex = chosenRouteIdx,
-            targetBombsiteIdx = resolvedBombsiteIdx,
-            waypointIndex = 0,
-            fireCooldown = 0.25f + rng.nextFloat() * 0.25f,
-            repathTimer = rng.nextFloat() * 0.35f,
-            lastProgressX = sx,
-            lastProgressZ = sz,
-            unstuckDir = if (rng.nextBoolean()) 1f else -1f,
-            reactionDelaySec = 0.30f + rng.nextFloat() * 0.12f,
-            burstShotsLeft = 2 + rng.nextInt(3),
             alertYawDeg = yaw,
             aimSwaySeed = rng.nextFloat() * 100f
         )
+
+        // Reset round spatial & combat state while keeping persistent match economy + K/D!
+        bot.x = sx; bot.y = sy; bot.z = sz
+        bot.yawDeg = yaw; bot.visualYawDeg = yaw; bot.aimYawDeg = yaw; bot.alertYawDeg = yaw
+        bot.hp = 100f; bot.maxHp = 100f
+        bot.isDead = false
+        bot.deathProgress = 0f
+        bot.hasBomb = assignBomb
+        bot.hasLineOfSight = false
+        bot.hitFlinch = 0f
+        bot.plantProgress = 0f
+        bot.defuseProgress = 0f
+        bot.waypointIndex = 0
+        bot.navPath = emptyList()
+        bot.navPathIndex = 0
+        bot.repathTimer = rng.nextFloat() * 0.30f
+        bot.stuckTimer = 0f
+        bot.lastProgressX = sx
+        bot.lastProgressZ = sz
+        bot.unstuckTimer = 0f
+        bot.unstuckDir = if (rng.nextBoolean()) 1f else -1f
+        bot.fireCooldown = 0.25f + rng.nextFloat() * 0.25f
+        bot.targetSightTime = 0f
+        bot.losLostGraceTimer = 0f
+        bot.lastTargetKey = -1
+        bot.alertTimer = 0f
+        bot.reactionDelaySec = 0.30f + rng.nextFloat() * 0.12f
+        bot.burstShotsLeft = 2 + rng.nextInt(3)
+        bot.burstPauseTimer = 0f
+
+        // Real CS2 bot economy & weapon purchasing decisions
+        buyBotLoadout(bot, survivedPrev = survivedPrev, teamHasAwp = teamHasAwp)
+
+        // Assign diverse tactical route & hold timing based on this round's team strategy
+        assignBotRoundTactic(bot, slotIdx = slotIdx, teamStrategy = teamStrategy)
+        return bot
+    }
+
+    private fun buyBotLoadout(bot: BotOperative, survivedPrev: Boolean, teamHasAwp: Boolean) {
+        val starterPistol = if (bot.team == TeamSide.CT) WeaponType.USP_S else WeaponType.GLOCK_18
+        if (isWarmup || matchConfig.mode == GameMode.TEAM_DEATHMATCH) {
+            bot.money = 16000
+            bot.armor = 100f
+            bot.weapon = when (rng.nextInt(6)) {
+                0 -> if (bot.team == TeamSide.CT) WeaponType.M4A1_S else WeaponType.AK47
+                1 -> if (bot.team == TeamSide.CT) WeaponType.M4A1_S else WeaponType.AK47
+                2 -> WeaponType.P90
+                3 -> WeaponType.AWP
+                4 -> WeaponType.MP9
+                else -> WeaponType.DESERT_EAGLE
+            }
+            return
+        }
+
+        // If bot died last round, reset weapon & armor before buying
+        if (!survivedPrev) {
+            bot.weapon = starterPistol
+            bot.armor = 0f
+        }
+
+        val hasPrimary = bot.weapon.slot == WeaponSlot.PRIMARY
+
+        // Round 1: Classic CS2 Pistol Round ($800 budget)
+        if (roundNumber == 1) {
+            when {
+                bot.money >= 700 && rng.nextFloat() < 0.34f -> {
+                    bot.money -= WeaponType.DESERT_EAGLE.price
+                    bot.weapon = WeaponType.DESERT_EAGLE
+                }
+                bot.money >= 650 -> {
+                    bot.money -= 650
+                    bot.armor = 100f
+                }
+            }
+            return
+        }
+
+        // If bot survived with a primary gun, just refresh armor if low & affordable
+        if (hasPrimary) {
+            if (bot.armor < 65f && bot.money >= 1000) {
+                bot.money -= 1000
+                bot.armor = 100f
+            }
+            return
+        }
+
+        val rifle = if (bot.team == TeamSide.CT) WeaponType.M4A1_S else WeaponType.AK47
+        when {
+            // AWP sniper buy (max 1 per team so matches stay varied & realistic)
+            !teamHasAwp && bot.money >= WeaponType.AWP.price + 650 && rng.nextFloat() < 0.24f -> {
+                bot.money -= WeaponType.AWP.price
+                bot.weapon = WeaponType.AWP
+                if (bot.money >= 1000) { bot.money -= 1000; bot.armor = 100f }
+            }
+            // Full rifle + armor buy
+            bot.money >= rifle.price + 650 -> {
+                bot.money -= rifle.price
+                bot.weapon = rifle
+                val armorCost = if (bot.money >= 1000) 1000 else 650
+                bot.money -= armorCost
+                bot.armor = 100f
+            }
+            // Glass-cannon rifle or P90 buy
+            bot.money >= rifle.price && rng.nextFloat() < 0.55f -> {
+                bot.money -= rifle.price
+                bot.weapon = rifle
+            }
+            bot.money >= WeaponType.P90.price + 650 -> {
+                bot.money -= WeaponType.P90.price
+                bot.weapon = WeaponType.P90
+                bot.money -= 650
+                bot.armor = 100f
+            }
+            // Force-buy SMG (MP9 / P90) + Kevlar
+            bot.money >= WeaponType.MP9.price + 650 && rng.nextFloat() < 0.72f -> {
+                bot.money -= WeaponType.MP9.price
+                bot.weapon = WeaponType.MP9
+                bot.money -= 650
+                bot.armor = 100f
+            }
+            // Eco / Deagle force buy
+            bot.money >= 1350 && rng.nextFloat() < 0.48f -> {
+                bot.money -= WeaponType.DESERT_EAGLE.price
+                bot.weapon = WeaponType.DESERT_EAGLE
+                if (bot.money >= 650 && rng.nextFloat() < 0.5f) {
+                    bot.money -= 650
+                    bot.armor = 100f
+                }
+            }
+            // Full Eco save
+            else -> {
+                bot.weapon = starterPistol
+            }
+        }
+    }
+
+    private fun assignBotRoundTactic(bot: BotOperative, slotIdx: Int, teamStrategy: Int) {
+        val routes = if (bot.team == TeamSide.T) world.tAttackRoutes else world.ctDefenseRoutes
+        val maxSite = world.bombsites.lastIndex.coerceAtLeast(0)
+
+        if (bot.team == TeamSide.T) {
+            // 0=RushA, 1=RushB, 2=SplitA, 3=SplitB, 4=SlowDefault
+            val mainSite = when (teamStrategy) {
+                0, 2 -> 0
+                1, 3 -> minOf(1, maxSite)
+                else -> rng.nextInt(world.bombsites.size.coerceAtLeast(1))
+            }
+            val lurkSite = (1 - mainSite).coerceIn(0, maxSite)
+            val isLurk = !bot.hasBomb && slotIdx == 3 && teamStrategy != 0 && teamStrategy != 1
+            val targetSite = if (isLurk) lurkSite else mainSite
+
+            val matchingRoutes = world.tRouteBombsiteIdx.indices.filter {
+                world.tRouteBombsiteIdx[it] == targetSite
+            }
+            val routeIdx = when {
+                (teamStrategy == 2 || teamStrategy == 3) && matchingRoutes.size >= 2 ->
+                    matchingRoutes[slotIdx % matchingRoutes.size]
+                matchingRoutes.isNotEmpty() ->
+                    matchingRoutes[rng.nextInt(matchingRoutes.size)]
+                else -> rng.nextInt(routes.size)
+            }
+            bot.targetSiteIndex = routeIdx
+            bot.targetBombsiteIdx = world.tRouteBombsiteIdx.getOrElse(routeIdx) { targetSite }.coerceIn(0, maxSite)
+            bot.tacticRole = teamStrategy
+            bot.holdTimer = when (teamStrategy) {
+                0, 1 -> if (slotIdx == 0) 0f else rng.nextFloat() * 0.7f // Fast coordinated rush
+                2, 3 -> 0.8f + rng.nextFloat() * 2.2f                    // Timed split execute
+                else -> 2.8f + rng.nextFloat() * 4.2f                    // Slow default map control
+            }
+        } else {
+            // CT Strategies: 0=Balanced 2-1-2, 1=Stack A, 2=Stack B, 3=Aggressive Mid Push
+            val routeIdx = when (teamStrategy) {
+                1 -> if (slotIdx < 3) (slotIdx % minOf(2, routes.size)) else (routes.lastIndex - (slotIdx % 2)).coerceIn(0, routes.lastIndex)
+                2 -> if (slotIdx < 3) (routes.lastIndex - (slotIdx % minOf(2, routes.size))).coerceIn(0, routes.lastIndex) else (slotIdx % routes.size)
+                3 -> if (slotIdx < 2) (routes.size / 2).coerceIn(0, routes.lastIndex) else (slotIdx % routes.size)
+                else -> (slotIdx + roundNumber) % routes.size
+            }
+            bot.targetSiteIndex = routeIdx
+            bot.targetBombsiteIdx = if (routeIdx < routes.size / 2) 0 else minOf(1, maxSite)
+            bot.tacticRole = teamStrategy
+            bot.holdTimer = when (teamStrategy) {
+                3 -> if (slotIdx < 2) 0f else 2.0f + rng.nextFloat() * 3.0f
+                else -> 1.5f + rng.nextFloat() * 4.5f
+            }
+        }
+    }
+
+    private fun botCallsign(side: TeamSide, slotIdx: Int): String {
+        val tNames = listOf("БОТ Кобра", "БОТ Шакал", "БОТ Вихрь", "БОТ Фантом", "БОТ Вулкан")
+        val ctNames = listOf("БОТ Сокол", "БОТ Беркут", "БОТ Вектор", "БОТ Гром", "БОТ Щит")
+        val pool = if (side == TeamSide.T) tNames else ctNames
+        return pool[slotIdx % pool.size]
     }
 
     private fun refillAmmoForOwnedWeapons() {
@@ -858,7 +1101,15 @@ class GameEngine(
 
         val targetX = playerX + (fwdX * ny + rightX * nx) * baseSpeed * dt
         val targetZ = playerZ + (fwdZ * ny + rightZ * nx) * baseSpeed * dt
-        val (resolvedX, floorY, resolvedZ) = world.resolveMovement(playerX, playerFloorY, playerZ, targetX, targetZ, 0.36f)
+        val (resolvedX, floorY, resolvedZ) = world.resolveMovement(
+            curX = playerX,
+            curY = playerFloorY,
+            curZ = playerZ,
+            targetX = targetX,
+            targetZ = targetZ,
+            radius = 0.36f,
+            actualFeetY = playerY
+        )
         playerX = resolvedX
         playerZ = resolvedZ
         playerFloorY = floorY
@@ -866,7 +1117,7 @@ class GameEngine(
         if (pendingJump) {
             pendingJump = false
             if (playerY <= playerFloorY + 0.08f) {
-                playerVelY = 4.9f
+                playerVelY = 5.80f // Crisp ~1.16m CS jump apex so climbable crates are easy to jump onto!
                 isCrouching = false
                 landingVel -= 0.16f // subtle upward jump kick
             }
@@ -1155,6 +1406,11 @@ class GameEngine(
         if (winner == TeamSide.CT) ctScore++ else tScore++
         val playerWon = winner == matchConfig.playerSide
         money = (money + if (playerWon) 3250 else 2150).coerceAtMost(16000)
+        // Award real round economy to all bots so they buy weapons / save naturally across rounds!
+        for (b in bots) {
+            val won = b.team == winner
+            b.money = (b.money + if (won) 3250 else 2150).coerceAtMost(16000)
+        }
         bannerText = "$reason (CT $ctScore : $tScore T)"
         bannerTimer = delaySec
     }
@@ -1316,15 +1572,26 @@ class GameEngine(
         dmg: Float,
         isHeadshot: Boolean,
         killerIsPlayer: Boolean,
-        weaponUsed: WeaponType
+        weaponUsed: WeaponType,
+        killerBot: BotOperative? = null
     ) {
         if (target.isDead) return
-        target.hp -= dmg
+        val effectiveDmg = if (target.armor > 0f && !isHeadshot) {
+            val absorbed = minOf(target.armor, dmg * 0.35f)
+            target.armor -= absorbed
+            dmg - absorbed * 0.55f
+        } else {
+            dmg
+        }
+        target.hp -= effectiveDmg
         target.hitFlinch = 1.0f
         // If shot from flank/behind, alert the bot to turn smoothly toward the threat (no instant 180 snap!)
         if (killerIsPlayer && target.hp > 0f) {
             target.alertYawDeg = Math.toDegrees(atan2((playerX - target.x).toDouble(), (playerZ - target.z).toDouble())).toFloat()
             target.alertTimer = 2.4f
+        } else if (killerBot != null && target.hp > 0f) {
+            target.alertYawDeg = Math.toDegrees(atan2((killerBot.x - target.x).toDouble(), (killerBot.z - target.z).toDouble())).toFloat()
+            target.alertTimer = 2.2f
         }
         if (target.hp <= 0f) {
             target.hp = 0f
@@ -1332,6 +1599,7 @@ class GameEngine(
             target.deathProgress = 0.01f
             target.plantProgress = 0f
             target.defuseProgress = 0f
+            if (!isWarmup) target.deaths++
             if (killerIsPlayer) {
                 if (!isWarmup) {
                     kills++
@@ -1340,11 +1608,15 @@ class GameEngine(
                     score += if (isHeadshot) 250 else 150
                 }
                 val hsTag = if (isHeadshot) " [ГОЛОВА]" else ""
-                killFeedText = "ВЫ [${weaponUsed.shortLabel}]$hsTag → ${target.team.shortRu}"
+                killFeedText = "ВЫ [${weaponUsed.shortLabel}]$hsTag → ${target.name}"
                 killFeedTimer = 3.2f
             } else {
-                val killerTeam = if (target.team == TeamSide.CT) TeamSide.T else TeamSide.CT
-                killFeedText = "${killerTeam.shortRu} → ${target.team.shortRu}"
+                if (killerBot != null && !isWarmup) {
+                    killerBot.kills++
+                    killerBot.money = (killerBot.money + weaponUsed.killReward).coerceAtMost(16000)
+                }
+                val killerLabel = killerBot?.name ?: (if (target.team == TeamSide.CT) TeamSide.T else TeamSide.CT).shortRu
+                killFeedText = "$killerLabel [${weaponUsed.shortLabel}] → ${target.name}"
                 killFeedTimer = 2.6f
             }
             if (!isWarmup && target.hasBomb && bombState == BombState.CARRIED) {
@@ -1392,7 +1664,8 @@ class GameEngine(
 
         for (b in bots) {
             if (b.isDead) {
-                b.deathProgress = (b.deathProgress + dt * 2.2f).coerceAtMost(1f)
+                b.deathProgress = (b.deathProgress + dt * 1.35f).coerceAtMost(1f)
+                b.hasLineOfSight = false
                 if ((isWarmup || matchConfig.mode == GameMode.TEAM_DEATHMATCH) && b.deathProgress >= 1f) {
                     b.fireCooldown -= dt
                     if (b.fireCooldown <= -1.8f) respawnBotTdm(b)
@@ -1471,9 +1744,10 @@ class GameEngine(
                 }
             }
 
+            b.hasLineOfSight = hasLos
             val prevX = b.x
             val prevZ = b.z
-            val moveSpeed = 3.75f
+            val moveSpeed = (3.75f * b.weapon.moveSpeedMult).coerceIn(3.15f, 4.15f)
 
             // 2. Bomb Planting (T) & Bomb Defusing (CT)
             var isDoingBombTask = false
@@ -1491,6 +1765,7 @@ class GameEngine(
                         }
                         if (b.plantProgress >= 1f) {
                             b.plantProgress = 0f
+                            b.money = (b.money + 300).coerceAtMost(16000)
                             plantBombAt(b.x, b.y, b.z, currentSite.label, plantedByPlayer = false)
                         }
                     } else if (closeThreat) {
@@ -1512,6 +1787,7 @@ class GameEngine(
                         b.visualYawDeg = b.aimYawDeg
                         if (b.defuseProgress >= 1f) {
                             b.defuseProgress = 0f
+                            b.money = (b.money + 300).coerceAtMost(16000)
                             bombState = BombState.DEFUSED
                             soundEngine.playBombPlanted()
                             endRound(TeamSide.CT, "СПЕЦНАЗ РАЗМИНИРОВАЛ C4!", delaySec = 3.6f)
@@ -1594,13 +1870,17 @@ class GameEngine(
                     b.muzzleFlashRoll = rng.nextFloat() * 360f
 
                     b.burstShotsLeft--
-                    if (b.burstShotsLeft <= 0) {
+                    if (b.weapon == WeaponType.AWP) {
+                        b.burstShotsLeft = 1
+                        b.fireCooldown = 1.45f
+                        b.burstPauseTimer = 0.45f
+                    } else if (b.burstShotsLeft <= 0) {
                         // Brief human recoil-reset pause between 2-4 shot bursts
                         b.burstShotsLeft = 2 + rng.nextInt(3)
                         b.burstPauseTimer = 0.44f + rng.nextFloat() * 0.28f
                         b.fireCooldown = 0.18f
                     } else {
-                        b.fireCooldown = 0.16f + rng.nextFloat() * 0.08f
+                        b.fireCooldown = (b.weapon.fireIntervalSec * 1.55f).coerceIn(0.14f, 0.34f) + rng.nextFloat() * 0.06f
                     }
 
                     // Calibrated Medium Human Accuracy (~45% at medium range, never 100%)
@@ -1613,15 +1893,23 @@ class GameEngine(
                     if (rng.nextFloat() < hitChance) {
                         val isHs = rng.nextFloat() < 0.12f
                         val baseDmg = when (b.weapon) {
-                            WeaponType.AK47 -> 14f
-                            WeaponType.M4A1_S -> 12f
+                            WeaponType.AWP -> 58f
+                            WeaponType.DESERT_EAGLE -> 22f
+                            WeaponType.AK47 -> 15f
+                            WeaponType.M4A1_S -> 13f
+                            WeaponType.P90, WeaponType.MP9 -> 9.5f
                             else -> 10f
                         }
                         val finalDmg = if (isHs) baseDmg * 1.55f else baseDmg
                         if (targetIsPlayer) {
-                            applyPlayerDamage(finalDmg, b.team, killedByBomb = false)
+                            val wasAlive = !isPlayerDead
+                            applyPlayerDamage(finalDmg, b.team, killedByBomb = false, attackerLabel = "${b.name} [${b.weapon.shortLabel}]")
+                            if (wasAlive && isPlayerDead && !isWarmup) {
+                                b.kills++
+                                b.money = (b.money + b.weapon.killReward).coerceAtMost(16000)
+                            }
                         } else if (targetBot != null) {
-                            applyBotDamage(targetBot, finalDmg * 1.35f, isHeadshot = isHs, killerIsPlayer = false, weaponUsed = b.weapon)
+                            applyBotDamage(targetBot, finalDmg * 1.35f, isHeadshot = isHs, killerIsPlayer = false, weaponUsed = b.weapon, killerBot = b)
                         }
                     }
                 }
@@ -1676,24 +1964,39 @@ class GameEngine(
                     b.yawDeg = lookYaw
                     b.aimYawDeg = moveAngleTowardDeg(b.aimYawDeg, lookYaw, 210f * dt)
                 } else {
-                    // Reached current waypoint/site -> advance patrol/route or hold angle
-                    val moveYaw = if (b.alertTimer > 0f) b.alertYawDeg else b.visualYawDeg
-                    faceX = sin(Math.toRadians(moveYaw.toDouble())).toFloat()
-                    faceZ = cos(Math.toRadians(moveYaw.toDouble())).toFloat()
-                    b.aimYawDeg = moveAngleTowardDeg(b.aimYawDeg, moveYaw, 180f * dt)
+                    // Reached current waypoint/site -> hold tactical angle briefly (varies per round!) before advancing
+                    val scanOffset = sin((timeSec * 1.1f + b.aimSwaySeed).toDouble()).toFloat() * 24f
+                    val moveYaw = if (b.alertTimer > 0f) b.alertYawDeg else (b.yawDeg + scanOffset)
+                    faceX = sin(Math.toRadians(b.visualYawDeg.toDouble())).toFloat()
+                    faceZ = cos(Math.toRadians(b.visualYawDeg.toDouble())).toFloat()
+                    b.aimYawDeg = moveAngleTowardDeg(b.aimYawDeg, moveYaw, 155f * dt)
 
                     if (bombState != BombState.PLANTED) {
-                        val routes = if (b.team == TeamSide.T) world.tAttackRoutes else world.ctDefenseRoutes
-                        val route = routes[b.targetSiteIndex % routes.size]
-                        if (b.waypointIndex < route.size - 1) {
-                            b.waypointIndex++
-                            b.navPath = emptyList()
-                            b.repathTimer = 0f
-                        } else if (matchConfig.mode == GameMode.TEAM_DEATHMATCH || isWarmup) {
-                            b.targetSiteIndex = rng.nextInt(routes.size)
-                            b.waypointIndex = 0
-                            b.navPath = emptyList()
-                            b.repathTimer = 0f
+                        if (b.holdTimer > 0f && b.waypointIndex > 0) {
+                            b.holdTimer = (b.holdTimer - dt).coerceAtLeast(0f)
+                        } else {
+                            val routes = if (b.team == TeamSide.T) world.tAttackRoutes else world.ctDefenseRoutes
+                            val route = routes[b.targetSiteIndex % routes.size]
+                            if (b.waypointIndex < route.size - 1) {
+                                b.waypointIndex++
+                                b.navPath = emptyList()
+                                b.repathTimer = 0f
+                                // Brief tactical pause on next angle for slow-default / anchor roles
+                                if (b.tacticRole >= 3) {
+                                    b.holdTimer = 1.6f + rng.nextFloat() * 2.6f
+                                }
+                            } else if (matchConfig.mode == GameMode.TEAM_DEATHMATCH || isWarmup) {
+                                b.targetSiteIndex = rng.nextInt(routes.size)
+                                b.waypointIndex = 0
+                                b.navPath = emptyList()
+                                b.repathTimer = 0f
+                            } else if (b.team == TeamSide.CT && roundTimeSec < 75f && rng.nextFloat() < 0.004f) {
+                                // Occasional CT mid-round flank/rotation so rounds never feel static
+                                b.targetSiteIndex = (b.targetSiteIndex + 1) % routes.size
+                                b.waypointIndex = 0
+                                b.navPath = emptyList()
+                                b.repathTimer = 0f
+                            }
                         }
                     }
                 }
@@ -1955,6 +2258,62 @@ class GameEngine(
             blips.add(RadarBlip(plantedBombX - playerX, plantedBombZ - playerZ, isAlly = false, isBomb = true))
         }
 
+        val scoreboardRows = ArrayList<ScoreboardRow>(1 + remotes.size + bots.size)
+        scoreboardRows.add(
+            ScoreboardRow(
+                id = matchConfig.localUserId.ifBlank { "local_player" },
+                name = matchConfig.localDisplayName.ifBlank { "ВЫ" },
+                team = matchConfig.playerSide,
+                kills = kills,
+                deaths = deaths,
+                money = money,
+                pingMs = if (matchConfig.isMultiplayer) livePingMs else 0,
+                isAlive = !isPlayerDead,
+                isLocalPlayer = true,
+                isAlly = true,
+                isBot = false,
+                weaponLabel = activeWeapon.shortLabel
+            )
+        )
+        for (rp in remotes) {
+            val ally = rp.team == matchConfig.playerSide
+            scoreboardRows.add(
+                ScoreboardRow(
+                    id = rp.userId,
+                    name = rp.displayName.ifBlank { "Игрок" },
+                    team = rp.team,
+                    kills = rp.kills,
+                    deaths = rp.deaths,
+                    money = -1, // Strictly hide enemy money (and unshared remote money)
+                    pingMs = livePingMs,
+                    isAlive = !rp.isDead,
+                    isLocalPlayer = false,
+                    isAlly = ally,
+                    isBot = false,
+                    weaponLabel = if (ally) rp.weapon.shortLabel else ""
+                )
+            )
+        }
+        for (b in bots) {
+            val ally = b.team == matchConfig.playerSide
+            scoreboardRows.add(
+                ScoreboardRow(
+                    id = "bot_${b.id}",
+                    name = b.name,
+                    team = b.team,
+                    kills = b.kills,
+                    deaths = b.deaths,
+                    money = if (ally) b.money else -1, // Enemy money strictly hidden!
+                    pingMs = 0,
+                    isAlive = !b.isDead,
+                    isLocalPlayer = false,
+                    isAlly = ally,
+                    isBot = true,
+                    weaponLabel = if (ally) b.weapon.shortLabel else ""
+                )
+            )
+        }
+
         latestHud = HudSnapshot(
             mapId = matchConfig.map,
             hp = hp.toInt().coerceAtLeast(0),
@@ -2016,7 +2375,9 @@ class GameEngine(
             radarBlips = blips,
             playerYawDeg = Math.toDegrees(playerYawRad.toDouble()).toFloat(),
             isMultiplayer = matchConfig.isMultiplayer,
-            onlinePlayersCount = 1 + remotes.size
+            onlinePlayersCount = 1 + remotes.size,
+            pingMs = if (matchConfig.isMultiplayer) livePingMs else 0,
+            scoreboardRows = scoreboardRows
         )
     }
 }

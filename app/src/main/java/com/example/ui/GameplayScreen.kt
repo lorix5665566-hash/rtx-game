@@ -43,6 +43,7 @@ import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.FastForward
 import androidx.compose.material.icons.filled.Gamepad
 import androidx.compose.material.icons.filled.Home
+import androidx.compose.material.icons.filled.Leaderboard
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Settings
@@ -130,6 +131,7 @@ fun GameplayScreen(
     currentUserId: String,
     activeLobbyId: String?,
     remoteMemberStates: List<com.example.online.PlayerMatchState>,
+    pingMs: Int = 0,
     onPublishLiveState: (
         lobbyId: String,
         team: TeamSide,
@@ -159,10 +161,16 @@ fun GameplayScreen(
 
     var hud by remember { mutableStateOf(engine.latestHud) }
     var isShopOpen by remember { mutableStateOf(false) }
+    var isScoreboardOpen by remember { mutableStateOf(false) }
     var swipeFeedback by remember { mutableStateOf("") }
+
+    LaunchedEffect(pingMs) {
+        engine.livePingMs = pingMs
+    }
 
     BackHandler {
         when {
+            isScoreboardOpen -> isScoreboardOpen = false
             isShopOpen -> isShopOpen = false
             !isPaused -> onSetPaused(true)
             else -> onSetPaused(false)
@@ -176,36 +184,49 @@ fun GameplayScreen(
         }
     }
 
-    // Publish local human player transform, HP, weapon & outgoing hits at ~10Hz during online matches!
+    // Responsive ~15Hz (65ms) publish loop with immediate flush on hits, weapon swaps, or death!
     LaunchedEffect(activeLobbyId, engine.matchConfig.isMultiplayer) {
         val lobbyId = activeLobbyId
         if (!engine.matchConfig.isMultiplayer || lobbyId.isNullOrBlank()) return@LaunchedEffect
         var lastSentHitSeq = 0
+        var lastSentWeapon = ""
+        var lastSentDead = false
+        var lastSendTimeMs = 0L
         while (true) {
+            val nowMs = android.os.SystemClock.elapsedRealtime()
             val snap = engine.latestHud
             val hit = engine.lastOutgoingHit
-            val hitToSend = if (hit != null && hit.seq > lastSentHitSeq) {
-                lastSentHitSeq = hit.seq
-                hit
-            } else null
-            onPublishLiveState(
-                lobbyId,
-                snap.playerSide,
-                engine.playerX,
-                engine.playerY,
-                engine.playerZ,
-                Math.toDegrees(engine.playerYawRad.toDouble()).toFloat(),
-                Math.toDegrees(engine.playerPitchRad.toDouble()).toFloat(),
-                snap.hp,
-                snap.isPlayerDead,
-                engine.moveSpeedRatio > 0.1f,
-                engine.muzzleFlashTimer > 0.05f,
-                snap.activeWeapon.name,
-                snap.kills,
-                snap.deaths,
-                hitToSend
-            )
-            delay(100L)
+            val hasNewHit = hit != null && hit.seq > lastSentHitSeq
+            val weaponChanged = snap.activeWeapon.name != lastSentWeapon
+            val deadChanged = snap.isPlayerDead != lastSentDead
+            val timeElapsed = (nowMs - lastSendTimeMs) >= 65L
+            if (hasNewHit || weaponChanged || deadChanged || timeElapsed) {
+                val hitToSend = if (hasNewHit && hit != null) {
+                    lastSentHitSeq = hit.seq
+                    hit
+                } else null
+                lastSentWeapon = snap.activeWeapon.name
+                lastSentDead = snap.isPlayerDead
+                lastSendTimeMs = nowMs
+                onPublishLiveState(
+                    lobbyId,
+                    snap.playerSide,
+                    engine.playerX,
+                    engine.playerY,
+                    engine.playerZ,
+                    Math.toDegrees(engine.playerYawRad.toDouble()).toFloat(),
+                    Math.toDegrees(engine.playerPitchRad.toDouble()).toFloat(),
+                    snap.hp,
+                    snap.isPlayerDead,
+                    engine.moveSpeedRatio > 0.1f,
+                    engine.muzzleFlashTimer > 0.05f,
+                    snap.activeWeapon.name,
+                    snap.kills,
+                    snap.deaths,
+                    hitToSend
+                )
+            }
+            delay(22L)
         }
     }
 
@@ -283,7 +304,7 @@ fun GameplayScreen(
         )
 
         // 2. Full-screen Aim Touch Layer (Raw Manual Aim — NO Aim Assist)
-        if (!isPaused && !hud.isMatchFinished && !isShopOpen) {
+        if (!isPaused && !hud.isMatchFinished && !isShopOpen && !isScoreboardOpen) {
             Box(
                 modifier = Modifier
                     .fillMaxSize()
@@ -386,18 +407,54 @@ fun GameplayScreen(
                             )
                         }
                     }
-                    if (settings.graphics.showFps) {
-                        Text(
-                            text = "${hud.fps} FPS • ${settings.graphics.preset.titleRu}",
-                            fontSize = m.sp(9f),
-                            color = Color.White.copy(alpha = 0.78f)
-                        )
+                    // Compact Live Ping + FPS strip
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(m.s(5f))
+                    ) {
+                        val isMp = engine.matchConfig.isMultiplayer
+                        val pingTint = pingQualityColor(hud.pingMs, isMp)
+                        Surface(
+                            color = Color(0xB309101A),
+                            shape = RoundedCornerShape(m.s(5f)),
+                            border = BorderStroke(1.dp, pingTint.copy(alpha = 0.55f))
+                        ) {
+                            Row(
+                                modifier = Modifier.padding(horizontal = m.s(6f), vertical = m.s(2f)),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(m.s(4f))
+                            ) {
+                                Box(
+                                    modifier = Modifier
+                                        .size(m.s(6f))
+                                        .clip(CircleShape)
+                                        .background(pingTint)
+                                )
+                                Text(
+                                    text = if (isMp) {
+                                        if (hud.pingMs > 0) "${hud.pingMs} мс" else "... мс"
+                                    } else {
+                                        "0 мс"
+                                    },
+                                    fontSize = m.sp(8.5f),
+                                    fontWeight = FontWeight.ExtraBold,
+                                    color = pingTint
+                                )
+                            }
+                        }
+                        if (settings.graphics.showFps) {
+                            Text(
+                                text = "${hud.fps} FPS • ${settings.graphics.preset.titleRu}",
+                                fontSize = m.sp(8.5f),
+                                color = Color.White.copy(alpha = 0.78f)
+                            )
+                        }
                     }
                 }
             }
         }
 
-        // 7. Top-Center CS2 Round Scoreboard + Warmup Skip Banner + Animated Match Banners / Killfeed
+        // 7. Top-Center CS2 Round Scoreboard + TAB Button + Warmup Skip Banner + Animated Match Banners / Killfeed
         Column(
             modifier = Modifier
                 .align(Alignment.TopCenter)
@@ -406,7 +463,48 @@ fun GameplayScreen(
             horizontalAlignment = Alignment.CenterHorizontally,
             verticalArrangement = Arrangement.spacedBy(m.s(4f))
         ) {
-            Cs2ScoreboardBar(hud = hud)
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(m.s(6f))
+            ) {
+                Cs2ScoreboardBar(hud = hud)
+
+                Surface(
+                    onClick = {
+                        engine.isFiring = false
+                        isShopOpen = false
+                        isScoreboardOpen = !isScoreboardOpen
+                    },
+                    color = if (isScoreboardOpen) RtxEmerald.copy(alpha = 0.28f) else Color(0xC20A101A),
+                    shape = CutCornerShape(topStart = m.s(8f), bottomEnd = m.s(8f)),
+                    border = BorderStroke(
+                        width = 1.dp,
+                        color = if (isScoreboardOpen) RtxEmerald else IceCyan.copy(alpha = 0.65f)
+                    ),
+                    modifier = Modifier
+                        .size(width = m.s(54f).coerceAtLeast(48.dp), height = m.s(36f).coerceAtLeast(36.dp))
+                        .testTag("hud_tab_button")
+                ) {
+                    Row(
+                        modifier = Modifier.fillMaxSize(),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(m.s(3f), Alignment.CenterHorizontally)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Leaderboard,
+                            contentDescription = "Таблица счёта TAB",
+                            tint = if (isScoreboardOpen) RtxEmerald else IceCyan,
+                            modifier = Modifier.size(m.s(13f))
+                        )
+                        Text(
+                            text = "TAB",
+                            fontSize = m.sp(9.5f),
+                            fontWeight = FontWeight.Black,
+                            color = if (isScoreboardOpen) RtxEmerald else TextPrimary
+                        )
+                    }
+                }
+            }
 
             AnimatedVisibility(
                 visible = hud.isWarmup && !isPaused && !hud.isMatchFinished,
@@ -636,7 +734,7 @@ fun GameplayScreen(
         }
 
         // 11. Adaptive Customizable Landscape Controls + Single Wide Swipe Weapon Button + Shop Button
-        if (!isPaused && !hud.isMatchFinished && !isShopOpen) {
+        if (!isPaused && !hud.isMatchFinished && !isShopOpen && !isScoreboardOpen) {
             val layout = settings.controlLayout
 
             val joyCfg = layout.get(ControlWidgetId.JOYSTICK)
@@ -789,6 +887,19 @@ fun GameplayScreen(
                 onBuyArmor = { engine.buyArmor() },
                 onBuyDefuseKit = { engine.buyDefuseKit() },
                 onClose = { isShopOpen = false }
+            )
+        }
+
+        // 12b. Tactical TAB Scoreboard Overlay (Kills, Deaths, Ally-only Money, Live Ping)
+        AnimatedVisibility(
+            visible = isScoreboardOpen && !isPaused && !hud.isMatchFinished,
+            enter = fadeIn(tween(150)) + scaleIn(initialScale = 0.95f, animationSpec = tween(150)),
+            exit = fadeOut(tween(130)) + scaleOut(targetScale = 0.96f, animationSpec = tween(130))
+        ) {
+            ScoreboardOverlay(
+                hud = hud,
+                isMultiplayer = engine.matchConfig.isMultiplayer,
+                onClose = { isScoreboardOpen = false }
             )
         }
 
