@@ -5,6 +5,8 @@ import android.os.SystemClock
 import com.example.audio.SoundEngine
 import com.example.model.ArenaMapId
 import com.example.model.BombState
+import com.example.model.BombSyncEvent
+import com.example.model.DeathRecapInfo
 import com.example.model.GameMode
 import com.example.model.GameSettings
 import com.example.model.HudSnapshot
@@ -138,9 +140,10 @@ class GameEngine(
     private var reloadTimer: Float = 0f
     private var fireTimer: Float = 0f
 
-    // Match, Warmup, Round, Economy & C4 Bomb state
+    // Match, Warmup (60s), Freeze Time (8s), Round, Economy & C4 Bomb state
     private var isWarmup: Boolean = true
-    private var warmupTimer: Float = 30f
+    private var warmupTimer: Float = 60f
+    private var freezeTimeSec: Float = 0f
     @Volatile private var pendingSkipWarmup: Boolean = false
     private var hp: Float = 100f
     private var armor: Float = 0f
@@ -153,7 +156,7 @@ class GameEngine(
     private var tScore: Int = 0
     private var roundNumber: Int = 1
     private var roundTimeSec: Float = 105f
-    private var buyTimeRemaining: Float = 25f
+    private var buyTimeRemaining: Float = 28f
     private var roundOverTimer: Float = 0f
     private var isRoundOver: Boolean = false
     private var isMatchFinished: Boolean = false
@@ -169,11 +172,20 @@ class GameEngine(
     @Volatile var plantedBombZ: Float = 0f
         private set
     private var plantedSiteLabel: String = ""
-    private var bombCountdownSec: Float = 35f
+    @Volatile var bombCountdownSec: Float = 35f
+        private set
     private var bombBeepTimer: Float = 0f
     private var plantBeepTimer: Float = 0f
 
-    // Combat stats & HUD feedback
+    // Authoritative multiplayer bomb/warmup sync bridge
+    @Volatile var latestBombSync: BombSyncEvent? = null
+        private set
+    private var localBombSyncSeq: Int = 0
+    private val remoteBombLock = Any()
+    private val pendingRemoteBombEvents = ArrayDeque<BombSyncEvent>()
+    private val lastAppliedBombSeqBySender = HashMap<String, Int>()
+
+    // Combat stats, Damage Exchange Recap, Bloodied Death Overlay & Ally Spectator state
     private var score: Int = 0
     private var kills: Int = 0
     private var deaths: Int = 0
@@ -183,6 +195,37 @@ class GameEngine(
     private var hitMarkerAlpha: Float = 0f
     private var isHeadshotHit: Boolean = false
     private var damageFlashAlpha: Float = 0f
+    private var deathBloodTimer: Float = 0f
+    private var deathRecapTimer: Float = 0f
+    private var activeDeathRecap: DeathRecapInfo? = null
+    private val damageDealtByTarget = HashMap<String, Pair<Int, Int>>()
+    private val damageTakenByAttacker = HashMap<String, Pair<Int, Int>>()
+
+    // Smooth Ally Spectator camera state (read by FilamentGameplayController)
+    private var deathCamDelayTimer: Float = 0f
+    private var spectateTargetIndex: Int = 0
+    @Volatile private var pendingSpectateDelta: Int = 0
+    @Volatile var isSpectatingAlly: Boolean = false
+        private set
+    var spectateCamX: Float = 0f
+        private set
+    var spectateCamY: Float = 0f
+        private set
+    var spectateCamZ: Float = 0f
+        private set
+    var spectateLookX: Float = 0f
+        private set
+    var spectateLookY: Float = 0f
+        private set
+    var spectateLookZ: Float = 0f
+        private set
+    private var spectateCamInitialized: Boolean = false
+    private var spectatedAllyName: String = ""
+    private var spectatedAllyHp: Int = 0
+    private var spectatedAllyArmor: Int = 0
+    private var spectatedAllyWeapon: String = ""
+    private var spectatedAllyCount: Int = 0
+
     private var bannerText: String = ""
     private var bannerTimer: Float = 0f
     private var killFeedText: String = ""
@@ -194,13 +237,23 @@ class GameEngine(
 
     val bots = mutableListOf<BotOperative>()
 
-    // Real-time multiplayer remote human players (thread-safe bridge with Supabase)
+    // Real-time multiplayer remote human players (thread-safe bridge with Supabase Realtime & REST)
     private val remoteLock = Any()
     private val remotePlayersMap = LinkedHashMap<String, RemoteHumanPlayer>()
     private val lastProcessedHitSeq = HashMap<String, Int>()
+    private val pendingIncomingPvpHits = ArrayDeque<IncomingPvpHit>()
     @Volatile var lastOutgoingHit: OutgoingHitEvent? = null
         private set
     private var outgoingHitSeq: Int = 0
+
+    private data class IncomingPvpHit(
+        val attackerId: String,
+        val attackerName: String,
+        val attackerSide: TeamSide,
+        val weaponName: String,
+        val headshot: Boolean,
+        val damage: Float
+    )
 
     private var fpsFrameCount: Int = 0
     private var fpsAccumTime: Float = 0f
@@ -215,120 +268,257 @@ class GameEngine(
     }
 
     /**
-     * Called from Firestore live listener when remote human members in the lobby update their state.
+     * Thread-safe enqueue for incoming C4 Bomb & Warmup-skip sync events from Supabase Realtime WebSocket.
+     */
+    fun enqueueRemoteBombSync(event: BombSyncEvent) {
+        synchronized(remoteBombLock) {
+            if (pendingRemoteBombEvents.size > 16) pendingRemoteBombEvents.removeFirst()
+            pendingRemoteBombEvents.addLast(event)
+        }
+    }
+
+    /**
+     * Ultra-fast single-player update path invoked directly from the 30Hz Supabase Realtime WebSocket
+     * (bypasses Compose recomposition latency completely!).
+     */
+    fun applyRemoteSingleState(
+        localUid: String,
+        st: com.example.online.PlayerMatchState
+    ) {
+        if (st.userId.isBlank() || st.userId == localUid) return
+        val nowMs = SystemClock.elapsedRealtime()
+        synchronized(remoteLock) {
+            upsertRemotePlayerLocked(localUid, st, nowMs)
+        }
+    }
+
+    /**
+     * Called from Supabase PostgREST snapshot sync when full lobby member list arrives.
      */
     fun applyRemoteStates(
         localUid: String,
         remoteStates: List<com.example.online.PlayerMatchState>
     ) {
         val nowMs = SystemClock.elapsedRealtime()
-        val incomingHits = ArrayList<Triple<String, com.example.online.PlayerMatchState, Float>>()
         synchronized(remoteLock) {
             val activeUids = HashSet<String>()
             for (st in remoteStates) {
                 if (st.userId.isBlank() || st.userId == localUid) continue
                 activeUids.add(st.userId)
-                val side = if (st.team == "CT") TeamSide.CT else TeamSide.T
-                val wep = WeaponType.entries.firstOrNull { it.name == st.weapon } ?: WeaponType.AK47
-                val newX = st.x.toFloat()
-                val newY = st.y.toFloat()
-                val newZ = st.z.toFloat()
-                val existing = remotePlayersMap[st.userId]
-                if (existing == null) {
-                    remotePlayersMap[st.userId] = RemoteHumanPlayer(
-                        userId = st.userId,
-                        shortId = st.shortId,
-                        displayName = st.displayName,
-                        team = side,
-                        x = newX,
-                        y = newY,
-                        z = newZ,
-                        targetX = newX,
-                        targetY = newY,
-                        targetZ = newZ,
-                        lastSyncMs = nowMs,
-                        yawDeg = st.yawDeg.toFloat(),
-                        targetYawDeg = st.yawDeg.toFloat(),
-                        hp = st.hp,
-                        isDead = st.dead,
-                        deathProgress = if (st.dead) 1f else 0f,
-                        isMoving = st.moving,
-                        isShooting = st.shooting,
-                        weapon = wep,
-                        kills = st.kills,
-                        deaths = st.deaths
-                    )
-                    // Baseline hitSeq on first observe so old hits aren't replayed on join
-                    lastProcessedHitSeq[st.userId] = st.hitSeq
-                } else {
-                    val dtSync = ((nowMs - existing.lastSyncMs) / 1000f).coerceIn(0.035f, 0.50f)
-                    val dx = newX - existing.targetX
-                    val dy = newY - existing.targetY
-                    val dz = newZ - existing.targetZ
-                    val jumpDistSq = dx * dx + dz * dz
-                    if (jumpDistSq > 36f) {
-                        // Large respawn/teleport delta -> snap cleanly instead of interpolating across map
-                        existing.x = newX
-                        existing.y = newY
-                        existing.z = newZ
-                        existing.vx = 0f
-                        existing.vy = 0f
-                        existing.vz = 0f
-                    } else if (st.moving && !st.dead) {
-                        existing.vx = (dx / dtSync).coerceIn(-7.5f, 7.5f)
-                        existing.vy = (dy / dtSync).coerceIn(-8.0f, 8.0f)
-                        existing.vz = (dz / dtSync).coerceIn(-7.5f, 7.5f)
-                    } else {
-                        existing.vx = 0f
-                        existing.vy = 0f
-                        existing.vz = 0f
-                    }
-                    existing.targetX = newX
-                    existing.targetY = newY
-                    existing.targetZ = newZ
-                    existing.lastSyncMs = nowMs
-                    existing.targetYawDeg = st.yawDeg.toFloat()
-                    existing.hp = st.hp
-                    existing.isDead = st.dead
-                    if (!st.dead) existing.deathProgress = 0f
-                    existing.isMoving = st.moving
-                    existing.isShooting = st.shooting
-                    existing.weapon = wep
-                    existing.kills = st.kills
-                    existing.deaths = st.deaths
-
-                    val prevSeq = lastProcessedHitSeq[st.userId] ?: 0
-                    if (st.hitSeq > prevSeq) {
-                        lastProcessedHitSeq[st.userId] = st.hitSeq
-                        if (st.hitTargetUid == localUid && st.hitDamage > 0 && side != matchConfig.playerSide) {
-                            incomingHits.add(Triple(st.displayName, st, st.hitDamage.toFloat()))
-                        }
-                    }
-                }
+                upsertRemotePlayerLocked(localUid, st, nowMs)
             }
             remotePlayersMap.keys.retainAll(activeUids)
         }
-        // Apply incoming human PvP damage outside lock
-        for ((attackerName, st, dmg) in incomingHits) {
-            if (!isPlayerDead && !isRoundOver && !isMatchFinished) {
-                val side = if (st.team == "CT") TeamSide.CT else TeamSide.T
-                applyPlayerDamage(dmg, side, killedByBomb = false, attackerLabel = attackerName)
+    }
+
+    private fun upsertRemotePlayerLocked(
+        localUid: String,
+        st: com.example.online.PlayerMatchState,
+        nowMs: Long
+    ) {
+        val side = if (st.team == "CT") TeamSide.CT else TeamSide.T
+        val wep = WeaponType.entries.firstOrNull { it.name == st.weapon } ?: WeaponType.AK47
+        val newX = st.x.toFloat()
+        val newY = st.y.toFloat()
+        val newZ = st.z.toFloat()
+        val existing = remotePlayersMap[st.userId]
+        if (existing == null) {
+            remotePlayersMap[st.userId] = RemoteHumanPlayer(
+                userId = st.userId,
+                shortId = st.shortId,
+                displayName = st.displayName,
+                team = side,
+                x = newX,
+                y = newY,
+                z = newZ,
+                targetX = newX,
+                targetY = newY,
+                targetZ = newZ,
+                lastSyncMs = nowMs,
+                yawDeg = st.yawDeg.toFloat(),
+                targetYawDeg = st.yawDeg.toFloat(),
+                hp = st.hp,
+                isDead = st.dead,
+                deathProgress = if (st.dead) 1f else 0f,
+                isMoving = st.moving,
+                isShooting = st.shooting,
+                weapon = wep,
+                kills = st.kills,
+                deaths = st.deaths
+            )
+            // Baseline hitSeq on first observe so old hits aren't replayed on join
+            lastProcessedHitSeq[st.userId] = st.hitSeq
+        } else {
+            val dtSync = ((nowMs - existing.lastSyncMs) / 1000f).coerceIn(0.020f, 0.45f)
+            val dx = newX - existing.targetX
+            val dy = newY - existing.targetY
+            val dz = newZ - existing.targetZ
+            val jumpDistSq = dx * dx + dz * dz
+            if (jumpDistSq > 36f) {
+                existing.x = newX
+                existing.y = newY
+                existing.z = newZ
+                existing.vx = 0f
+                existing.vy = 0f
+                existing.vz = 0f
+            } else if (st.moving && !st.dead) {
+                existing.vx = (dx / dtSync).coerceIn(-7.8f, 7.8f)
+                existing.vy = (dy / dtSync).coerceIn(-8.0f, 8.0f)
+                existing.vz = (dz / dtSync).coerceIn(-7.8f, 7.8f)
+            } else {
+                existing.vx = 0f
+                existing.vy = 0f
+                existing.vz = 0f
+            }
+            existing.targetX = newX
+            existing.targetY = newY
+            existing.targetZ = newZ
+            existing.lastSyncMs = nowMs
+            existing.targetYawDeg = st.yawDeg.toFloat()
+            existing.hp = st.hp
+            existing.isDead = st.dead
+            if (!st.dead) existing.deathProgress = 0f
+            existing.isMoving = st.moving
+            existing.isShooting = st.shooting
+            existing.weapon = wep
+            existing.kills = st.kills
+            existing.deaths = st.deaths
+
+            val prevSeq = lastProcessedHitSeq[st.userId] ?: 0
+            if (st.hitSeq > prevSeq) {
+                lastProcessedHitSeq[st.userId] = st.hitSeq
+                if (st.hitTargetUid == localUid && st.hitDamage > 0 && side != matchConfig.playerSide) {
+                    pendingIncomingPvpHits.addLast(
+                        IncomingPvpHit(
+                            attackerId = st.userId,
+                            attackerName = st.displayName.ifBlank { side.shortRu },
+                            attackerSide = side,
+                            weaponName = st.hitWeapon.ifBlank { wep.shortLabel },
+                            headshot = st.hitHeadshot,
+                            damage = st.hitDamage.toFloat()
+                        )
+                    )
+                }
             }
         }
     }
 
+    private fun drainIncomingPvpHits() {
+        val batch = ArrayList<IncomingPvpHit>()
+        synchronized(remoteLock) {
+            while (pendingIncomingPvpHits.isNotEmpty()) {
+                batch.add(pendingIncomingPvpHits.removeFirst())
+            }
+        }
+        for (hit in batch) {
+            if (!isPlayerDead && !isRoundOver && !isMatchFinished) {
+                applyPlayerDamage(
+                    amount = hit.damage,
+                    attackerSide = hit.attackerSide,
+                    killedByBomb = false,
+                    attackerId = hit.attackerId,
+                    attackerName = hit.attackerName,
+                    attackerWeapon = hit.weaponName,
+                    isHeadshot = hit.headshot
+                )
+            }
+        }
+    }
+
+    private fun drainIncomingBombEvents() {
+        val batch = ArrayList<BombSyncEvent>()
+        synchronized(remoteBombLock) {
+            while (pendingRemoteBombEvents.isNotEmpty()) {
+                batch.add(pendingRemoteBombEvents.removeFirst())
+            }
+        }
+        for (ev in batch) {
+            val senderKey = ev.senderUid.ifBlank { "remote" }
+            val lastSeq = lastAppliedBombSeqBySender[senderKey] ?: 0
+            if (ev.seq <= lastSeq) continue
+            lastAppliedBombSeqBySender[senderKey] = ev.seq
+
+            // If remote player skipped warmup into live match, align immediately
+            if (!ev.isWarmup && isWarmup) {
+                endWarmupAndStartLiveMatch(broadcast = false)
+            }
+
+            when (ev.state) {
+                BombState.PLANTED -> {
+                    if (bombState != BombState.PLANTED && !isRoundOver && !isWarmup) {
+                        bombState = BombState.PLANTED
+                        plantedBombX = ev.x
+                        plantedBombY = ev.y
+                        plantedBombZ = ev.z
+                        plantedSiteLabel = ev.siteLabel.ifBlank { "A" }
+                        bombCountdownSec = ev.countdownSec.coerceIn(1f, 35f)
+                        bombBeepTimer = 0.45f
+                        bombPlantProgress = 0f
+                        playerHasBomb = false
+                        for (b in bots) {
+                            b.hasBomb = false
+                            b.plantProgress = 0f
+                            b.navPath = emptyList()
+                            b.navPathIndex = 0
+                            b.repathTimer = 0f
+                        }
+                        soundEngine.playBombPlanted()
+                        bannerText = "БОМБА C4 ЗАЛОЖЕНА НА ТОЧКЕ $plantedSiteLabel!"
+                        bannerTimer = 3.2f
+                    } else if (bombState == BombState.PLANTED) {
+                        // Keep countdown tightly aligned between T and CT
+                        if (abs(bombCountdownSec - ev.countdownSec) > 0.9f) {
+                            bombCountdownSec = ev.countdownSec.coerceIn(0.2f, 35f)
+                        }
+                    }
+                }
+                BombState.DEFUSED -> {
+                    if (bombState == BombState.PLANTED && !isRoundOver) {
+                        bombState = BombState.DEFUSED
+                        bombPlantProgress = 0f
+                        soundEngine.playBombPlanted()
+                        endRound(TeamSide.CT, "БОМБА РАЗМИНИРОВАНА • ПОБЕДА СПЕЦНАЗА", delaySec = 3.6f)
+                    }
+                }
+                BombState.EXPLODED -> {
+                    if (bombState == BombState.PLANTED && !isRoundOver) {
+                        detonatePlantedBomb(broadcast = false)
+                    }
+                }
+                BombState.CARRIED -> Unit
+            }
+        }
+    }
+
+    private fun emitBombSyncEvent() {
+        if (!matchConfig.isMultiplayer) return
+        localBombSyncSeq++
+        latestBombSync = BombSyncEvent(
+            seq = localBombSyncSeq,
+            state = bombState,
+            x = plantedBombX,
+            y = plantedBombY,
+            z = plantedBombZ,
+            siteLabel = plantedSiteLabel,
+            countdownSec = bombCountdownSec,
+            roundNumber = roundNumber,
+            isWarmup = isWarmup,
+            senderUid = matchConfig.localUserId
+        )
+    }
+
     private fun updateRemotePlayersInterpolation(dt: Float) {
         val nowMs = SystemClock.elapsedRealtime()
-        val posAlpha = (dt * 19f).coerceAtMost(1f)
-        val rotAlpha = (dt * 21f).coerceAtMost(1f)
+        val posAlpha = (dt * 24f).coerceAtMost(1f)
+        val rotAlpha = (dt * 26f).coerceAtMost(1f)
         synchronized(remoteLock) {
             for (rp in remotePlayersMap.values) {
-                // Bounded dead-reckoning prediction (up to 130ms) dramatically cuts perceived opponent lag
+                // Tight 90ms dead-reckoning tuned for 30Hz Realtime WebSocket broadcasts
                 val leadSec = if (rp.isMoving && !rp.isDead) {
-                    ((nowMs - rp.lastSyncMs) / 1000f).coerceIn(0f, 0.13f)
+                    ((nowMs - rp.lastSyncMs) / 1000f).coerceIn(0f, 0.09f)
                 } else 0f
                 val predX = rp.targetX + rp.vx * leadSec
-                val predY = rp.targetY + rp.vy * leadSec * 0.4f
+                val predY = rp.targetY + rp.vy * leadSec * 0.35f
                 val predZ = rp.targetZ + rp.vz * leadSec
 
                 rp.x += (predX - rp.x) * posAlpha
@@ -365,6 +555,9 @@ class GameEngine(
     fun skipWarmup() {
         pendingSkipWarmup = true
     }
+
+    fun spectateNextAlly() { pendingSpectateDelta += 1 }
+    fun spectatePrevAlly() { pendingSpectateDelta -= 1 }
 
     fun selectSlot(slot: WeaponSlot) { pendingSlotSwitch = slot }
     fun quickSwitchWeapon() { pendingQuickSwitch = true }
@@ -443,6 +636,10 @@ class GameEngine(
             for (b in bots) {
                 if (b.isDead) b.deathProgress = (b.deathProgress + dt * 2.2f).coerceAtMost(1f)
             }
+            if (matchConfig.isMultiplayer) {
+                updateRemotePlayersInterpolation(dt)
+            }
+            updateDeathFeedbackAndSpectator(dt)
             hitMarkerAlpha = (hitMarkerAlpha - dt * 3.5f).coerceAtLeast(0f)
             damageFlashAlpha = (damageFlashAlpha - dt * 2.4f).coerceAtLeast(0f)
             muzzleFlashTimer = (muzzleFlashTimer - dt * 22f).coerceAtLeast(0f)
@@ -456,6 +653,21 @@ class GameEngine(
             }
             publishHud()
             return
+        }
+
+        if (matchConfig.isMultiplayer) {
+            drainIncomingBombEvents()
+            drainIncomingPvpHits()
+        }
+
+        if (freezeTimeSec > 0f) {
+            val prevFreeze = freezeTimeSec
+            freezeTimeSec = (freezeTimeSec - dt).coerceAtLeast(0f)
+            if (prevFreeze > 0f && freezeTimeSec <= 0f) {
+                soundEngine.playWeaponSwitch()
+                bannerText = "РАУНД $roundNumber — В БОЙ!"
+                bannerTimer = 1.9f
+            }
         }
 
         if (buyTimeRemaining > 0f) {
@@ -474,11 +686,14 @@ class GameEngine(
         if (matchConfig.isMultiplayer) {
             updateRemotePlayersInterpolation(dt)
         }
+        updateDeathFeedbackAndSpectator(dt)
 
         if (isWarmup) {
             updateWarmupPhase(dt)
         } else if (matchConfig.mode == GameMode.BOMB_DEFUSAL) {
-            updateBombAndRoundTimers(dt)
+            if (freezeTimeSec <= 0f) {
+                updateBombAndRoundTimers(dt)
+            }
         } else {
             updateTeamDeathmatchRules(dt)
         }
@@ -512,9 +727,10 @@ class GameEngine(
         isMatchFinished = false
         isPlayerTeamWinner = false
         matchRecorded = false
-        // Start every match with a 30-second CS2 Warmup ($16000, open shop, instant respawn, Skip button!)
+        // Start every match with a 60-second CS2 Warmup ($16000, open shop, instant respawn, Skip button!)
         isWarmup = true
-        warmupTimer = 30f
+        warmupTimer = 60f
+        freezeTimeSec = 0f
         pendingSkipWarmup = false
         money = 16000
         primaryWeapon = if (matchConfig.playerSide == TeamSide.CT) WeaponType.M4A1_S else WeaponType.AK47
@@ -524,10 +740,14 @@ class GameEngine(
         bots.clear()
         lastTStrategy = -1
         lastCtStrategy = -1
+        synchronized(remoteBombLock) {
+            pendingRemoteBombEvents.clear()
+            lastAppliedBombSeqBySender.clear()
+        }
         startNewRound(keepPlayerGear = true, resetBotsEconomy = true)
     }
 
-    private fun endWarmupAndStartLiveMatch() {
+    private fun endWarmupAndStartLiveMatch(broadcast: Boolean = true) {
         isWarmup = false
         warmupTimer = 0f
         pendingSkipWarmup = false
@@ -552,17 +772,18 @@ class GameEngine(
         lastTStrategy = -1
         lastCtStrategy = -1
         startNewRound(keepPlayerGear = false, resetBotsEconomy = true)
-        bannerText = "МАТЧ НАЧАЛСЯ • РАУНД 1 • ${matchConfig.map.titleRu}"
+        if (broadcast) emitBombSyncEvent()
+        bannerText = "МАТЧ НАЧАЛСЯ • ПОДГОТОВКА 8 СЕК • ${matchConfig.map.titleRu}"
         bannerTimer = 3.0f
     }
 
     private fun updateWarmupPhase(dt: Float) {
         warmupTimer = (warmupTimer - dt).coerceAtLeast(0f)
         if (pendingSkipWarmup || warmupTimer <= 0f) {
-            endWarmupAndStartLiveMatch()
+            endWarmupAndStartLiveMatch(broadcast = true)
             return
         }
-        // Fast 1.8s player respawn during warmup with $16000 & full armor
+        // Fast 2.2s player respawn during warmup with $16000 & full armor
         if (isPlayerDead) {
             tdmRespawnTimer -= dt
             if (tdmRespawnTimer <= 0f) {
@@ -570,6 +791,13 @@ class GameEngine(
                 armor = 100f
                 money = 16000
                 isPlayerDead = false
+                deathBloodTimer = 0f
+                deathRecapTimer = 0f
+                activeDeathRecap = null
+                isSpectatingAlly = false
+                spectateCamInitialized = false
+                damageDealtByTarget.clear()
+                damageTakenByAttacker.clear()
                 val (sx, sy, sz) = world.getSpawnPoint(matchConfig.playerSide, rng.nextInt(5))
                 playerX = sx; playerY = sy; playerFloorY = sy; playerZ = sz
                 playerYawRad = atan2(sx.toDouble(), sz.toDouble()).toFloat()
@@ -584,7 +812,9 @@ class GameEngine(
         isRoundOver = false
         roundOverTimer = 0f
         roundTimeSec = if (matchConfig.mode == GameMode.BOMB_DEFUSAL) 105f else 300f
-        buyTimeRemaining = if (isWarmup || matchConfig.mode == GameMode.TEAM_DEATHMATCH) 999f else 25f
+        // 8-second tactical Freeze Time preparation at the beginning of every Bomb Defusal round!
+        freezeTimeSec = if (!isWarmup && matchConfig.mode == GameMode.BOMB_DEFUSAL) 8.0f else 0f
+        buyTimeRemaining = if (isWarmup || matchConfig.mode == GameMode.TEAM_DEATHMATCH) 999f else 28f
         explosion.active = false
         explosionFlashAlpha = 0f
         cameraShake = 0f
@@ -598,6 +828,14 @@ class GameEngine(
         hp = 100f
         isPlayerDead = false
         tdmRespawnTimer = 0f
+        deathBloodTimer = 0f
+        deathRecapTimer = 0f
+        activeDeathRecap = null
+        deathCamDelayTimer = 0f
+        isSpectatingAlly = false
+        spectateCamInitialized = false
+        damageDealtByTarget.clear()
+        damageTakenByAttacker.clear()
         if (!isWarmup && !keepPlayerGear && matchConfig.mode == GameMode.BOMB_DEFUSAL) {
             primaryWeapon = null
             pistolWeapon = if (matchConfig.playerSide == TeamSide.CT) WeaponType.USP_S else WeaponType.GLOCK_18
@@ -1089,8 +1327,9 @@ class GameEngine(
             else -> 5.7f
         } * activeWeapon.moveSpeedMult
 
-        val mx = moveInputX.coerceIn(-1f, 1f)
-        val my = moveInputY.coerceIn(-1f, 1f)
+        val frozen = freezeTimeSec > 0f
+        val mx = if (frozen) 0f else moveInputX.coerceIn(-1f, 1f)
+        val my = if (frozen) 0f else moveInputY.coerceIn(-1f, 1f)
         val mag = sqrt(mx * mx + my * my)
         val nx = if (mag > 1f) mx / mag else mx
         val ny = if (mag > 1f) my / mag else my
@@ -1116,7 +1355,7 @@ class GameEngine(
 
         if (pendingJump) {
             pendingJump = false
-            if (playerY <= playerFloorY + 0.08f) {
+            if (!frozen && playerY <= playerFloorY + 0.08f) {
                 playerVelY = 5.80f // Crisp ~1.16m CS jump apex so climbable crates are easy to jump onto!
                 isCrouching = false
                 landingVel -= 0.16f // subtle upward jump kick
@@ -1154,7 +1393,7 @@ class GameEngine(
     }
 
     private fun updateWeaponsAndFiring(dt: Float) {
-        if (isPlayerDead) {
+        if (isPlayerDead || freezeTimeSec > 0f) {
             lastTriggerPressed = isFiring
             return
         }
@@ -1209,7 +1448,7 @@ class GameEngine(
     }
 
     private fun updateBombInteractions(dt: Float) {
-        if (isWarmup || matchConfig.mode != GameMode.BOMB_DEFUSAL || isPlayerDead) {
+        if (isWarmup || freezeTimeSec > 0f || matchConfig.mode != GameMode.BOMB_DEFUSAL || isPlayerDead) {
             bombPlantProgress = 0f
             return
         }
@@ -1238,7 +1477,8 @@ class GameEngine(
         val distToBomb = world.distance2D(playerX, playerZ, plantedBombX, plantedBombZ)
         val wantsDefuse = matchConfig.playerSide == TeamSide.CT &&
             bombState == BombState.PLANTED &&
-            distToBomb <= 3.0f &&
+            distToBomb <= 3.6f &&
+            abs(playerY - plantedBombY) <= 2.4f &&
             isBombActionHeld
 
         if (wantsDefuse) {
@@ -1254,6 +1494,7 @@ class GameEngine(
                 bombPlantProgress = 0f
                 money = (money + 300).coerceAtMost(16000)
                 score += 400
+                emitBombSyncEvent()
                 soundEngine.playBombPlanted()
                 endRound(TeamSide.CT, "БОМБА РАЗМИНИРОВАНА • ПОБЕДА СПЕЦНАЗА", delaySec = 3.6f)
             }
@@ -1286,6 +1527,7 @@ class GameEngine(
             score += 350
             switchWeaponInternal(primaryWeapon ?: pistolWeapon)
         }
+        emitBombSyncEvent()
         soundEngine.playBombPlanted()
         bannerText = "БОМБА C4 ЗАЛОЖЕНА НА ТОЧКЕ $siteLabel!"
         bannerTimer = 3.0f
@@ -1295,8 +1537,9 @@ class GameEngine(
      * FULL CS2 C4 DETONATION:
      * Triggers massive 3D fireball + shockwave + smoke + camera shake + blinding flash + LETHAL 26m blast radius!
      */
-    private fun detonatePlantedBomb() {
+    private fun detonatePlantedBomb(broadcast: Boolean = true) {
         bombState = BombState.EXPLODED
+        if (broadcast) emitBombSyncEvent()
         explosion.active = true
         explosion.x = plantedBombX
         explosion.y = plantedBombY
@@ -1355,7 +1598,15 @@ class GameEngine(
             val coverMult = if (wallDist < pDist - 0.8f) 0.58f else 1.0f
             val pDmg = (540f * exp(-((pDist / 11.5f) * (pDist / 11.5f))) * coverMult)
             if (pDmg >= 4f) {
-                applyPlayerDamage(pDmg, TeamSide.T, killedByBomb = true)
+                applyPlayerDamage(
+                    amount = pDmg,
+                    attackerSide = TeamSide.T,
+                    killedByBomb = true,
+                    attackerId = "bomb_c4",
+                    attackerName = "Бомба C4",
+                    attackerWeapon = "C4",
+                    isHeadshot = false
+                )
                 if (isPlayerDead) blastKills++
             }
         }
@@ -1543,6 +1794,7 @@ class GameEngine(
             hitMarkerAlpha = 1.0f
             isHeadshotHit = headshot
             val dmg = (if (headshot) w.headDamage else w.bodyDamage).toInt().coerceIn(1, 200)
+            recordDamageDealt(hitRemote.userId, minOf(dmg, hitRemote.hp.coerceAtLeast(1)))
             outgoingHitSeq++
             lastOutgoingHit = OutgoingHitEvent(
                 seq = outgoingHitSeq,
@@ -1567,6 +1819,18 @@ class GameEngine(
         if (nextMag == 0 && (reserveAmmoMap[w] ?: 0) > 0) beginReload()
     }
 
+    private fun recordDamageDealt(targetId: String, amount: Int) {
+        if (amount <= 0) return
+        val prev = damageDealtByTarget[targetId] ?: (0 to 0)
+        damageDealtByTarget[targetId] = (prev.first + amount) to (prev.second + 1)
+    }
+
+    private fun recordDamageTaken(attackerId: String, amount: Int) {
+        if (amount <= 0) return
+        val prev = damageTakenByAttacker[attackerId] ?: (0 to 0)
+        damageTakenByAttacker[attackerId] = (prev.first + amount) to (prev.second + 1)
+    }
+
     private fun applyBotDamage(
         target: BotOperative,
         dmg: Float,
@@ -1583,7 +1847,12 @@ class GameEngine(
         } else {
             dmg
         }
+        val hpBefore = target.hp
         target.hp -= effectiveDmg
+        if (killerIsPlayer) {
+            val dealt = minOf(hpBefore, effectiveDmg).toInt().coerceAtLeast(1)
+            recordDamageDealt("bot_${target.id}", dealt)
+        }
         target.hitFlinch = 1.0f
         // If shot from flank/behind, alert the bot to turn smoothly toward the threat (no instant 180 snap!)
         if (killerIsPlayer && target.hp > 0f) {
@@ -1646,6 +1915,17 @@ class GameEngine(
     }
 
     private fun updateBots(dt: Float) {
+        // During 8-second Freeze Time preparation, bots hold spawn positions cleanly
+        if (freezeTimeSec > 0f) {
+            for (b in bots) {
+                b.isMoving = false
+                b.moveForwardRatio = 0f
+                b.moveStrafeRatio = 0f
+                b.hasLineOfSight = false
+                b.muzzleFlashTimer = 0f
+            }
+            return
+        }
         val camY = playerY + eyeHeight
 
         // Designate the single closest alive CT bot as active bomb defuser when C4 is planted
@@ -1789,6 +2069,7 @@ class GameEngine(
                             b.defuseProgress = 0f
                             b.money = (b.money + 300).coerceAtMost(16000)
                             bombState = BombState.DEFUSED
+                            emitBombSyncEvent()
                             soundEngine.playBombPlanted()
                             endRound(TeamSide.CT, "СПЕЦНАЗ РАЗМИНИРОВАЛ C4!", delaySec = 3.6f)
                             return
@@ -1903,7 +2184,15 @@ class GameEngine(
                         val finalDmg = if (isHs) baseDmg * 1.55f else baseDmg
                         if (targetIsPlayer) {
                             val wasAlive = !isPlayerDead
-                            applyPlayerDamage(finalDmg, b.team, killedByBomb = false, attackerLabel = "${b.name} [${b.weapon.shortLabel}]")
+                            applyPlayerDamage(
+                                amount = finalDmg,
+                                attackerSide = b.team,
+                                killedByBomb = false,
+                                attackerId = "bot_${b.id}",
+                                attackerName = b.name,
+                                attackerWeapon = b.weapon.shortLabel,
+                                isHeadshot = isHs
+                            )
                             if (wasAlive && isPlayerDead && !isWarmup) {
                                 b.kills++
                                 b.money = (b.money + b.weapon.killReward).coerceAtMost(16000)
@@ -2110,15 +2399,24 @@ class GameEngine(
         amount: Float,
         attackerSide: TeamSide,
         killedByBomb: Boolean,
-        attackerLabel: String? = null
+        attackerId: String = "",
+        attackerName: String = "",
+        attackerWeapon: String = "",
+        isHeadshot: Boolean = false
     ) {
-        damageFlashAlpha = if (killedByBomb) 1.0f else 0.85f
+        damageFlashAlpha = if (killedByBomb) 1.0f else 0.88f
         if (!killedByBomb) soundEngine.playDamage()
         if (settings.audio.hapticsEnabled) onHapticPulse(true)
 
         val absorbed = minOf(armor, amount * 0.55f)
         armor -= absorbed
-        hp -= (amount - absorbed * 0.5f)
+        val actualLoss = (amount - absorbed * 0.5f).coerceAtLeast(1f)
+        val hpBefore = hp
+        hp -= actualLoss
+
+        val key = attackerId.ifBlank { if (killedByBomb) "bomb_c4" else attackerName.ifBlank { attackerSide.name } }
+        recordDamageTaken(key, minOf(hpBefore, actualLoss).toInt().coerceAtLeast(1))
+
         if (hp <= 0f) {
             hp = 0f
             isPlayerDead = true
@@ -2126,23 +2424,195 @@ class GameEngine(
             isFiring = false
             isBombActionHeld = false
             if (!isWarmup) deaths++
+
+            val displayKiller = attackerName.ifBlank { if (killedByBomb) "Бомба C4" else attackerSide.shortRu }
+            val wepTag = if (attackerWeapon.isNotBlank()) " [$attackerWeapon]" else ""
+            val hsTag = if (isHeadshot) " [ГОЛОВА]" else ""
             killFeedText = if (killedByBomb) {
                 "ВЫ ПОГИБЛИ ОТ ВЗРЫВА C4!"
             } else {
-                "${attackerLabel ?: attackerSide.shortRu} → ВЫ"
+                "$displayKiller$wepTag$hsTag → ВЫ"
             }
-            killFeedTimer = 3.6f
+            killFeedTimer = 4.0f
+
+            // Bloodied death screen for ~3.8s + Killer & Damage Exchange Recap Card for ~6.0s!
+            deathBloodTimer = 3.8f
+            deathRecapTimer = 6.0f
+            deathCamDelayTimer = 1.65f
+            spectateCamInitialized = false
+            val dealt = damageDealtByTarget[key] ?: (0 to 0)
+            val taken = damageTakenByAttacker[key] ?: (actualLoss.toInt().coerceAtLeast(1) to 1)
+            activeDeathRecap = DeathRecapInfo(
+                killerName = displayKiller,
+                killerWeapon = attackerWeapon,
+                killerTeam = attackerSide,
+                wasHeadshot = isHeadshot,
+                killedByBomb = killedByBomb,
+                damageGiven = dealt.first,
+                hitsGiven = dealt.second,
+                damageTaken = taken.first,
+                hitsTaken = taken.second
+            )
 
             if (!isWarmup && playerHasBomb && bombState == BombState.CARRIED) {
                 playerHasBomb = false
                 bots.firstOrNull { !it.isDead && it.team == TeamSide.T }?.hasBomb = true
             }
             if (isWarmup) {
-                tdmRespawnTimer = 1.8f
+                tdmRespawnTimer = 2.4f
             } else if (matchConfig.mode == GameMode.TEAM_DEATHMATCH) {
-                tdmRespawnTimer = 2.5f
+                tdmRespawnTimer = 2.8f
             }
         }
+    }
+
+    private data class SpectateCandidate(
+        val name: String,
+        val x: Float,
+        val y: Float,
+        val z: Float,
+        val fwdX: Float,
+        val fwdZ: Float,
+        val hp: Int,
+        val armor: Int,
+        val weaponLabel: String
+    )
+
+    private fun updateDeathFeedbackAndSpectator(dt: Float) {
+        if (deathBloodTimer > 0f) {
+            deathBloodTimer = (deathBloodTimer - dt).coerceAtLeast(0f)
+        }
+        if (deathRecapTimer > 0f) {
+            deathRecapTimer = (deathRecapTimer - dt).coerceAtLeast(0f)
+            if (deathRecapTimer <= 0f) {
+                activeDeathRecap = null
+            }
+        }
+
+        if (!isPlayerDead || isMatchFinished || isWarmup || matchConfig.mode == GameMode.TEAM_DEATHMATCH) {
+            isSpectatingAlly = false
+            spectatedAllyCount = 0
+            spectateCamInitialized = false
+            pendingSpectateDelta = 0
+            return
+        }
+
+        if (deathCamDelayTimer > 0f) {
+            deathCamDelayTimer = (deathCamDelayTimer - dt).coerceAtLeast(0f)
+            isSpectatingAlly = false
+            return
+        }
+
+        val candidates = ArrayList<SpectateCandidate>()
+        // Include surviving human teammates first, then surviving allied bots
+        if (matchConfig.isMultiplayer) {
+            synchronized(remoteLock) {
+                for (rp in remotePlayersMap.values) {
+                    if (!rp.isDead && rp.team == matchConfig.playerSide) {
+                        val yawRad = Math.toRadians(rp.yawDeg.toDouble())
+                        candidates.add(
+                            SpectateCandidate(
+                                name = rp.displayName.ifBlank { "Союзник" },
+                                x = rp.x,
+                                y = rp.y,
+                                z = rp.z,
+                                fwdX = -sin(yawRad).toFloat(),
+                                fwdZ = -cos(yawRad).toFloat(),
+                                hp = rp.hp,
+                                armor = 100,
+                                weaponLabel = rp.weapon.shortLabel
+                            )
+                        )
+                    }
+                }
+            }
+        }
+        for (b in bots) {
+            if (!b.isDead && b.team == matchConfig.playerSide) {
+                val yawRad = Math.toRadians(b.visualYawDeg.toDouble())
+                candidates.add(
+                    SpectateCandidate(
+                        name = b.name,
+                        x = b.x,
+                        y = b.y,
+                        z = b.z,
+                        fwdX = sin(yawRad).toFloat(),
+                        fwdZ = cos(yawRad).toFloat(),
+                        hp = b.hp.toInt().coerceAtLeast(1),
+                        armor = b.armor.toInt().coerceAtLeast(0),
+                        weaponLabel = b.weapon.shortLabel
+                    )
+                )
+            }
+        }
+
+        spectatedAllyCount = candidates.size
+        if (candidates.isEmpty()) {
+            isSpectatingAlly = false
+            spectateCamInitialized = false
+            pendingSpectateDelta = 0
+            return
+        }
+
+        val delta = pendingSpectateDelta
+        if (delta != 0) {
+            pendingSpectateDelta = 0
+            spectateTargetIndex = ((spectateTargetIndex + delta) % candidates.size + candidates.size) % candidates.size
+            spectateCamInitialized = false
+        } else if (spectateTargetIndex >= candidates.size) {
+            spectateTargetIndex = 0
+            spectateCamInitialized = false
+        }
+
+        val target = candidates[spectateTargetIndex]
+        val rightX = -target.fwdZ
+        val rightZ = target.fwdX
+
+        // Wall-safe over-the-shoulder tactical spectator camera (never clips into walls!)
+        val anchorX = target.x
+        val anchorY = target.y + 1.56f
+        val anchorZ = target.z
+        val desiredX = target.x - target.fwdX * 2.45f + rightX * 0.42f
+        val desiredY = target.y + 1.98f
+        val desiredZ = target.z - target.fwdZ * 2.45f + rightZ * 0.42f
+
+        val rx = desiredX - anchorX
+        val ry = desiredY - anchorY
+        val rz = desiredZ - anchorZ
+        val rLen = sqrt(rx * rx + ry * ry + rz * rz).coerceAtLeast(0.01f)
+        val wallDist = world.raycastWalls(anchorX, anchorY, anchorZ, rx / rLen, ry / rLen, rz / rLen, rLen)
+        val safeDist = (minOf(rLen, wallDist - 0.30f)).coerceAtLeast(0.45f)
+
+        val goalCamX = anchorX + (rx / rLen) * safeDist
+        val goalCamY = anchorY + (ry / rLen) * safeDist
+        val goalCamZ = anchorZ + (rz / rLen) * safeDist
+        val goalLookX = target.x + target.fwdX * 11.0f
+        val goalLookY = target.y + 1.48f
+        val goalLookZ = target.z + target.fwdZ * 11.0f
+
+        if (!spectateCamInitialized) {
+            spectateCamX = goalCamX
+            spectateCamY = goalCamY
+            spectateCamZ = goalCamZ
+            spectateLookX = goalLookX
+            spectateLookY = goalLookY
+            spectateLookZ = goalLookZ
+            spectateCamInitialized = true
+        } else {
+            val camAlpha = (dt * 10.5f).coerceAtMost(1f)
+            spectateCamX += (goalCamX - spectateCamX) * camAlpha
+            spectateCamY += (goalCamY - spectateCamY) * camAlpha
+            spectateCamZ += (goalCamZ - spectateCamZ) * camAlpha
+            spectateLookX += (goalLookX - spectateLookX) * camAlpha
+            spectateLookY += (goalLookY - spectateLookY) * camAlpha
+            spectateLookZ += (goalLookZ - spectateLookZ) * camAlpha
+        }
+
+        isSpectatingAlly = true
+        spectatedAllyName = target.name
+        spectatedAllyHp = target.hp
+        spectatedAllyArmor = target.armor
+        spectatedAllyWeapon = target.weaponLabel
     }
 
     private fun updateTeamDeathmatchRules(dt: Float) {
@@ -2153,6 +2623,13 @@ class GameEngine(
                 hp = 100f
                 armor = 100f
                 isPlayerDead = false
+                deathBloodTimer = 0f
+                deathRecapTimer = 0f
+                activeDeathRecap = null
+                isSpectatingAlly = false
+                spectateCamInitialized = false
+                damageDealtByTarget.clear()
+                damageTakenByAttacker.clear()
                 val (sx, sy, sz) = world.getSpawnPoint(matchConfig.playerSide, rng.nextInt(5))
                 playerX = sx; playerY = sy; playerFloorY = sy; playerZ = sz
                 refillAmmoForOwnedWeapons()
@@ -2230,17 +2707,23 @@ class GameEngine(
         val distBomb = world.distance2D(playerX, playerZ, plantedBombX, plantedBombZ)
 
         val canPlant = matchConfig.mode == GameMode.BOMB_DEFUSAL &&
+            !isWarmup &&
+            freezeTimeSec <= 0f &&
             !isPlayerDead &&
+            !isRoundOver &&
             matchConfig.playerSide == TeamSide.T &&
             playerHasBomb &&
             bombState == BombState.CARRIED &&
             inSite != null
 
         val canDefuse = matchConfig.mode == GameMode.BOMB_DEFUSAL &&
+            !isWarmup &&
             !isPlayerDead &&
+            !isRoundOver &&
             matchConfig.playerSide == TeamSide.CT &&
             bombState == BombState.PLANTED &&
-            distBomb <= 3.0f
+            distBomb <= 3.6f &&
+            abs(playerY - plantedBombY) <= 2.4f
 
         val remotes = if (matchConfig.isMultiplayer) getRemotePlayersSnapshot() else emptyList()
         val blips = ArrayList<RadarBlip>(bots.size + remotes.size + 1)
@@ -2314,6 +2797,10 @@ class GameEngine(
             )
         }
 
+        val bloodAlpha = if (deathBloodTimer > 0f) {
+            (deathBloodTimer / 3.8f).coerceIn(0f, 1f)
+        } else 0f
+
         latestHud = HudSnapshot(
             mapId = matchConfig.map,
             hp = hp.toInt().coerceAtLeast(0),
@@ -2343,6 +2830,7 @@ class GameEngine(
             roundsToWin = matchConfig.roundsToWin,
             roundNumber = roundNumber,
             roundTimeSec = roundTimeSec.coerceAtLeast(0f),
+            freezeTimeSec = freezeTimeSec.coerceAtLeast(0f),
             isWarmup = isWarmup,
             warmupTimeSec = warmupTimer.coerceAtLeast(0f),
             ctAlive = countAlive(TeamSide.CT),
@@ -2350,6 +2838,7 @@ class GameEngine(
             bombState = bombState,
             bombSiteLabel = plantedSiteLabel,
             bombCountdownSec = bombCountdownSec.coerceAtLeast(0f),
+            bombDistanceMeters = if (bombState == BombState.PLANTED) distBomb.toInt().coerceAtLeast(0) else 0,
             inPlantZoneLabel = inSite?.label ?: "",
             canPlantBomb = canPlant,
             canDefuseBomb = canDefuse,
@@ -2367,6 +2856,15 @@ class GameEngine(
             hitMarkerAlpha = hitMarkerAlpha,
             isHeadshotHit = isHeadshotHit,
             damageFlashAlpha = damageFlashAlpha,
+            deathBloodAlpha = bloodAlpha,
+            deathRecap = if (deathRecapTimer > 0f) activeDeathRecap else null,
+            isSpectatingAlly = isSpectatingAlly,
+            spectatedAllyName = spectatedAllyName,
+            spectatedAllyHp = spectatedAllyHp,
+            spectatedAllyArmor = spectatedAllyArmor,
+            spectatedAllyWeapon = spectatedAllyWeapon,
+            spectatedAllyIndex = spectateTargetIndex,
+            spectatedAllyCount = spectatedAllyCount,
             crosshairSpread = (recoilKick * 0.55f + moveSpeedRatio * 0.35f).coerceIn(0f, 1.4f),
             isMatchFinished = isMatchFinished,
             isPlayerTeamWinner = isPlayerTeamWinner,

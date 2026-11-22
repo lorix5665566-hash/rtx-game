@@ -17,6 +17,7 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
@@ -135,8 +136,27 @@ fun VanguardRtxApp(
     val onlineRepo = remember(authManager) { SupabaseOnlineRepository(authManager) }
     val onlineVm: OnlineViewModel = viewModel(
         key = currentUserId,
-        factory = OnlineViewModel.factory(currentUserId, session.loginName, onlineRepo)
+        factory = OnlineViewModel.factory(currentUserId, session.loginName, onlineRepo, authManager)
     )
+
+    // Wire zero-latency WebSocket broadcast sinks directly into GameEngine during matches
+    DisposableEffect(currentUserId, vm.engine, onlineVm) {
+        onlineVm.attachDirectMatchSinks(
+            onRemoteState = { st ->
+                if (vm.engine.matchConfig.isMultiplayer) {
+                    vm.engine.applyRemoteSingleState(currentUserId, st)
+                }
+            },
+            onBombSync = { ev ->
+                if (vm.engine.matchConfig.isMultiplayer) {
+                    vm.engine.enqueueRemoteBombSync(ev)
+                }
+            }
+        )
+        onDispose {
+            onlineVm.attachDirectMatchSinks(null, null)
+        }
+    }
 
     val screen by vm.screen.collectAsStateWithLifecycle()
     val settings by vm.settings.collectAsStateWithLifecycle()
@@ -296,6 +316,7 @@ fun VanguardRtxApp(
                 remoteMemberStates = lobbyMemberStates,
                 pingMs = pingMs,
                 onPublishLiveState = onlineVm::publishMatchTick,
+                onPublishBombSync = onlineVm::publishBombSync,
                 onSetPaused = vm::setPaused,
                 onRestart = vm::restartMatch,
                 onOpenSettings = { vm.openSettings(fromGame = true) },

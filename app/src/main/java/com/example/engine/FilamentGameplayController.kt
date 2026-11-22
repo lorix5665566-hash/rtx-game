@@ -407,13 +407,30 @@ class FilamentGameplayController(
         val aspect = surfaceWidth.toDouble() / surfaceHeight.toDouble().coerceAtLeast(1.0)
         val baseFov = gfx.fov.coerceIn(65f, 105f)
         val zoomTarget = gameEngine.activeWeapon.adsZoomFactor
-        val liveFov = (baseFov * (1f - gameEngine.adsBlend * (1f - zoomTarget))).toDouble()
+        val liveFov = if (gameEngine.isSpectatingAlly) {
+            baseFov.toDouble()
+        } else {
+            (baseFov * (1f - gameEngine.adsBlend * (1f - zoomTarget))).toDouble()
+        }
         camera.setProjection(liveFov, aspect, 0.04, 240.0, Camera.Fov.VERTICAL)
 
         // Apply dramatic C4 explosion camera shake!
         val shake = gameEngine.cameraShake
         val shakeX = if (shake > 0.01f) sin(gameEngine.timeSec * 58f) * 0.24f * shake else 0f
         val shakeY = if (shake > 0.01f) cos(gameEngine.timeSec * 49f) * 0.20f * shake else 0f
+
+        if (gameEngine.isSpectatingAlly) {
+            camera.lookAt(
+                (gameEngine.spectateCamX + shakeX).toDouble(),
+                (gameEngine.spectateCamY + shakeY).toDouble(),
+                gameEngine.spectateCamZ.toDouble(),
+                gameEngine.spectateLookX.toDouble(),
+                gameEngine.spectateLookY.toDouble(),
+                gameEngine.spectateLookZ.toDouble(),
+                0.0, 1.0, 0.0
+            )
+            return
+        }
 
         val camX = gameEngine.playerX + shakeX
         val camY = gameEngine.playerY + gameEngine.eyeHeight + shakeY
@@ -840,16 +857,16 @@ class FilamentGameplayController(
         val lm = engine.lightManager
         val fxLightInst = lm.getInstance(fxLightEntity)
 
-        // 1. Planted C4 physical .GLB model on the ground
+        // 1. Planted C4 physical .GLB model on the ground (prominent 48cm size so CT spots it immediately!)
         val showC4 = gameEngine.bombState == BombState.PLANTED
         FilamentSceneHelpers.setAssetVisible(scene, plantedBombModel, showC4)
         if (showC4 && plantedBombModel != null) {
             FilamentSceneHelpers.buildNormalizedPropMatrix(
                 out = tmpMat,
                 model = plantedBombModel!!,
-                targetMaxExtent = 0.36f,
+                targetMaxExtent = 0.48f,
                 tx = gameEngine.plantedBombX,
-                ty = gameEngine.plantedBombY + 0.01f,
+                ty = gameEngine.plantedBombY + 0.03f,
                 tz = gameEngine.plantedBombZ,
                 yawDeg = 35f,
                 anchorBottom = true
@@ -934,12 +951,14 @@ class FilamentGameplayController(
             val fz = gameEngine.playerZ - cos(gameEngine.playerYawRad) * 0.9f
             lm.setPosition(fxLightInst, fx, gameEngine.playerY + gameEngine.eyeHeight - 0.1f, fz)
         } else if (showC4) {
-            // Pulsing red C4 LED light on planted bomb
-            val blink = if (((gameEngine.timeSec * 4.5f).toInt() % 2) == 0) 14_000f else 1_200f
-            lm.setColor(fxLightInst, 1.0f, 0.12f, 0.08f)
-            lm.setIntensity(fxLightInst, blink)
-            lm.setFalloff(fxLightInst, 4.5f)
-            lm.setPosition(fxLightInst, gameEngine.plantedBombX, gameEngine.plantedBombY + 0.35f, gameEngine.plantedBombZ)
+            // High-visibility pulsing red C4 LED beacon light accelerating as detonation nears
+            val urgencyFreq = (2.6f + (1f - (gameEngine.bombCountdownSec / 35f).coerceIn(0f, 1f)) * 7.5f)
+            val blinkOn = (((gameEngine.timeSec * urgencyFreq).toInt()) % 2) == 0
+            val blinkPower = if (blinkOn) 78_000f else 9_000f
+            lm.setColor(fxLightInst, 1.0f, 0.10f, 0.06f)
+            lm.setIntensity(fxLightInst, blinkPower)
+            lm.setFalloff(fxLightInst, 8.5f)
+            lm.setPosition(fxLightInst, gameEngine.plantedBombX, gameEngine.plantedBombY + 0.42f, gameEngine.plantedBombZ)
         } else {
             lm.setIntensity(fxLightInst, 0f)
         }

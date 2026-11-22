@@ -4,6 +4,7 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
 import com.example.model.ArenaMapId
+import com.example.model.BombSyncEvent
 import com.example.model.GameMode
 import com.example.model.OutgoingHitEvent
 import com.example.model.TeamSide
@@ -13,7 +14,9 @@ import com.example.online.LobbyInvite
 import com.example.online.MultiplayerLobby
 import com.example.online.PlayerMatchState
 import com.example.online.PlayerProfile
+import com.example.online.SupabaseAuthManager
 import com.example.online.SupabaseOnlineRepository
+import com.example.online.SupabaseRealtimeClient
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -37,7 +40,8 @@ sealed interface OnlineUiState<out T> {
 class OnlineViewModel(
     val currentUserId: String,
     private val initialLoginName: String,
-    private val repository: SupabaseOnlineRepository
+    private val repository: SupabaseOnlineRepository,
+    private val authManager: SupabaseAuthManager
 ) : ViewModel() {
 
     private val _profileState = MutableStateFlow<OnlineUiState<PlayerProfile>>(OnlineUiState.Loading)
@@ -79,8 +83,40 @@ class OnlineViewModel(
     private val _pingMs = MutableStateFlow(0)
     val pingMs: StateFlow<Int> = _pingMs.asStateFlow()
 
+    private val _realtimeConnected = MutableStateFlow(false)
+    val realtimeConnected: StateFlow<Boolean> = _realtimeConnected.asStateFlow()
+
+    // Direct zero-latency listeners invoked straight from the WebSocket thread into GameEngine!
+    @Volatile private var directRemoteStateSink: ((PlayerMatchState) -> Unit)? = null
+    @Volatile private var directBombSyncSink: ((BombSyncEvent) -> Unit)? = null
+    @Volatile private var lastDbMirrorMs: Long = 0L
+
+    private val realtimeClient = SupabaseRealtimeClient(
+        authManager = authManager,
+        onRemoteStateReceived = { remoteState ->
+            directRemoteStateSink?.invoke(remoteState)
+        },
+        onBombSyncReceived = { bombEvent ->
+            directBombSyncSink?.invoke(bombEvent)
+        },
+        onPingMeasured = { rttMs ->
+            recordRtt(rttMs)
+        },
+        onConnectionChanged = { connected ->
+            _realtimeConnected.value = connected
+        }
+    )
+
     private var lobbyPollJob: Job? = null
     private val tickInFlight = AtomicBoolean(false)
+
+    fun attachDirectMatchSinks(
+        onRemoteState: ((PlayerMatchState) -> Unit)?,
+        onBombSync: ((BombSyncEvent) -> Unit)?
+    ) {
+        directRemoteStateSink = onRemoteState
+        directBombSyncSink = onBombSync
+    }
 
     init {
         initializeAndStartSocialPolling()
@@ -376,6 +412,7 @@ class OnlineViewModel(
         val lobbyId = _activeLobbyId.value
         lobbyPollJob?.cancel()
         lobbyPollJob = null
+        realtimeClient.disconnect()
         _activeLobbyId.value = null
         _activeLobby.value = null
         _lobbyMemberStates.value = emptyList()
@@ -386,6 +423,11 @@ class OnlineViewModel(
             }
             onLeft()
         }
+    }
+
+    fun publishBombSync(lobbyId: String, event: BombSyncEvent) {
+        if (lobbyId.isBlank()) return
+        realtimeClient.sendBombEvent(event)
     }
 
     fun publishMatchTick(
@@ -403,11 +445,39 @@ class OnlineViewModel(
         weaponName: String,
         kills: Int,
         deaths: Int,
-        outgoingHit: OutgoingHitEvent?
+        outgoingHit: OutgoingHitEvent?,
+        bombSync: BombSyncEvent? = null
     ) {
         if (lobbyId.isBlank()) return
-        // Avoid piling up concurrent HTTP patches; always let outgoing hit events through immediately
+        val displayName = currentProfileOrNull()?.displayName ?: initialLoginName
+        // 1. Primary path: instant ~30Hz WebSocket broadcast (zero DB write latency!)
+        val sentViaWs = realtimeClient.sendPlayerState(
+            userId = currentUserId,
+            displayName = displayName,
+            team = team,
+            x = x,
+            y = y,
+            z = z,
+            yawDeg = yawDeg,
+            pitchDeg = pitchDeg,
+            hp = hp,
+            dead = dead,
+            moving = moving,
+            shooting = shooting,
+            weaponName = weaponName,
+            kills = kills,
+            deaths = deaths,
+            outgoingHit = outgoingHit,
+            bombSync = bombSync
+        )
+
+        // 2. Database mirror: always immediate when WS is disconnected or when carrying a hit;
+        //    otherwise lightweight ~1.4s mirror to keep PostgREST rows synced for late observers.
+        val nowMs = android.os.SystemClock.elapsedRealtime()
+        val needsDbSync = !sentViaWs || outgoingHit != null || (nowMs - lastDbMirrorMs >= 1_400L)
+        if (!needsDbSync) return
         if (outgoingHit == null && !tickInFlight.compareAndSet(false, true)) return
+        lastDbMirrorMs = nowMs
         viewModelScope.launch {
             try {
                 val rtt = repository.publishMatchTick(
@@ -428,7 +498,7 @@ class OnlineViewModel(
                     deaths = deaths,
                     outgoingHit = outgoingHit
                 )
-                if (rtt != null && _pingMs.value == 0) {
+                if (rtt != null && (!sentViaWs || _pingMs.value == 0)) {
                     recordRtt(rtt)
                 }
             } finally {
@@ -442,6 +512,7 @@ class OnlineViewModel(
         val lobbyId = _activeLobbyId.value
         lobbyPollJob?.cancel()
         lobbyPollJob = null
+        realtimeClient.disconnect()
         _activeLobbyId.value = null
         _activeLobby.value = null
         _lobbyMemberStates.value = emptyList()
@@ -458,17 +529,38 @@ class OnlineViewModel(
         _pingMs.value = if (prev <= 0) {
             clamped
         } else {
-            (prev * 0.65f + clamped * 0.35f).toInt().coerceIn(1, 999)
+            (prev * 0.55f + clamped * 0.45f).toInt().coerceIn(1, 999)
         }
     }
 
     private fun startLobbyPolling(lobbyId: String) {
         lobbyPollJob?.cancel()
+        realtimeClient.connect(lobbyId, currentUserId)
         lobbyPollJob = viewModelScope.launch {
             var matchTickCount = 0
             while (isActive && _activeLobbyId.value == lobbyId) {
                 val inMatch = _activeLobby.value?.status == "playing"
-                if (inMatch && matchTickCount % 20 != 0) {
+                val wsLive = realtimeClient.isJoined
+
+                if (inMatch && wsLive) {
+                    // WebSocket handles 30Hz state/hit/bomb sync; keep lightweight DB snapshot every 1.6s
+                    repository.fetchLobbySnapshot(lobbyId)
+                        .onSuccess { snapshot ->
+                            if (snapshot == null) {
+                                _statusBanner.value = "Хост закрыл лобби."
+                                realtimeClient.disconnect()
+                                _activeLobbyId.value = null
+                                _activeLobby.value = null
+                                _lobbyMemberStates.value = emptyList()
+                                _pingMs.value = 0
+                                return@launch
+                            }
+                            _activeLobby.value = snapshot.first
+                            _lobbyMemberStates.value = snapshot.second
+                        }
+                    delay(1_600L)
+                } else if (inMatch && matchTickCount % 20 != 0) {
+                    // Automatic fast PostgREST fallback when WebSocket is reconnecting
                     repository.fetchLobbyMembersFast(lobbyId)
                         .onSuccess { (fastMembers, rttMs) ->
                             recordRtt(rttMs)
@@ -479,15 +571,18 @@ class OnlineViewModel(
                             }
                         }
                     matchTickCount++
-                    delay(65L)
+                    delay(55L)
                 } else {
                     val t0 = android.os.SystemClock.elapsedRealtime()
                     repository.fetchLobbySnapshot(lobbyId)
                         .onSuccess { snapshot ->
-                            val rtt = ((android.os.SystemClock.elapsedRealtime() - t0) / 2L).toInt().coerceIn(1, 999)
-                            recordRtt(rtt)
+                            if (!wsLive) {
+                                val rtt = ((android.os.SystemClock.elapsedRealtime() - t0) / 2L).toInt().coerceIn(1, 999)
+                                recordRtt(rtt)
+                            }
                             if (snapshot == null) {
                                 _statusBanner.value = "Хост закрыл лобби."
+                                realtimeClient.disconnect()
                                 _activeLobbyId.value = null
                                 _activeLobby.value = null
                                 _lobbyMemberStates.value = emptyList()
@@ -499,10 +594,10 @@ class OnlineViewModel(
                         }
                     if (_activeLobby.value?.status == "playing") {
                         matchTickCount++
-                        delay(65L)
+                        delay(if (realtimeClient.isJoined) 1_600L else 55L)
                     } else {
                         matchTickCount = 0
-                        delay(550L)
+                        delay(500L)
                     }
                 }
             }
@@ -511,6 +606,7 @@ class OnlineViewModel(
 
     override fun onCleared() {
         lobbyPollJob?.cancel()
+        realtimeClient.disconnect()
         super.onCleared()
     }
 
@@ -518,11 +614,12 @@ class OnlineViewModel(
         fun factory(
             currentUserId: String,
             initialLoginName: String,
-            repository: SupabaseOnlineRepository
+            repository: SupabaseOnlineRepository,
+            authManager: SupabaseAuthManager
         ): ViewModelProvider.Factory = object : ViewModelProvider.Factory {
             @Suppress("UNCHECKED_CAST")
             override fun <T : ViewModel> create(modelClass: Class<T>): T {
-                return OnlineViewModel(currentUserId, initialLoginName, repository) as T
+                return OnlineViewModel(currentUserId, initialLoginName, repository, authManager) as T
             }
         }
     }

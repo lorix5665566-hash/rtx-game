@@ -147,8 +147,10 @@ fun GameplayScreen(
         weaponName: String,
         kills: Int,
         deaths: Int,
-        outgoingHit: com.example.model.OutgoingHitEvent?
+        outgoingHit: com.example.model.OutgoingHitEvent?,
+        bombSync: com.example.model.BombSyncEvent?
     ) -> Unit,
+    onPublishBombSync: (lobbyId: String, event: com.example.model.BombSyncEvent) -> Unit = { _, _ -> },
     onSetPaused: (Boolean) -> Unit,
     onRestart: () -> Unit,
     onOpenSettings: () -> Unit,
@@ -177,18 +179,19 @@ fun GameplayScreen(
         }
     }
 
-    // Feed live remote human player transforms & PvP hits directly into GameEngine!
+    // Feed PostgREST fallback member snapshots into GameEngine
     LaunchedEffect(remoteMemberStates, currentUserId) {
         if (engine.matchConfig.isMultiplayer && currentUserId.isNotBlank()) {
             engine.applyRemoteStates(currentUserId, remoteMemberStates)
         }
     }
 
-    // Responsive ~15Hz (65ms) publish loop with immediate flush on hits, weapon swaps, or death!
+    // Ultra-responsive ~30Hz (33ms) Realtime WebSocket publish loop with immediate flush on hits, C4 bomb events, weapon swaps, or death!
     LaunchedEffect(activeLobbyId, engine.matchConfig.isMultiplayer) {
         val lobbyId = activeLobbyId
         if (!engine.matchConfig.isMultiplayer || lobbyId.isNullOrBlank()) return@LaunchedEffect
         var lastSentHitSeq = 0
+        var lastSentBombSeq = 0
         var lastSentWeapon = ""
         var lastSentDead = false
         var lastSendTimeMs = 0L
@@ -196,11 +199,19 @@ fun GameplayScreen(
             val nowMs = android.os.SystemClock.elapsedRealtime()
             val snap = engine.latestHud
             val hit = engine.lastOutgoingHit
+            val bombEv = engine.latestBombSync
             val hasNewHit = hit != null && hit.seq > lastSentHitSeq
+            val hasNewBomb = bombEv != null && bombEv.seq > lastSentBombSeq
             val weaponChanged = snap.activeWeapon.name != lastSentWeapon
             val deadChanged = snap.isPlayerDead != lastSentDead
-            val timeElapsed = (nowMs - lastSendTimeMs) >= 65L
-            if (hasNewHit || weaponChanged || deadChanged || timeElapsed) {
+            val timeElapsed = (nowMs - lastSendTimeMs) >= 33L
+
+            if (hasNewBomb && bombEv != null) {
+                lastSentBombSeq = bombEv.seq
+                onPublishBombSync(lobbyId, bombEv)
+            }
+
+            if (hasNewHit || hasNewBomb || weaponChanged || deadChanged || timeElapsed) {
                 val hitToSend = if (hasNewHit && hit != null) {
                     lastSentHitSeq = hit.seq
                     hit
@@ -223,10 +234,11 @@ fun GameplayScreen(
                     snap.activeWeapon.name,
                     snap.kills,
                     snap.deaths,
-                    hitToSend
+                    hitToSend,
+                    engine.latestBombSync
                 )
             }
-            delay(22L)
+            delay(16L)
         }
     }
 
@@ -347,6 +359,11 @@ fun GameplayScreen(
                         )
                     )
             )
+        }
+
+        // 4b. Dramatic Bloodied Death Screen Vignette + Edge Splatters for ~3.8s after death
+        if (hud.deathBloodAlpha > 0.01f) {
+            BloodiedDeathOverlay(alpha = hud.deathBloodAlpha)
         }
 
         // 5. AWP 4x Optical Scope Overlay OR Dynamic Precision Crosshair
@@ -512,7 +529,7 @@ fun GameplayScreen(
                 exit = fadeOut(tween(180)) + shrinkVertically()
             ) {
                 val secsLeft = hud.warmupTimeSec.roundToInt().coerceAtLeast(0)
-                val warmupTimeFormatted = String.format("0:%02d", secsLeft)
+                val warmupTimeFormatted = String.format("%d:%02d", secsLeft / 60, secsLeft % 60)
                 Surface(
                     color = Color(0xDC0C1622),
                     shape = CutCornerShape(topStart = m.s(9f), bottomEnd = m.s(9f)),
@@ -556,8 +573,88 @@ fun GameplayScreen(
                 }
             }
 
+            // 8-second Round Start Preparation (Freeze Time) Banner with quick Buy Menu trigger
             AnimatedVisibility(
-                visible = hud.bannerText.isNotEmpty() && !hud.isWarmup,
+                visible = hud.isFreezeTime && !hud.isWarmup && !isPaused && !hud.isMatchFinished,
+                enter = fadeIn(tween(200)) + expandVertically(),
+                exit = fadeOut(tween(180)) + shrinkVertically()
+            ) {
+                val freezeSecs = kotlin.math.ceil(hud.freezeTimeSec.toDouble()).toInt().coerceAtLeast(1)
+                Surface(
+                    color = Color(0xDC0B1726),
+                    shape = CutCornerShape(topStart = m.s(9f), bottomEnd = m.s(9f)),
+                    border = BorderStroke(1.2.dp, IceCyan.copy(alpha = 0.88f))
+                ) {
+                    Row(
+                        modifier = Modifier.padding(horizontal = m.s(11f), vertical = m.s(4f)),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(m.s(10f))
+                    ) {
+                        Text(
+                            text = "ПОДГОТОВКА • 0:0$freezeSecs • ЗАКУПКА ОРУЖИЯ",
+                            fontSize = m.sp(10.5f),
+                            fontWeight = FontWeight.ExtraBold,
+                            color = IceCyan
+                        )
+                        if (hud.canBuy && !isShopOpen) {
+                            Row(
+                                modifier = Modifier
+                                    .clip(RoundedCornerShape(m.s(6f)))
+                                    .background(RtxEmerald)
+                                    .clickable {
+                                        engine.isFiring = false
+                                        isShopOpen = true
+                                    }
+                                    .padding(horizontal = m.s(8f), vertical = m.s(4f))
+                                    .testTag("freeze_buy_shortcut_button"),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(m.s(3f))
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.ShoppingCart,
+                                    contentDescription = "Открыть магазин",
+                                    tint = ObsidianVoid,
+                                    modifier = Modifier.size(m.s(12f))
+                                )
+                                Text(
+                                    text = "МАГАЗИН",
+                                    fontSize = m.sp(9f),
+                                    fontWeight = FontWeight.Black,
+                                    color = ObsidianVoid
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+
+            // High-visibility CT alert when C4 is planted so CT always knows site & distance to defuse!
+            AnimatedVisibility(
+                visible = hud.bombState == BombState.PLANTED && hud.playerSide == TeamSide.CT && !hud.isPlayerDead && !hud.isWarmup && !isPaused,
+                enter = fadeIn(tween(180)) + expandVertically(),
+                exit = fadeOut(tween(180)) + shrinkVertically()
+            ) {
+                Surface(
+                    color = Color(0xD91A070B),
+                    shape = RoundedCornerShape(m.s(6f)),
+                    border = BorderStroke(1.2.dp, ThreatCrimson)
+                ) {
+                    Text(
+                        text = if (hud.canDefuseBomb) {
+                            "БОМБА C4 РЯДОМ — УДЕРЖИВАЙТЕ КНОПКУ РАЗМИНИРОВАНИЯ!"
+                        } else {
+                            "C4 НА ТОЧКЕ ${hud.bombSiteLabel.ifBlank { "A" }} • ${hud.bombDistanceMeters}м — ИДИТЕ РАЗМИНИРОВАТЬ!"
+                        },
+                        fontSize = m.sp(9.5f),
+                        fontWeight = FontWeight.Black,
+                        color = ThreatCrimson,
+                        modifier = Modifier.padding(horizontal = m.s(10f), vertical = m.s(3f))
+                    )
+                }
+            }
+
+            AnimatedVisibility(
+                visible = hud.bannerText.isNotEmpty() && !hud.isWarmup && !hud.isFreezeTime,
                 enter = fadeIn(tween(200)) + scaleIn(initialScale = 0.94f, animationSpec = tween(200)),
                 exit = fadeOut(tween(200)) + scaleOut(targetScale = 0.96f, animationSpec = tween(200))
             ) {
@@ -698,9 +795,48 @@ fun GameplayScreen(
             )
         }
 
-        // 10. Dead Spectator Banner
+        // 10. Death Recap Card (Killer + Damage Given / Taken) & Ally Spectator Control Bar
+        Column(
+            modifier = Modifier
+                .align(Alignment.BottomCenter)
+                .safeDrawingPadding()
+                .padding(bottom = m.s(12f), start = m.s(12f), end = m.s(12f)),
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.spacedBy(m.s(8f))
+        ) {
+            val recap = hud.deathRecap
+            AnimatedVisibility(
+                visible = recap != null && !hud.isMatchFinished && !isPaused,
+                enter = fadeIn(tween(220)) + scaleIn(initialScale = 0.93f, animationSpec = tween(220)),
+                exit = fadeOut(tween(280)) + shrinkVertically()
+            ) {
+                if (recap != null) {
+                    DeathRecapCard(recap = recap)
+                }
+            }
+
+            AnimatedVisibility(
+                visible = hud.isPlayerDead && hud.isSpectatingAlly && !hud.isMatchFinished && !isPaused,
+                enter = fadeIn(tween(200)) + expandVertically(),
+                exit = fadeOut(tween(180)) + shrinkVertically()
+            ) {
+                SpectatorControlBar(
+                    allyName = hud.spectatedAllyName,
+                    allyHp = hud.spectatedAllyHp,
+                    allyArmor = hud.spectatedAllyArmor,
+                    allyWeapon = hud.spectatedAllyWeapon,
+                    allyTeam = hud.playerSide,
+                    allyIndex = hud.spectatedAllyIndex,
+                    allyCount = hud.spectatedAllyCount,
+                    onPrevAlly = { engine.spectatePrevAlly() },
+                    onNextAlly = { engine.spectateNextAlly() }
+                )
+            }
+        }
+
+        // Fallback compact Dead Banner ONLY when not spectating an ally and no recap card is visible
         AnimatedVisibility(
-            visible = hud.isPlayerDead && !hud.isMatchFinished && !isPaused,
+            visible = hud.isPlayerDead && !hud.isSpectatingAlly && hud.deathRecap == null && !hud.isMatchFinished && !isPaused,
             enter = fadeIn(tween(220)) + scaleIn(initialScale = 0.92f, animationSpec = tween(220)),
             exit = fadeOut(tween(180)),
             modifier = Modifier.align(Alignment.Center)
@@ -938,6 +1074,7 @@ private fun Cs2ScoreboardBar(hud: HudSnapshot) {
     val m = LocalUiMetrics.current
     val timeSecInt = when {
         hud.isWarmup -> hud.warmupTimeSec.roundToInt().coerceAtLeast(0)
+        hud.isFreezeTime -> kotlin.math.ceil(hud.freezeTimeSec.toDouble()).toInt().coerceAtLeast(1)
         hud.bombState == BombState.PLANTED -> hud.bombCountdownSec.roundToInt().coerceAtLeast(0)
         else -> hud.roundTimeSec.roundToInt().coerceAtLeast(0)
     }
@@ -952,6 +1089,7 @@ private fun Cs2ScoreboardBar(hud: HudSnapshot) {
             width = 1.dp,
             color = when {
                 hud.isWarmup -> TacticalAmber.copy(alpha = 0.85f)
+                hud.isFreezeTime -> IceCyan.copy(alpha = 0.85f)
                 hud.bombState == BombState.PLANTED -> ThreatCrimson
                 else -> Color.White.copy(alpha = 0.16f)
             }
@@ -991,6 +1129,19 @@ private fun Cs2ScoreboardBar(hud: HudSnapshot) {
                         fontSize = m.sp(7.5f),
                         fontWeight = FontWeight.Bold,
                         color = TacticalAmber
+                    )
+                } else if (hud.isFreezeTime) {
+                    Text(
+                        text = timeText,
+                        fontSize = m.sp(12.5f),
+                        fontWeight = FontWeight.Black,
+                        color = IceCyan
+                    )
+                    Text(
+                        text = "ПОДГОТОВКА",
+                        fontSize = m.sp(7.5f),
+                        fontWeight = FontWeight.Bold,
+                        color = IceCyan
                     )
                 } else if (hud.bombState == BombState.PLANTED) {
                     Text(

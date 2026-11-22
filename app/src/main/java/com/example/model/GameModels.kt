@@ -550,6 +550,31 @@ data class RadarBlip(
     val isBomb: Boolean = false
 )
 
+data class BombSyncEvent(
+    val seq: Int = 0,
+    val state: BombState = BombState.CARRIED,
+    val x: Float = 0f,
+    val y: Float = 0f,
+    val z: Float = 0f,
+    val siteLabel: String = "",
+    val countdownSec: Float = 35f,
+    val roundNumber: Int = 1,
+    val isWarmup: Boolean = false,
+    val senderUid: String = ""
+)
+
+data class DeathRecapInfo(
+    val killerName: String = "",
+    val killerWeapon: String = "",
+    val killerTeam: TeamSide = TeamSide.T,
+    val wasHeadshot: Boolean = false,
+    val killedByBomb: Boolean = false,
+    val damageGiven: Int = 0,
+    val hitsGiven: Int = 0,
+    val damageTaken: Int = 0,
+    val hitsTaken: Int = 0
+)
+
 data class HudSnapshot(
     val mapId: ArenaMapId = ArenaMapId.MIRAGE,
     val hp: Int = 100,
@@ -579,6 +604,7 @@ data class HudSnapshot(
     val roundsToWin: Int = 8,
     val roundNumber: Int = 1,
     val roundTimeSec: Float = 105f,
+    val freezeTimeSec: Float = 0f,
     val isWarmup: Boolean = false,
     val warmupTimeSec: Float = 0f,
     val ctAlive: Int = 5,
@@ -586,6 +612,7 @@ data class HudSnapshot(
     val bombState: BombState = BombState.CARRIED,
     val bombSiteLabel: String = "",
     val bombCountdownSec: Float = 35f,
+    val bombDistanceMeters: Int = 0,
     val inPlantZoneLabel: String = "",
     val canPlantBomb: Boolean = false,
     val canDefuseBomb: Boolean = false,
@@ -603,6 +630,15 @@ data class HudSnapshot(
     val hitMarkerAlpha: Float = 0f,
     val isHeadshotHit: Boolean = false,
     val damageFlashAlpha: Float = 0f,
+    val deathBloodAlpha: Float = 0f,
+    val deathRecap: DeathRecapInfo? = null,
+    val isSpectatingAlly: Boolean = false,
+    val spectatedAllyName: String = "",
+    val spectatedAllyHp: Int = 0,
+    val spectatedAllyArmor: Int = 0,
+    val spectatedAllyWeapon: String = "",
+    val spectatedAllyIndex: Int = 0,
+    val spectatedAllyCount: Int = 0,
     val crosshairSpread: Float = 0f,
     val isMatchFinished: Boolean = false,
     val isPlayerTeamWinner: Boolean = false,
@@ -615,6 +651,9 @@ data class HudSnapshot(
     val pingMs: Int = 0,
     val scoreboardRows: List<ScoreboardRow> = emptyList()
 ) {
+    val isFreezeTime: Boolean
+        get() = freezeTimeSec > 0.05f
+
     val accuracyPercent: Int
         get() = if (shotsFired <= 0) 0 else ((shotsHit * 100f) / shotsFired).toInt().coerceIn(0, 100)
 }
