@@ -47,8 +47,8 @@ class SupabaseAuthManager(context: Context) {
         password: String,
         confirmPassword: String
     ): AuthActionResult = withContext(Dispatchers.IO) {
-        if (!SupabaseConfig.isConfigured) {
-            return@withContext AuthActionResult.Error(SupabaseConfig.MISSING_CONFIG_MESSAGE)
+        SupabaseConfig.configValidationError()?.let {
+            return@withContext AuthActionResult.Error(it)
         }
         val login = rawLogin.trim()
         val validationError = validateCredentials(login, password)
@@ -64,10 +64,11 @@ class SupabaseAuthManager(context: Context) {
             put("data", JSONObject().apply { put("display_name", login) })
         }
 
-        val req = Request.Builder()
-            .url("${SupabaseConfig.baseUrl}/auth/v1/signup")
-            .addHeader("apikey", SupabaseConfig.anonKey)
-            .addHeader("Content-Type", "application/json")
+        val req = SupabaseConfig.applyPublicAuthHeaders(
+            Request.Builder()
+                .url("${SupabaseConfig.baseUrl}/auth/v1/signup")
+                .addHeader("Content-Type", "application/json")
+        )
             .post(body.toString().toRequestBody(JSON_MEDIA))
             .build()
 
@@ -76,7 +77,7 @@ class SupabaseAuthManager(context: Context) {
                 val text = resp.body?.string().orEmpty()
                 val json = runCatching { JSONObject(text) }.getOrNull()
                 if (!resp.isSuccessful) {
-                    return@use AuthActionResult.Error(mapAuthError(json, text, isSignup = true))
+                    return@use AuthActionResult.Error(mapAuthError(resp.code, json, text, isSignup = true))
                 }
                 val parsed = parseSession(json, fallbackLogin = login)
                 if (parsed == null) {
@@ -97,8 +98,8 @@ class SupabaseAuthManager(context: Context) {
         rawLogin: String,
         password: String
     ): AuthActionResult = withContext(Dispatchers.IO) {
-        if (!SupabaseConfig.isConfigured) {
-            return@withContext AuthActionResult.Error(SupabaseConfig.MISSING_CONFIG_MESSAGE)
+        SupabaseConfig.configValidationError()?.let {
+            return@withContext AuthActionResult.Error(it)
         }
         val login = rawLogin.trim()
         val validationError = validateCredentials(login, password)
@@ -110,10 +111,11 @@ class SupabaseAuthManager(context: Context) {
             put("password", password)
         }
 
-        val req = Request.Builder()
-            .url("${SupabaseConfig.baseUrl}/auth/v1/token?grant_type=password")
-            .addHeader("apikey", SupabaseConfig.anonKey)
-            .addHeader("Content-Type", "application/json")
+        val req = SupabaseConfig.applyPublicAuthHeaders(
+            Request.Builder()
+                .url("${SupabaseConfig.baseUrl}/auth/v1/token?grant_type=password")
+                .addHeader("Content-Type", "application/json")
+        )
             .post(body.toString().toRequestBody(JSON_MEDIA))
             .build()
 
@@ -122,7 +124,7 @@ class SupabaseAuthManager(context: Context) {
                 val text = resp.body?.string().orEmpty()
                 val json = runCatching { JSONObject(text) }.getOrNull()
                 if (!resp.isSuccessful) {
-                    return@use AuthActionResult.Error(mapAuthError(json, text, isSignup = false))
+                    return@use AuthActionResult.Error(mapAuthError(resp.code, json, text, isSignup = false))
                 }
                 val parsed = parseSession(json, fallbackLogin = login)
                     ?: return@use AuthActionResult.Error("Сервер вернул некорректную сессию.")
@@ -149,10 +151,11 @@ class SupabaseAuthManager(context: Context) {
 
         val refreshed = withContext(Dispatchers.IO) {
             val body = JSONObject().apply { put("refresh_token", current.refreshToken) }
-            val req = Request.Builder()
-                .url("${SupabaseConfig.baseUrl}/auth/v1/token?grant_type=refresh_token")
-                .addHeader("apikey", SupabaseConfig.anonKey)
-                .addHeader("Content-Type", "application/json")
+            val req = SupabaseConfig.applyPublicAuthHeaders(
+                Request.Builder()
+                    .url("${SupabaseConfig.baseUrl}/auth/v1/token?grant_type=refresh_token")
+                    .addHeader("Content-Type", "application/json")
+            )
                 .post(body.toString().toRequestBody(JSON_MEDIA))
                 .build()
             runCatching {
@@ -239,11 +242,17 @@ class SupabaseAuthManager(context: Context) {
         )
     }
 
-    private fun mapAuthError(json: JSONObject?, raw: String, isSignup: Boolean): String {
-        val msg = (json?.optString("msg").orEmpty()
-            .ifBlank { json?.optString("error_description").orEmpty() }
-            .ifBlank { json?.optString("message").orEmpty() }
-            .ifBlank { raw }).lowercase()
+    private fun mapAuthError(statusCode: Int, json: JSONObject?, raw: String, isSignup: Boolean): String {
+        val rawDetail = listOf(
+            json?.optString("msg").orEmpty(),
+            json?.optString("error_description").orEmpty(),
+            json?.optString("message").orEmpty(),
+            json?.optString("error").orEmpty(),
+            json?.optString("hint").orEmpty()
+        ).firstOrNull { it.isNotBlank() }
+            ?: raw.trim().replace(Regex("\\s+"), " ").take(140)
+        val msg = rawDetail.lowercase()
+        val actionLabel = if (isSignup) "Не удалось зарегистрироваться" else "Не удалось войти"
         return when {
             msg.contains("already registered") || msg.contains("user_already_exists") ->
                 "Аккаунт с этим логином уже существует. Выберите «ВОЙТИ»."
@@ -251,12 +260,20 @@ class SupabaseAuthManager(context: Context) {
                 "Неверный логин или пароль. Если у вас ещё нет аккаунта, выберите «РЕГИСТРАЦИЯ»."
             msg.contains("email not confirmed") ->
                 "В Supabase включено подтверждение почты. Отключите «Confirm email» в настройках Email провайдера."
+            msg.contains("invalid api key") || msg.contains("no api key") ->
+                "Неверный ключ SUPABASE_ANON_KEY (HTTP $statusCode). Скопируйте Publishable key или anon public из Project Settings → API Keys."
+            msg.contains("secret api key") || (statusCode == 401 && msg.contains("forbidden")) ->
+                "В SUPABASE_ANON_KEY вставлен секретный ключ. Замените его на публичный Publishable key или anon public."
+            msg.contains("signups not allowed") || msg.contains("signup_disabled") ->
+                "В Supabase отключена регистрация. Включите «Allow new users to sign up» в Authentication → Sign In / Providers → Email."
+            statusCode == 404 ->
+                "Неверный адрес SUPABASE_URL (HTTP 404). Нужен Project URL вида https://xxxx.supabase.co из Project Settings → Data API."
             msg.contains("password") && msg.contains("6") ->
                 "Пароль должен быть не короче 6 символов."
             msg.contains("rate limit") ->
                 "Слишком много попыток. Подождите немного и попробуйте снова."
-            isSignup -> "Не удалось зарегистрироваться: ${json?.optString("msg")?.ifBlank { "проверьте настройки Supabase" } ?: "ошибка сервера"}"
-            else -> "Не удалось войти: ${json?.optString("msg")?.ifBlank { "проверьте логин и пароль" } ?: "ошибка сервера"}"
+            rawDetail.isNotBlank() -> "$actionLabel (HTTP $statusCode): $rawDetail"
+            else -> "$actionLabel (HTTP $statusCode): проверьте SUPABASE_URL и SUPABASE_ANON_KEY."
         }
     }
 
@@ -295,6 +312,6 @@ class SupabaseAuthManager(context: Context) {
         private const val KEY_LOGIN_NAME = "login_name"
         private val JSON_MEDIA = "application/json; charset=utf-8".toMediaType()
         private val LOGIN_REGEX = Regex("^[a-zA-Z0-9_.\\-а-яА-ЯёЁ@]+$")
-        private val ASCII_LOGIN_REGEX = Regex("^[a-z0-9_.\\-]+$")
+        private val ASCII_LOGIN_REGEX = Regex("^[a-z0-9_\\-]+$")
     }
 }

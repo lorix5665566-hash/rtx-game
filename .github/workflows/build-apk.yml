@@ -53,8 +53,10 @@ jobs:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY }}
         run: |
-          if [ -n "$SUPABASE_URL" ] && [ -n "$SUPABASE_ANON_KEY" ]; then
-            printf "SUPABASE_URL=%s\nSUPABASE_ANON_KEY=%s\n" "$SUPABASE_URL" "$SUPABASE_ANON_KEY" > .env
+          CLEAN_URL=$(printf '%s' "$SUPABASE_URL" | tr -d '\r\n"' | xargs)
+          CLEAN_KEY=$(printf '%s' "$SUPABASE_ANON_KEY" | tr -d '\r\n"' | xargs)
+          if [ -n "$CLEAN_URL" ] && [ -n "$CLEAN_KEY" ]; then
+            printf "SUPABASE_URL=%s\nSUPABASE_ANON_KEY=%s\n" "$CLEAN_URL" "$CLEAN_KEY" > .env
             echo "Configured .env from GitHub Actions Secrets."
           else
             echo "::warning::SUPABASE_URL or SUPABASE_ANON_KEY not set in GitHub Secrets; APK will build with placeholder values."
