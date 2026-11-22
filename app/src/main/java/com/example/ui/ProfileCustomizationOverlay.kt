@@ -32,11 +32,13 @@ import androidx.compose.foundation.shape.CutCornerShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.Logout
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.Person
 import androidx.compose.material.icons.filled.PhotoLibrary
+import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Save
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
@@ -48,6 +50,7 @@ import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -60,6 +63,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.example.online.AvatarPresets
@@ -78,10 +82,13 @@ import kotlinx.coroutines.launch
 
 @Composable
 fun ProfileCustomizationOverlay(
-    profile: PlayerProfile,
+    profileState: OnlineUiState<PlayerProfile>,
+    fallbackLoginName: String,
     isSaving: Boolean,
     statusBanner: String?,
+    onRetryLoadProfile: () -> Unit,
     onSaveProfile: (displayName: String, avatarData: String, onSaved: () -> Unit) -> Unit,
+    onSignOut: () -> Unit,
     onClose: () -> Unit
 ) {
     BackHandler { onClose() }
@@ -90,8 +97,19 @@ fun ProfileCustomizationOverlay(
     val scope = rememberCoroutineScope()
     val m = LocalUiMetrics.current
 
-    var nameInput by remember(profile.userId) { mutableStateOf(profile.displayName) }
-    var selectedAvatar by remember(profile.userId) { mutableStateOf(profile.avatarData) }
+    val loadedProfile = (profileState as? OnlineUiState.Success)?.data
+    var nameInput by remember { mutableStateOf(loadedProfile?.displayName ?: fallbackLoginName) }
+    var selectedAvatar by remember { mutableStateOf(loadedProfile?.avatarData ?: AvatarPresets.DEFAULT_KEY) }
+    var initializedForUid by remember { mutableStateOf(loadedProfile?.userId) }
+
+    LaunchedEffect(loadedProfile?.userId) {
+        if (loadedProfile != null && initializedForUid != loadedProfile.userId) {
+            nameInput = loadedProfile.displayName
+            selectedAvatar = loadedProfile.avatarData
+            initializedForUid = loadedProfile.userId
+        }
+    }
+
     var copiedId by remember { mutableStateOf(false) }
     var isProcessingPhoto by remember { mutableStateOf(false) }
     var localError by remember { mutableStateOf<String?>(null) }
@@ -153,7 +171,7 @@ fun ProfileCustomizationOverlay(
                     horizontalArrangement = Arrangement.SpaceBetween,
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Column {
+                    Column(modifier = Modifier.weight(1f)) {
                         Text(
                             text = "КАСТОМИЗАЦИЯ ПРОФИЛЯ",
                             fontSize = m.sp(15f),
@@ -177,261 +195,371 @@ fun ProfileCustomizationOverlay(
                     }
                 }
 
-                // Body: Left Live Preview & ID | Right Name + Gallery Picker + 8 Tactical Avatars
-                Row(
-                    modifier = Modifier
-                        .weight(1f)
-                        .fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(m.s(14f))
-                ) {
-                    // Left Preview Card
-                    Surface(
-                        color = Color(0xCC0A111D),
-                        shape = RoundedCornerShape(m.s(12f)),
-                        border = BorderStroke(1.dp, BorderSteel),
-                        modifier = Modifier
-                            .weight(0.85f)
-                            .fillMaxHeight()
-                    ) {
-                        Column(
+                // Body
+                when (profileState) {
+                    is OnlineUiState.Loading -> {
+                        Box(
                             modifier = Modifier
-                                .fillMaxSize()
-                                .verticalScroll(rememberScrollState())
-                                .padding(m.s(12f)),
-                            horizontalAlignment = Alignment.CenterHorizontally,
-                            verticalArrangement = Arrangement.spacedBy(m.s(8f))
+                                .weight(1f)
+                                .fillMaxWidth(),
+                            contentAlignment = Alignment.Center
                         ) {
-                            PlayerAvatar(
-                                avatarData = selectedAvatar,
-                                size = m.s(76f),
-                                borderColor = RtxEmerald,
-                                borderWidth = 2.2.dp
-                            )
-
-                            Text(
-                                text = nameInput.trim().ifEmpty { profile.displayName },
-                                fontSize = m.sp(14f),
-                                fontWeight = FontWeight.Black,
-                                color = TextPrimary,
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis
-                            )
-
-                            // Prominent Copyable 6-Digit Player ID
-                            Row(
-                                verticalAlignment = Alignment.CenterVertically,
-                                horizontalArrangement = Arrangement.spacedBy(m.s(6f)),
-                                modifier = Modifier
-                                    .clip(RoundedCornerShape(m.s(8f)))
-                                    .background(TacticalAmber.copy(alpha = 0.16f))
-                                    .border(1.2.dp, TacticalAmber.copy(alpha = 0.70f), RoundedCornerShape(m.s(8f)))
-                                    .clickable {
-                                        val cm = context.getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
-                                        cm?.setPrimaryClip(ClipData.newPlainText("Player ID", profile.shortId))
-                                        copiedId = true
-                                    }
-                                    .padding(horizontal = m.s(12f), vertical = m.s(6f))
-                                    .testTag("profile_copy_id_button")
+                            Column(
+                                horizontalAlignment = Alignment.CenterHorizontally,
+                                verticalArrangement = Arrangement.spacedBy(m.s(10f))
                             ) {
+                                CircularProgressIndicator(color = RtxEmerald)
                                 Text(
-                                    text = if (copiedId) "СКОПИРОВАНО: ${profile.shortId}" else "МОЙ ID: ${profile.shortId}",
+                                    text = "Загружаем или создаём ваш 6-значный ID в Supabase...",
                                     fontSize = m.sp(11f),
-                                    fontWeight = FontWeight.Black,
-                                    color = if (copiedId) RtxEmerald else TacticalAmber
-                                )
-                                Icon(
-                                    imageVector = if (copiedId) Icons.Default.Check else Icons.Default.ContentCopy,
-                                    contentDescription = "Скопировать ID",
-                                    tint = if (copiedId) RtxEmerald else TacticalAmber,
-                                    modifier = Modifier.size(m.s(14f))
+                                    color = TextSecondary,
+                                    textAlign = TextAlign.Center
                                 )
                             }
+                        }
+                    }
 
-                            Button(
-                                onClick = {
-                                    photoPickerLauncher.launch(
-                                        PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)
-                                    )
-                                },
-                                enabled = !isProcessingPhoto && !isSaving,
-                                shape = CutCornerShape(topStart = m.s(8f), bottomEnd = m.s(8f)),
-                                colors = ButtonDefaults.buttonColors(
-                                    containerColor = IceCyan.copy(alpha = 0.22f),
-                                    contentColor = IceCyan
-                                ),
-                                border = BorderStroke(1.dp, IceCyan.copy(alpha = 0.72f)),
-                                contentPadding = PaddingValues(horizontal = m.s(10f), vertical = m.s(7f)),
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .height(m.s(40f).coerceAtLeast(48.dp))
-                                    .testTag("profile_pick_photo_button")
+                    is OnlineUiState.Error -> {
+                        Box(
+                            modifier = Modifier
+                                .weight(1f)
+                                .fillMaxWidth(),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Column(
+                                horizontalAlignment = Alignment.CenterHorizontally,
+                                verticalArrangement = Arrangement.spacedBy(m.s(10f)),
+                                modifier = Modifier.widthIn(max = 520.dp)
                             ) {
-                                if (isProcessingPhoto) {
-                                    CircularProgressIndicator(
-                                        modifier = Modifier.size(m.s(16f)),
-                                        color = IceCyan,
-                                        strokeWidth = 2.dp
+                                Surface(
+                                    color = ThreatCrimson.copy(alpha = 0.16f),
+                                    shape = RoundedCornerShape(m.s(10f)),
+                                    border = BorderStroke(1.dp, ThreatCrimson.copy(alpha = 0.65f))
+                                ) {
+                                    Text(
+                                        text = profileState.message,
+                                        fontSize = m.sp(10.5f),
+                                        fontWeight = FontWeight.SemiBold,
+                                        color = Color(0xFFFFB8B8),
+                                        textAlign = TextAlign.Center,
+                                        modifier = Modifier.padding(m.s(12f))
                                     )
-                                } else {
-                                    Icon(Icons.Default.PhotoLibrary, contentDescription = null, modifier = Modifier.size(m.s(16f)))
+                                }
+                                Button(
+                                    onClick = onRetryLoadProfile,
+                                    shape = CutCornerShape(topStart = m.s(8f), bottomEnd = m.s(8f)),
+                                    colors = ButtonDefaults.buttonColors(
+                                        containerColor = RtxEmerald,
+                                        contentColor = ObsidianVoid
+                                    ),
+                                    modifier = Modifier
+                                        .height(m.s(40f).coerceAtLeast(48.dp))
+                                        .testTag("profile_retry_id_button")
+                                ) {
+                                    Icon(Icons.Default.Refresh, contentDescription = null, modifier = Modifier.size(m.s(17f)))
                                     Spacer(Modifier.width(m.s(6f)))
-                                    Text("ФОТО ИЗ ГАЛЕРЕИ", fontSize = m.sp(10f), fontWeight = FontWeight.Black)
+                                    Text("СОЗДАТЬ / ОБНОВИТЬ ID", fontSize = m.sp(11f), fontWeight = FontWeight.Black)
                                 }
                             }
                         }
                     }
 
-                    // Right Editor Column
-                    Column(
-                        modifier = Modifier
-                            .weight(1.35f)
-                            .fillMaxHeight()
-                            .verticalScroll(rememberScrollState()),
-                        verticalArrangement = Arrangement.spacedBy(m.s(8f))
-                    ) {
-                        Text(
-                            text = "ИМЯ ИГРОКА (НИКНЕЙМ)",
-                            fontSize = m.sp(9.5f),
-                            fontWeight = FontWeight.Bold,
-                            color = TextSecondary
-                        )
-                        OutlinedTextField(
-                            value = nameInput,
-                            onValueChange = { raw ->
-                                nameInput = raw.take(20)
-                                localError = null
-                            },
-                            placeholder = { Text("От 3 до 20 символов", color = TextSecondary) },
-                            leadingIcon = { Icon(Icons.Default.Person, contentDescription = null, modifier = Modifier.size(m.s(17f))) },
-                            singleLine = true,
-                            colors = fieldColors,
+                    is OnlineUiState.Success -> {
+                        val profile = profileState.data
+                        Row(
                             modifier = Modifier
-                                .fillMaxWidth()
-                                .testTag("profile_name_input")
-                        )
-
-                        Text(
-                            text = "ВСТРОЕННЫЕ ТАКТИЧЕСКИЕ АВАТАРКИ",
-                            fontSize = m.sp(9.5f),
-                            fontWeight = FontWeight.Bold,
-                            color = TextSecondary
-                        )
-
-                        // 2 rows x 4 columns of built-in tactical avatars
-                        val rows = remember { AvatarPresets.all.chunked(4) }
-                        rows.forEach { rowPresets ->
-                            Row(
-                                modifier = Modifier.fillMaxWidth(),
-                                horizontalArrangement = Arrangement.spacedBy(m.s(7f))
+                                .weight(1f)
+                                .fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(m.s(14f))
+                        ) {
+                            // Left Preview Card
+                            Surface(
+                                color = Color(0xCC0A111D),
+                                shape = RoundedCornerShape(m.s(12f)),
+                                border = BorderStroke(1.dp, BorderSteel),
+                                modifier = Modifier
+                                    .weight(0.85f)
+                                    .fillMaxHeight()
                             ) {
-                                rowPresets.forEach { preset ->
-                                    val isSelected = selectedAvatar == preset.key
-                                    Column(
-                                        horizontalAlignment = Alignment.CenterHorizontally,
-                                        verticalArrangement = Arrangement.spacedBy(m.s(3f)),
+                                Column(
+                                    modifier = Modifier
+                                        .fillMaxSize()
+                                        .verticalScroll(rememberScrollState())
+                                        .padding(m.s(12f)),
+                                    horizontalAlignment = Alignment.CenterHorizontally,
+                                    verticalArrangement = Arrangement.spacedBy(m.s(8f))
+                                ) {
+                                    PlayerAvatar(
+                                        avatarData = selectedAvatar,
+                                        size = m.s(76f),
+                                        borderColor = RtxEmerald,
+                                        borderWidth = 2.2.dp
+                                    )
+
+                                    Text(
+                                        text = nameInput.trim().ifEmpty { profile.displayName },
+                                        fontSize = m.sp(14f),
+                                        fontWeight = FontWeight.Black,
+                                        color = TextPrimary,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis
+                                    )
+
+                                    // Prominent Copyable 6-Digit Player ID
+                                    Row(
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.spacedBy(m.s(6f)),
                                         modifier = Modifier
-                                            .weight(1f)
                                             .clip(RoundedCornerShape(m.s(8f)))
-                                            .background(
-                                                if (isSelected) RtxEmerald.copy(alpha = 0.20f)
-                                                else ElevatedGunmetal.copy(alpha = 0.65f)
-                                            )
-                                            .border(
-                                                width = if (isSelected) 1.5.dp else 1.dp,
-                                                color = if (isSelected) RtxEmerald else BorderSteel,
-                                                shape = RoundedCornerShape(m.s(8f))
-                                            )
+                                            .background(TacticalAmber.copy(alpha = 0.16f))
+                                            .border(1.2.dp, TacticalAmber.copy(alpha = 0.70f), RoundedCornerShape(m.s(8f)))
                                             .clickable {
-                                                selectedAvatar = preset.key
-                                                localError = null
+                                                val cm = context.getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
+                                                cm?.setPrimaryClip(ClipData.newPlainText("Player ID", profile.shortId))
+                                                copiedId = true
                                             }
-                                            .padding(vertical = m.s(6f), horizontal = m.s(4f))
-                                            .testTag("avatar_${preset.key}")
+                                            .padding(horizontal = m.s(12f), vertical = m.s(6f))
+                                            .testTag("profile_copy_id_button")
                                     ) {
-                                        PlayerAvatar(
-                                            avatarData = preset.key,
-                                            size = m.s(36f),
-                                            borderColor = if (isSelected) RtxEmerald else BorderSteel,
-                                            borderWidth = 1.4.dp
-                                        )
                                         Text(
-                                            text = preset.labelRu,
-                                            fontSize = m.sp(8.2f),
-                                            fontWeight = if (isSelected) FontWeight.Black else FontWeight.SemiBold,
-                                            color = if (isSelected) RtxEmerald else TextSecondary,
-                                            maxLines = 1,
-                                            overflow = TextOverflow.Ellipsis
+                                            text = if (copiedId) "СКОПИРОВАНО: ${profile.shortId}" else "МОЙ ID: ${profile.shortId}",
+                                            fontSize = m.sp(11f),
+                                            fontWeight = FontWeight.Black,
+                                            color = if (copiedId) RtxEmerald else TacticalAmber
                                         )
+                                        Icon(
+                                            imageVector = if (copiedId) Icons.Default.Check else Icons.Default.ContentCopy,
+                                            contentDescription = "Скопировать ID",
+                                            tint = if (copiedId) RtxEmerald else TacticalAmber,
+                                            modifier = Modifier.size(m.s(14f))
+                                        )
+                                    }
+
+                                    Button(
+                                        onClick = {
+                                            photoPickerLauncher.launch(
+                                                PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)
+                                            )
+                                        },
+                                        enabled = !isProcessingPhoto && !isSaving,
+                                        shape = CutCornerShape(topStart = m.s(8f), bottomEnd = m.s(8f)),
+                                        colors = ButtonDefaults.buttonColors(
+                                            containerColor = IceCyan.copy(alpha = 0.22f),
+                                            contentColor = IceCyan
+                                        ),
+                                        border = BorderStroke(1.dp, IceCyan.copy(alpha = 0.72f)),
+                                        contentPadding = PaddingValues(horizontal = m.s(10f), vertical = m.s(7f)),
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .height(m.s(40f).coerceAtLeast(48.dp))
+                                            .testTag("profile_pick_photo_button")
+                                    ) {
+                                        if (isProcessingPhoto) {
+                                            CircularProgressIndicator(
+                                                modifier = Modifier.size(m.s(16f)),
+                                                color = IceCyan,
+                                                strokeWidth = 2.dp
+                                            )
+                                        } else {
+                                            Icon(Icons.Default.PhotoLibrary, contentDescription = null, modifier = Modifier.size(m.s(16f)))
+                                            Spacer(Modifier.width(m.s(6f)))
+                                            Text("ФОТО ИЗ ГАЛЕРЕИ", fontSize = m.sp(10f), fontWeight = FontWeight.Black)
+                                        }
                                     }
                                 }
                             }
-                        }
 
-                        val displayNotice = localError ?: statusBanner
-                        if (!displayNotice.isNullOrBlank()) {
-                            Text(
-                                text = displayNotice,
-                                fontSize = m.sp(9.8f),
-                                fontWeight = FontWeight.SemiBold,
-                                color = if (localError != null) ThreatCrimson else RtxEmerald
-                            )
+                            // Right Editor Column
+                            Column(
+                                modifier = Modifier
+                                    .weight(1.35f)
+                                    .fillMaxHeight()
+                                    .verticalScroll(rememberScrollState()),
+                                verticalArrangement = Arrangement.spacedBy(m.s(8f))
+                            ) {
+                                Text(
+                                    text = "ИМЯ ИГРОКА (НИКНЕЙМ)",
+                                    fontSize = m.sp(9.5f),
+                                    fontWeight = FontWeight.Bold,
+                                    color = TextSecondary
+                                )
+                                OutlinedTextField(
+                                    value = nameInput,
+                                    onValueChange = { raw ->
+                                        nameInput = raw.take(20)
+                                        localError = null
+                                    },
+                                    placeholder = { Text("От 3 до 20 символов", color = TextSecondary) },
+                                    leadingIcon = { Icon(Icons.Default.Person, contentDescription = null, modifier = Modifier.size(m.s(17f))) },
+                                    singleLine = true,
+                                    colors = fieldColors,
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .testTag("profile_name_input")
+                                )
+
+                                Text(
+                                    text = "ВСТРОЕННЫЕ ТАКТИЧЕСКИЕ АВАТАРКИ",
+                                    fontSize = m.sp(9.5f),
+                                    fontWeight = FontWeight.Bold,
+                                    color = TextSecondary
+                                )
+
+                                val rows = remember { AvatarPresets.all.chunked(4) }
+                                rows.forEach { rowPresets ->
+                                    Row(
+                                        modifier = Modifier.fillMaxWidth(),
+                                        horizontalArrangement = Arrangement.spacedBy(m.s(7f))
+                                    ) {
+                                        rowPresets.forEach { preset ->
+                                            val isSelected = selectedAvatar == preset.key
+                                            Column(
+                                                horizontalAlignment = Alignment.CenterHorizontally,
+                                                verticalArrangement = Arrangement.spacedBy(m.s(3f)),
+                                                modifier = Modifier
+                                                    .weight(1f)
+                                                    .clip(RoundedCornerShape(m.s(8f)))
+                                                    .background(
+                                                        if (isSelected) RtxEmerald.copy(alpha = 0.20f)
+                                                        else ElevatedGunmetal.copy(alpha = 0.65f)
+                                                    )
+                                                    .border(
+                                                        width = if (isSelected) 1.5.dp else 1.dp,
+                                                        color = if (isSelected) RtxEmerald else BorderSteel,
+                                                        shape = RoundedCornerShape(m.s(8f))
+                                                    )
+                                                    .clickable {
+                                                        selectedAvatar = preset.key
+                                                        localError = null
+                                                    }
+                                                    .padding(vertical = m.s(6f), horizontal = m.s(4f))
+                                                    .testTag("avatar_${preset.key}")
+                                            ) {
+                                                PlayerAvatar(
+                                                    avatarData = preset.key,
+                                                    size = m.s(36f),
+                                                    borderColor = if (isSelected) RtxEmerald else BorderSteel,
+                                                    borderWidth = 1.4.dp
+                                                )
+                                                Text(
+                                                    text = preset.labelRu,
+                                                    fontSize = m.sp(8.2f),
+                                                    fontWeight = if (isSelected) FontWeight.Black else FontWeight.SemiBold,
+                                                    color = if (isSelected) RtxEmerald else TextSecondary,
+                                                    maxLines = 1,
+                                                    overflow = TextOverflow.Ellipsis
+                                                )
+                                            }
+                                        }
+                                    }
+                                }
+
+                                val displayNotice = localError ?: statusBanner
+                                if (!displayNotice.isNullOrBlank()) {
+                                    Text(
+                                        text = displayNotice,
+                                        fontSize = m.sp(9.8f),
+                                        fontWeight = FontWeight.SemiBold,
+                                        color = if (localError != null) ThreatCrimson else RtxEmerald
+                                    )
+                                }
+                            }
                         }
                     }
                 }
 
-                // Bottom Save / Cancel Bar
+                // Bottom Bar: Compact Sign-Out on Bottom-Left | Cancel & Save on Bottom-Right
                 Row(
                     modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.End,
+                    horizontalArrangement = Arrangement.SpaceBetween,
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Button(
-                        onClick = onClose,
-                        colors = ButtonDefaults.buttonColors(
-                            containerColor = ElevatedGunmetal,
-                            contentColor = TextPrimary
-                        ),
-                        border = BorderStroke(1.dp, BorderSteel),
+                    // Compact subtle logout button with comfortable 48dp touch area
+                    Box(
                         modifier = Modifier
-                            .height(m.s(40f).coerceAtLeast(48.dp))
-                            .testTag("profile_cancel_button")
+                            .height(48.dp)
+                            .clickable(onClick = onSignOut)
+                            .testTag("profile_sign_out_button"),
+                        contentAlignment = Alignment.CenterStart
                     ) {
-                        Text("ОТМЕНА", fontSize = m.sp(10.5f), fontWeight = FontWeight.Bold)
-                    }
-                    Spacer(Modifier.width(m.s(10f)))
-                    Button(
-                        onClick = {
-                            val clean = nameInput.trim()
-                            if (clean.length < 3 || clean.length > 20) {
-                                localError = "Имя игрока должно содержать от 3 до 20 символов."
-                                return@Button
-                            }
-                            localError = null
-                            onSaveProfile(clean, selectedAvatar, onClose)
-                        },
-                        enabled = !isSaving && !isProcessingPhoto,
-                        shape = CutCornerShape(topStart = m.s(9f), bottomEnd = m.s(9f)),
-                        colors = ButtonDefaults.buttonColors(
-                            containerColor = RtxEmerald,
-                            contentColor = ObsidianVoid
-                        ),
-                        contentPadding = PaddingValues(horizontal = m.s(18f), vertical = m.s(8f)),
-                        modifier = Modifier
-                            .height(m.s(40f).coerceAtLeast(48.dp))
-                            .testTag("profile_save_button")
-                    ) {
-                        if (isSaving) {
-                            CircularProgressIndicator(
-                                modifier = Modifier.size(m.s(17f)),
-                                color = ObsidianVoid,
-                                strokeWidth = 2.2.dp
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(m.s(5f)),
+                            modifier = Modifier
+                                .clip(RoundedCornerShape(m.s(6f)))
+                                .background(ThreatCrimson.copy(alpha = 0.14f))
+                                .border(0.9.dp, ThreatCrimson.copy(alpha = 0.50f), RoundedCornerShape(m.s(6f)))
+                                .padding(horizontal = m.s(10f), vertical = m.s(6f))
+                        ) {
+                            Icon(
+                                imageVector = Icons.AutoMirrored.Filled.Logout,
+                                contentDescription = "Выйти из аккаунта",
+                                tint = Color(0xFFFFA5A5),
+                                modifier = Modifier.size(m.s(13f))
                             )
-                            Spacer(Modifier.width(m.s(7f)))
-                            Text("СОХРАНЕНИЕ...", fontSize = m.sp(11f), fontWeight = FontWeight.Black)
-                        } else {
-                            Icon(Icons.Default.Save, contentDescription = null, modifier = Modifier.size(m.s(17f)))
-                            Spacer(Modifier.width(m.s(6f)))
-                            Text("СОХРАНИТЬ ПРОФИЛЬ", fontSize = m.sp(11f), fontWeight = FontWeight.Black)
+                            Text(
+                                text = "Выйти",
+                                fontSize = m.sp(9.5f),
+                                fontWeight = FontWeight.Bold,
+                                color = Color(0xFFFFB8B8)
+                            )
+                        }
+                    }
+
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(m.s(8f))
+                    ) {
+                        Button(
+                            onClick = onClose,
+                            colors = ButtonDefaults.buttonColors(
+                                containerColor = ElevatedGunmetal,
+                                contentColor = TextPrimary
+                            ),
+                            border = BorderStroke(1.dp, BorderSteel),
+                            modifier = Modifier
+                                .height(m.s(38f).coerceAtLeast(48.dp))
+                                .testTag("profile_cancel_button")
+                        ) {
+                            Text("ЗАКРЫТЬ", fontSize = m.sp(10f), fontWeight = FontWeight.Bold)
+                        }
+
+                        if (loadedProfile != null) {
+                            Button(
+                                onClick = {
+                                    val clean = nameInput.trim()
+                                    if (clean.length < 3 || clean.length > 20) {
+                                        localError = "Имя игрока должно содержать от 3 до 20 символов."
+                                        return@Button
+                                    }
+                                    localError = null
+                                    onSaveProfile(clean, selectedAvatar, onClose)
+                                },
+                                enabled = !isSaving && !isProcessingPhoto,
+                                shape = CutCornerShape(topStart = m.s(9f), bottomEnd = m.s(9f)),
+                                colors = ButtonDefaults.buttonColors(
+                                    containerColor = RtxEmerald,
+                                    contentColor = ObsidianVoid
+                                ),
+                                contentPadding = PaddingValues(horizontal = m.s(16f), vertical = m.s(8f)),
+                                modifier = Modifier
+                                    .height(m.s(38f).coerceAtLeast(48.dp))
+                                    .testTag("profile_save_button")
+                            ) {
+                                if (isSaving) {
+                                    CircularProgressIndicator(
+                                        modifier = Modifier.size(m.s(16f)),
+                                        color = ObsidianVoid,
+                                        strokeWidth = 2.2.dp
+                                    )
+                                    Spacer(Modifier.width(m.s(6f)))
+                                    Text("СОХРАНЕНИЕ...", fontSize = m.sp(10.5f), fontWeight = FontWeight.Black)
+                                } else {
+                                    Icon(Icons.Default.Save, contentDescription = null, modifier = Modifier.size(m.s(16f)))
+                                    Spacer(Modifier.width(m.s(6f)))
+                                    Text("СОХРАНИТЬ", fontSize = m.sp(10.5f), fontWeight = FontWeight.Black)
+                                }
+                            }
                         }
                     }
                 }

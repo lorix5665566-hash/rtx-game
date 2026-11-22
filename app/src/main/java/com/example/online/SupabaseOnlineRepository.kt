@@ -61,7 +61,21 @@ class SupabaseOnlineRepository(
                             online = true
                         )
                     } else {
-                        lastError = resp.exceptionOrNull()
+                        val err = resp.exceptionOrNull()
+                        lastError = err
+                        val errMsg = err?.message.orEmpty()
+                        // If a concurrent call already created our profile (409 / duplicate user_id), read and return it immediately
+                        if (errMsg.contains("409") || errMsg.contains("duplicate key", ignoreCase = true) || errMsg.contains("23505")) {
+                            val alreadyCreated = runCatching { fetchProfileByUid(userId) }.getOrNull()
+                            if (alreadyCreated != null) {
+                                setOnlineStatus(userId, true)
+                                return@runCatching alreadyCreated.copy(online = true)
+                            }
+                            // Otherwise short_id collided -> continue loop with a fresh 6-digit ID
+                        } else {
+                            // Non-conflict error (e.g. missing profiles table, RLS policy, network) -> fail fast so UI shows reason
+                            throw err ?: IllegalStateException("Не удалось создать облачный профиль игрока.")
+                        }
                     }
                 }
                 throw lastError ?: IllegalStateException("Не удалось создать облачный профиль игрока.")
@@ -632,18 +646,18 @@ class SupabaseOnlineRepository(
     }
 
     private suspend fun getRest(table: String, query: Map<String, String>): Result<String> {
-        val token = authManager.getValidAccessToken()
-            ?: return Result.failure(IllegalStateException("Сессия истекла. Войдите снова."))
         val urlBuilder = "${SupabaseConfig.baseUrl}/rest/v1/$table".toHttpUrlOrNull()?.newBuilder()
             ?: return Result.failure(IllegalStateException("Некорректный адрес SUPABASE_URL."))
         query.forEach { (k, v) -> urlBuilder.addQueryParameter(k, v) }
-        val req = Request.Builder()
-            .url(urlBuilder.build())
-            .addHeader("apikey", SupabaseConfig.anonKey)
-            .addHeader("Authorization", "Bearer $token")
-            .get()
-            .build()
-        return executeCall(req)
+        val url = urlBuilder.build()
+        return executeAuthedCall { token ->
+            Request.Builder()
+                .url(url)
+                .addHeader("apikey", SupabaseConfig.anonKey)
+                .addHeader("Authorization", "Bearer $token")
+                .get()
+                .build()
+        }
     }
 
     private suspend fun postRest(
@@ -651,17 +665,17 @@ class SupabaseOnlineRepository(
         body: JSONObject,
         prefer: String = "return=minimal"
     ): Result<String> {
-        val token = authManager.getValidAccessToken()
-            ?: return Result.failure(IllegalStateException("Сессия истекла. Войдите снова."))
-        val req = Request.Builder()
-            .url("${SupabaseConfig.baseUrl}/rest/v1/$table")
-            .addHeader("apikey", SupabaseConfig.anonKey)
-            .addHeader("Authorization", "Bearer $token")
-            .addHeader("Content-Type", "application/json")
-            .addHeader("Prefer", prefer)
-            .post(body.toString().toRequestBody(JSON_MEDIA))
-            .build()
-        return executeCall(req)
+        val bodyStr = body.toString()
+        return executeAuthedCall { token ->
+            Request.Builder()
+                .url("${SupabaseConfig.baseUrl}/rest/v1/$table")
+                .addHeader("apikey", SupabaseConfig.anonKey)
+                .addHeader("Authorization", "Bearer $token")
+                .addHeader("Content-Type", "application/json")
+                .addHeader("Prefer", prefer)
+                .post(bodyStr.toRequestBody(JSON_MEDIA))
+                .build()
+        }
     }
 
     private suspend fun patchRest(
@@ -670,67 +684,107 @@ class SupabaseOnlineRepository(
         body: JSONObject,
         prefer: String = "return=minimal"
     ): Result<String> {
-        val token = authManager.getValidAccessToken()
-            ?: return Result.failure(IllegalStateException("Сессия истекла. Войдите снова."))
         val urlBuilder = "${SupabaseConfig.baseUrl}/rest/v1/$table".toHttpUrlOrNull()?.newBuilder()
             ?: return Result.failure(IllegalStateException("Некорректный адрес SUPABASE_URL."))
         query.forEach { (k, v) -> urlBuilder.addQueryParameter(k, v) }
-        val req = Request.Builder()
-            .url(urlBuilder.build())
-            .addHeader("apikey", SupabaseConfig.anonKey)
-            .addHeader("Authorization", "Bearer $token")
-            .addHeader("Content-Type", "application/json")
-            .addHeader("Prefer", prefer)
-            .patch(body.toString().toRequestBody(JSON_MEDIA))
-            .build()
-        return executeCall(req)
+        val url = urlBuilder.build()
+        val bodyStr = body.toString()
+        return executeAuthedCall { token ->
+            Request.Builder()
+                .url(url)
+                .addHeader("apikey", SupabaseConfig.anonKey)
+                .addHeader("Authorization", "Bearer $token")
+                .addHeader("Content-Type", "application/json")
+                .addHeader("Prefer", prefer)
+                .patch(bodyStr.toRequestBody(JSON_MEDIA))
+                .build()
+        }
     }
 
     private suspend fun deleteRest(table: String, query: Map<String, String>): Result<String> {
-        val token = authManager.getValidAccessToken()
-            ?: return Result.failure(IllegalStateException("Сессия истекла. Войдите снова."))
         val urlBuilder = "${SupabaseConfig.baseUrl}/rest/v1/$table".toHttpUrlOrNull()?.newBuilder()
             ?: return Result.failure(IllegalStateException("Некорректный адрес SUPABASE_URL."))
         query.forEach { (k, v) -> urlBuilder.addQueryParameter(k, v) }
-        val req = Request.Builder()
-            .url(urlBuilder.build())
-            .addHeader("apikey", SupabaseConfig.anonKey)
-            .addHeader("Authorization", "Bearer $token")
-            .delete()
-            .build()
-        return executeCall(req)
+        val url = urlBuilder.build()
+        return executeAuthedCall { token ->
+            Request.Builder()
+                .url(url)
+                .addHeader("apikey", SupabaseConfig.anonKey)
+                .addHeader("Authorization", "Bearer $token")
+                .delete()
+                .build()
+        }
     }
 
     private suspend fun callRpc(fnName: String, body: JSONObject): Result<String> {
-        val token = authManager.getValidAccessToken()
-            ?: return Result.failure(IllegalStateException("Сессия истекла. Войдите снова."))
-        val req = Request.Builder()
-            .url("${SupabaseConfig.baseUrl}/rest/v1/rpc/$fnName")
-            .addHeader("apikey", SupabaseConfig.anonKey)
-            .addHeader("Authorization", "Bearer $token")
-            .addHeader("Content-Type", "application/json")
-            .post(body.toString().toRequestBody(JSON_MEDIA))
-            .build()
-        return executeCall(req)
+        val bodyStr = body.toString()
+        return executeAuthedCall { token ->
+            Request.Builder()
+                .url("${SupabaseConfig.baseUrl}/rest/v1/rpc/$fnName")
+                .addHeader("apikey", SupabaseConfig.anonKey)
+                .addHeader("Authorization", "Bearer $token")
+                .addHeader("Content-Type", "application/json")
+                .post(bodyStr.toRequestBody(JSON_MEDIA))
+                .build()
+        }
     }
 
-    private fun executeCall(request: Request): Result<String> = runCatching {
-        SupabaseConfig.httpClient.newCall(request).execute().use { resp ->
-            val text = resp.body?.string().orEmpty()
-            if (!resp.isSuccessful) {
-                val rawMsg = runCatching { JSONObject(text).optString("message") }.getOrNull()
-                    ?.takeIf { it.isNotBlank() } ?: text
-                val friendly = when {
-                    rawMsg.contains("does not exist", ignoreCase = true) ||
-                        rawMsg.contains("Could not find the table", ignoreCase = true) ->
-                        "Таблицы Supabase не найдены. Выполните скрипт supabase_schema.sql в SQL Editor вашего проекта Supabase."
-                    rawMsg.isNotBlank() -> rawMsg
-                    else -> "Ошибка сервера (${resp.code})"
-                }
-                throw IllegalStateException(friendly)
+    private suspend fun executeAuthedCall(buildRequest: (token: String) -> Request): Result<String> {
+        val token = authManager.getValidAccessToken()
+            ?: return Result.failure(IllegalStateException("Сессия истекла. Войдите в аккаунт снова."))
+        val first = executeCallRaw(buildRequest(token))
+        if (first.code == 401) {
+            val refreshed = authManager.forceRefreshAccessToken()
+            if (!refreshed.isNullOrBlank() && refreshed != token) {
+                return finishCallResult(executeCallRaw(buildRequest(refreshed)))
             }
-            text
         }
+        return finishCallResult(first)
+    }
+
+    private data class RawHttpResp(val code: Int, val body: String, val exception: Throwable? = null)
+
+    private fun executeCallRaw(request: Request): RawHttpResp {
+        return try {
+            SupabaseConfig.httpClient.newCall(request).execute().use { resp ->
+                RawHttpResp(code = resp.code, body = resp.body?.string().orEmpty())
+            }
+        } catch (t: Throwable) {
+            RawHttpResp(code = -1, body = "", exception = t)
+        }
+    }
+
+    private fun finishCallResult(raw: RawHttpResp): Result<String> {
+        if (raw.exception != null) {
+            return Result.failure(
+                IllegalStateException("Ошибка сети: ${raw.exception.localizedMessage ?: "нет подключения"}")
+            )
+        }
+        if (raw.code in 200..299) {
+            return Result.success(raw.body)
+        }
+        val json = runCatching { JSONObject(raw.body) }.getOrNull()
+        val rawMsg = listOf(
+            json?.optString("message").orEmpty(),
+            json?.optString("details").orEmpty(),
+            json?.optString("hint").orEmpty(),
+            json?.optString("code").orEmpty()
+        ).firstOrNull { it.isNotBlank() } ?: raw.body.trim().take(160)
+
+        val friendly = when {
+            rawMsg.contains("does not exist", ignoreCase = true) ||
+                rawMsg.contains("Could not find the table", ignoreCase = true) ||
+                rawMsg.contains("PGRST205", ignoreCase = true) ||
+                raw.code == 404 ->
+                "Таблицы Supabase не найдены (HTTP ${raw.code}). Выполните скрипт supabase_schema.sql в SQL Editor вашего проекта Supabase."
+            raw.code == 401 ->
+                "Ошибка авторизации Supabase (HTTP 401): $rawMsg. Попробуйте выйти и войти снова."
+            raw.code == 403 || rawMsg.contains("row-level security", ignoreCase = true) ->
+                "Нет прав доступа RLS (HTTP ${raw.code}). Выполните полный скрипт supabase_schema.sql в SQL Editor."
+            rawMsg.isNotBlank() -> "Ошибка сервера (HTTP ${raw.code}): $rawMsg"
+            else -> "Ошибка сервера (HTTP ${raw.code})"
+        }
+        return Result.failure(IllegalStateException(friendly))
     }
 
     private fun parseProfile(o: JSONObject): PlayerProfile = PlayerProfile(

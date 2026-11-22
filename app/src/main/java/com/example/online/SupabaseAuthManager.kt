@@ -145,6 +145,18 @@ class SupabaseAuthManager(context: Context) {
         if (current.expiresAtSec > nowSec + 45L && current.accessToken.isNotBlank()) {
             return current.accessToken
         }
+        return refreshTokenLocked(current)
+    }
+
+    /**
+     * Forces an immediate JWT refresh (used when PostgREST rejects a token with HTTP 401).
+     */
+    suspend fun forceRefreshAccessToken(): String? = refreshMutex.withLock {
+        val current = _session.value ?: return null
+        refreshTokenLocked(current)
+    }
+
+    private suspend fun refreshTokenLocked(current: SupabaseSession): String? {
         if (current.refreshToken.isBlank() || !SupabaseConfig.isConfigured) {
             return current.accessToken.takeIf { it.isNotBlank() }
         }
@@ -167,13 +179,11 @@ class SupabaseAuthManager(context: Context) {
             }.getOrNull()
         }
 
-        if (refreshed != null) {
+        return if (refreshed != null) {
             saveSession(refreshed)
             refreshed.accessToken
         } else {
-            // Token expired and cannot be refreshed -> force clean re-login
-            clearSession()
-            null
+            current.accessToken.takeIf { it.isNotBlank() }
         }
     }
 

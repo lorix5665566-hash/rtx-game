@@ -39,10 +39,8 @@ import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.Logout
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Close
-import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.Groups
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Remove
@@ -105,7 +103,8 @@ fun MainMenuScreen(
     stats: PlayerStats,
     matchConfig: MatchConfig,
     modelRegistry: ModelAssetRegistry,
-    playerProfile: PlayerProfile?,
+    profileState: OnlineUiState<PlayerProfile>,
+    fallbackLoginName: String,
     pendingFriendsCount: Int,
     incomingInvites: List<LobbyInvite>,
     onUpdateMatchConfig: ((MatchConfig) -> MatchConfig) -> Unit,
@@ -116,13 +115,14 @@ fun MainMenuScreen(
     onAcceptInvite: (LobbyInvite) -> Unit,
     onDeclineInvite: (LobbyInvite) -> Unit,
     onOpenSettings: () -> Unit,
-    onOpenControls: () -> Unit,
-    onSignOut: () -> Unit
+    onOpenControls: () -> Unit
 ) {
     val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
     val m = LocalUiMetrics.current
     val latestGraphics by rememberUpdatedState(settings.graphics)
+    val playerProfile = (profileState as? OnlineUiState.Success)?.data
+    val isProfileError = profileState is OnlineUiState.Error
 
     var activeTab by remember { mutableStateOf(MenuTab.HOME) }
 
@@ -136,6 +136,10 @@ fun MainMenuScreen(
 
     LaunchedEffect(matchConfig.playerSide) {
         lobbyController.showcaseSide = matchConfig.playerSide
+    }
+
+    LaunchedEffect(matchConfig.map) {
+        lobbyController.showcaseMap = matchConfig.map
     }
 
     val surfaceView = remember(lobbyController) {
@@ -316,62 +320,48 @@ fun MainMenuScreen(
                 )
             }
 
-            // Top-Right Avatar + Nickname + Unique 6-Digit Human Player ID Pill (opens Profile Customization) + Sign Out
+            // Top-Right Avatar + Nickname + Unique 6-Digit Human Player ID Pill (opens Profile Customization)
             Row(
                 verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(m.s(6f))
+                horizontalArrangement = Arrangement.spacedBy(m.s(6f)),
+                modifier = Modifier
+                    .clip(RoundedCornerShape(m.s(8f)))
+                    .background(Color(0xA60A1019))
+                    .border(
+                        1.dp,
+                        if (isProfileError) ThreatCrimson.copy(alpha = 0.70f) else TacticalAmber.copy(alpha = 0.50f),
+                        RoundedCornerShape(m.s(8f))
+                    )
+                    .clickable { onOpenProfile() }
+                    .padding(horizontal = m.s(8f), vertical = m.s(4f))
+                    .testTag("menu_player_id_badge")
             ) {
-                Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(m.s(6f)),
-                    modifier = Modifier
-                        .clip(RoundedCornerShape(m.s(8f)))
-                        .background(Color(0xA60A1019))
-                        .border(1.dp, TacticalAmber.copy(alpha = 0.50f), RoundedCornerShape(m.s(8f)))
-                        .clickable { onOpenProfile() }
-                        .padding(horizontal = m.s(7f), vertical = m.s(3.5f))
-                        .testTag("menu_player_id_badge")
-                ) {
-                    if (playerProfile != null) {
-                        PlayerAvatar(
-                            avatarData = playerProfile.avatarData,
-                            size = m.s(24f),
-                            borderColor = RtxEmerald,
-                            borderWidth = 1.2.dp
-                        )
-                    }
-                    Column {
-                        Text(
-                            text = playerProfile?.displayName ?: "Загрузка...",
-                            fontSize = m.sp(9.8f),
-                            fontWeight = FontWeight.Black,
-                            color = TextPrimary,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis
-                        )
-                        Text(
-                            text = if (playerProfile != null) "ID: ${playerProfile.shortId}" else "ID: ...",
-                            fontSize = m.sp(8.6f),
-                            fontWeight = FontWeight.ExtraBold,
-                            color = TacticalAmber
-                        )
-                    }
+                if (playerProfile != null) {
+                    PlayerAvatar(
+                        avatarData = playerProfile.avatarData,
+                        size = m.s(25f),
+                        borderColor = RtxEmerald,
+                        borderWidth = 1.2.dp
+                    )
                 }
-
-                IconButton(
-                    onClick = onSignOut,
-                    modifier = Modifier
-                        .size(m.s(34f).coerceAtLeast(44.dp))
-                        .clip(CircleShape)
-                        .background(Color.White.copy(alpha = 0.08f))
-                        .border(0.8.dp, Color.White.copy(alpha = 0.16f), CircleShape)
-                        .testTag("menu_sign_out_button")
-                ) {
-                    Icon(
-                        imageVector = Icons.AutoMirrored.Filled.Logout,
-                        contentDescription = "Выйти из аккаунта",
-                        tint = TextSecondary,
-                        modifier = Modifier.size(m.s(16f))
+                Column {
+                    Text(
+                        text = playerProfile?.displayName ?: fallbackLoginName.ifBlank { "Игрок" },
+                        fontSize = m.sp(9.8f),
+                        fontWeight = FontWeight.Black,
+                        color = TextPrimary,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                    Text(
+                        text = when {
+                            playerProfile != null -> "ID: ${playerProfile.shortId}"
+                            isProfileError -> "ID: ошибка • открыть"
+                            else -> "ID: загрузка..."
+                        },
+                        fontSize = m.sp(8.6f),
+                        fontWeight = FontWeight.ExtraBold,
+                        color = if (isProfileError) Color(0xFFFF9E9E) else TacticalAmber
                     )
                 }
             }
@@ -460,7 +450,11 @@ fun MainMenuScreen(
                 // Bottom-Left Operative Plate
                 Column(verticalArrangement = Arrangement.spacedBy(m.s(2f))) {
                     Text(
-                        text = if (matchConfig.playerSide == TeamSide.T) "ТЕРРОРИСТ • MIRAGE" else "СПЕЦНАЗ • MIRAGE",
+                        text = if (matchConfig.playerSide == TeamSide.T) {
+                            "ТЕРРОРИСТ • ${matchConfig.map.titleRu.uppercase()}"
+                        } else {
+                            "СПЕЦНАЗ • ${matchConfig.map.titleRu.uppercase()}"
+                        },
                         fontSize = m.sp(12.5f),
                         fontWeight = FontWeight.Black,
                         color = if (matchConfig.playerSide == TeamSide.T) TacticalAmber else IceCyan,

@@ -94,6 +94,23 @@ class OnlineViewModel(
         _searchResult.value = null
     }
 
+    fun retryLoadProfile() {
+        viewModelScope.launch {
+            _profileState.value = OnlineUiState.Loading
+            _statusBanner.value = null
+            repository.ensurePlayerProfile(currentUserId, initialLoginName)
+                .onSuccess { profile ->
+                    _profileState.value = OnlineUiState.Success(profile)
+                    refreshSocialData()
+                }
+                .onFailure { err ->
+                    _profileState.value = OnlineUiState.Error(
+                        err.localizedMessage ?: "Не удалось загрузить или создать ID профиля"
+                    )
+                }
+        }
+    }
+
     private fun initializeAndStartSocialPolling() {
         viewModelScope.launch {
             _profileState.value = OnlineUiState.Loading
@@ -104,19 +121,26 @@ class OnlineViewModel(
                 }
                 .onFailure { err ->
                     _profileState.value = OnlineUiState.Error(
-                        err.localizedMessage ?: "Не удалось загрузить профиль игрока"
+                        err.localizedMessage ?: "Не удалось загрузить или создать ID профиля"
                     )
                 }
 
-            // Periodic background cloud sync for friends, requests, and incoming lobby invites
+            // Periodic background cloud sync for profile recovery, friends, requests, and lobby invites
             while (isActive) {
-                delay(3_200L)
+                delay(3_500L)
                 if (_activeLobby.value?.status != "playing") {
                     if (_profileState.value !is OnlineUiState.Success) {
                         repository.ensurePlayerProfile(currentUserId, initialLoginName)
-                            .onSuccess { _profileState.value = OnlineUiState.Success(it) }
-                    }
-                    if (_profileState.value is OnlineUiState.Success) {
+                            .onSuccess {
+                                _profileState.value = OnlineUiState.Success(it)
+                                refreshSocialData()
+                            }
+                            .onFailure { err ->
+                                _profileState.value = OnlineUiState.Error(
+                                    err.localizedMessage ?: "Не удалось загрузить или создать ID профиля"
+                                )
+                            }
+                    } else {
                         refreshSocialData()
                     }
                 }

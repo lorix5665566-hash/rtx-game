@@ -169,7 +169,8 @@ fun VanguardRtxApp(
                 stats = stats,
                 matchConfig = matchConfig,
                 modelRegistry = vm.modelRegistry,
-                playerProfile = playerProfile,
+                profileState = profileState,
+                fallbackLoginName = session.loginName,
                 pendingFriendsCount = incomingRequests.size,
                 incomingInvites = incomingInvites,
                 onUpdateMatchConfig = vm::updateMatchConfig,
@@ -204,6 +205,9 @@ fun VanguardRtxApp(
                 onOpenProfile = {
                     isFriendsOpen = false
                     isProfileOpen = true
+                    if (profileState is OnlineUiState.Error) {
+                        onlineVm.retryLoadProfile()
+                    }
                 },
                 onAcceptInvite = { invite ->
                     onlineVm.acceptLobbyInvite(invite, matchConfig.playerSide) {
@@ -212,13 +216,7 @@ fun VanguardRtxApp(
                 },
                 onDeclineInvite = onlineVm::declineLobbyInvite,
                 onOpenSettings = { vm.openSettings(fromGame = false) },
-                onOpenControls = { vm.openControlEditor(fromGame = false) },
-                onSignOut = {
-                    scope.launch {
-                        onlineVm.setOfflineAndLeaveBeforeSignOut()
-                        authManager.logout()
-                    }
-                }
+                onOpenControls = { vm.openControlEditor(fromGame = false) }
             )
 
             AppScreen.MultiplayerLobby -> {
@@ -335,24 +333,31 @@ fun VanguardRtxApp(
             )
         }
 
-        // Profile Customization Overlay (ID copy, Nickname editor, Gallery Photo Picker + 8 Tactical Avatars)
+        // Profile Customization Overlay (ID copy/retry, Nickname editor, Gallery Photo Picker + 8 Tactical Avatars, compact Sign Out)
         AnimatedVisibility(
-            visible = isProfileOpen && screen == AppScreen.Menu && playerProfile != null,
+            visible = isProfileOpen && screen == AppScreen.Menu,
             enter = fadeIn(tween(180)),
             exit = fadeOut(tween(160))
         ) {
-            if (playerProfile != null) {
-                ProfileCustomizationOverlay(
-                    profile = playerProfile,
-                    isSaving = isSavingProfile,
-                    statusBanner = statusBanner,
-                    onSaveProfile = onlineVm::saveProfileCustomization,
-                    onClose = {
-                        isProfileOpen = false
-                        onlineVm.clearBanner()
+            ProfileCustomizationOverlay(
+                profileState = profileState,
+                fallbackLoginName = session.loginName,
+                isSaving = isSavingProfile,
+                statusBanner = statusBanner,
+                onRetryLoadProfile = onlineVm::retryLoadProfile,
+                onSaveProfile = onlineVm::saveProfileCustomization,
+                onSignOut = {
+                    isProfileOpen = false
+                    scope.launch {
+                        onlineVm.setOfflineAndLeaveBeforeSignOut()
+                        authManager.logout()
                     }
-                )
-            }
+                },
+                onClose = {
+                    isProfileOpen = false
+                    onlineVm.clearBanner()
+                }
+            )
         }
 
         val veil = transitionAlpha.value

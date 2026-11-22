@@ -28,10 +28,10 @@ import kotlin.math.exp
 import kotlin.math.sin
 
 /**
- * Live 3D Google Filament CS2 Lobby Renderer:
- * Renders the sunlit ultra-detailed CS2 Mirage courtyard behind the clean Main Menu
- * with the rigged Terrorist (T) or Спецназ (CT) operative facing directly toward the camera,
- * smoothly breathing and rotatable 360° with silky inertial damping!
+ * Live 3D Google Filament Main Menu Renderer:
+ * Dynamically renders an unobstructed sunlit open courtyard of the selected map (Mirage or Dust 2)
+ * with the rigged Terrorist (T) or Спецназ (CT) operative standing cleanly facing the camera,
+ * smoothly animated and rotatable 360° with inertial damping.
  */
 class FilamentLobbyController(
     private val context: Context,
@@ -40,8 +40,8 @@ class FilamentLobbyController(
 ) : Choreographer.FrameCallback {
 
     @Volatile var showcaseSide: TeamSide = TeamSide.T
-    // Calibrated so our +Z human operative faces dead-straight into the pulled-back Mirage courtyard camera (atan2(4.10, 1.10) ≈ 75°)!
-    @Volatile var characterYawDeg: Float = 75f
+    @Volatile var showcaseMap: ArenaMapId = ArenaMapId.MIRAGE
+    @Volatile var characterYawDeg: Float = 0f
     @Volatile private var yawVelocityDegPerSec: Float = 0f
 
     private lateinit var engine: Engine
@@ -59,7 +59,8 @@ class FilamentLobbyController(
     private var sunEntity: Int = 0
     private var fxLightEntity: Int = 0
 
-    private val mirageWorld = ArenaWorld(context, ArenaMapId.MIRAGE)
+    private var loadedMap: ArenaMapId? = null
+    private var activeWorld: ArenaWorld = ArenaWorld(context, ArenaMapId.MIRAGE)
     private var mapModel: LoadedGlbModel? = null
     private var tCharModel: LoadedGlbModel? = null
     private var ctCharModel: LoadedGlbModel? = null
@@ -87,7 +88,6 @@ class FilamentLobbyController(
         scene = engine.createScene()
         view = engine.createView()
         camera = engine.createCamera(engine.entityManager.create())
-        // Bright crisp CS2 daylight exposure
         camera.setExposure(16.0f, 1.0f / 100.0f, 100.0f)
         view.scene = scene
         view.camera = camera
@@ -126,25 +126,14 @@ class FilamentLobbyController(
         }
         uiHelper.attachTo(surfaceView)
 
-        loadLobbyAssets()
+        loadCharacters()
+        ensureSelectedMapLoaded()
         lastNs = System.nanoTime()
     }
 
-    private fun loadLobbyAssets() {
-        destroyModel(mapModel); mapModel = null
+    private fun loadCharacters() {
         destroyModel(tCharModel); tCharModel = null
         destroyModel(ctCharModel); ctCharModel = null
-
-        mapModel = FilamentSceneHelpers.loadGlb(
-            assetLoader, resourceLoader,
-            registry.loadBundledAssetBuffer(ModelSlot.MAP_MIRAGE.bundledAssetPath)
-        )
-        mapModel?.let { m ->
-            FilamentSceneHelpers.setAssetVisible(scene, m, true)
-            val tm = engine.transformManager
-            Matrix.setIdentityM(tmpMat, 0)
-            tm.setTransform(tm.getInstance(m.asset.root), tmpMat)
-        }
 
         tCharModel = FilamentSceneHelpers.loadGlb(
             assetLoader, resourceLoader,
@@ -154,6 +143,32 @@ class FilamentLobbyController(
             assetLoader, resourceLoader,
             registry.loadBundledAssetBuffer(ModelSlot.CHARACTER_CT.bundledAssetPath)
         )
+    }
+
+    private fun ensureSelectedMapLoaded() {
+        val targetMap = showcaseMap
+        if (loadedMap == targetMap && mapModel != null) return
+
+        destroyModel(mapModel)
+        mapModel = null
+
+        if (activeWorld.mapId != targetMap) {
+            activeWorld = ArenaWorld(context, targetMap)
+        }
+        val slot = ModelSlot.forMap(targetMap)
+        mapModel = FilamentSceneHelpers.loadGlb(
+            assetLoader, resourceLoader,
+            registry.loadBundledAssetBuffer(slot.bundledAssetPath)
+        )
+        mapModel?.let { m ->
+            FilamentSceneHelpers.setAssetVisible(scene, m, true)
+            val tm = engine.transformManager
+            Matrix.setIdentityM(tmpMat, 0)
+            tm.setTransform(tm.getInstance(m.asset.root), tmpMat)
+        }
+        loadedMap = targetMap
+        characterYawDeg = activeWorld.lobbyDefaultCharYawDeg
+        yawVelocityDegPerSec = 0f
     }
 
     fun start() {
@@ -212,6 +227,8 @@ class FilamentLobbyController(
         lastNs = frameTimeNanos
         timeSec += dt
 
+        ensureSelectedMapLoaded()
+
         // Smooth inertial spin deceleration after user swipes character
         if (kotlin.math.abs(yawVelocityDegPerSec) > 0.15f) {
             characterYawDeg = (characterYawDeg + yawVelocityDegPerSec * dt) % 360f
@@ -227,16 +244,17 @@ class FilamentLobbyController(
         }
 
         val aspect = surfaceWidth.toDouble() / surfaceHeight.toDouble().coerceAtLeast(1.0)
-        camera.setProjection(40.0, aspect, 0.1, 200.0, Camera.Fov.VERTICAL)
+        camera.setProjection(38.0, aspect, 0.12, 200.0, Camera.Fov.VERTICAL)
 
-        val (sx, sy, sz) = mirageWorld.lobbyStandPos
-        val (baseCamX, baseCamY, baseCamZ) = mirageWorld.lobbyCamPos
-        val (lookX, lookY, lookZ) = mirageWorld.lobbyLookTarget
+        val (sx, sy, sz) = activeWorld.lobbyStandPos
+        val (baseCamX, baseCamY, baseCamZ) = activeWorld.lobbyCamPos
+        val (lookX, lookY, lookZ) = activeWorld.lobbyLookTarget
 
-        val swayZ = sin(timeSec * 0.55f) * 0.065f
-        val swayY = cos(timeSec * 0.42f) * 0.022f
+        // Subtle handheld sway orthogonal to sightline (stays well inside verified wall-free pocket)
+        val swayA = sin(timeSec * 0.55f) * 0.045f
+        val swayY = cos(timeSec * 0.42f) * 0.018f
         camera.lookAt(
-            baseCamX.toDouble(), (baseCamY + swayY).toDouble(), (baseCamZ + swayZ).toDouble(),
+            (baseCamX + swayA).toDouble(), (baseCamY + swayY).toDouble(), baseCamZ.toDouble(),
             lookX.toDouble(), lookY.toDouble(), lookZ.toDouble(),
             0.0, 1.0, 0.0
         )

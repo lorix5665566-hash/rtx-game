@@ -7,8 +7,10 @@ import com.example.model.WeaponType
 import org.json.JSONArray
 import org.json.JSONObject
 import kotlin.math.abs
+import kotlin.math.atan2
 import kotlin.math.cos
 import kotlin.math.floor
+import kotlin.math.min
 import kotlin.math.sin
 import kotlin.math.sqrt
 
@@ -34,6 +36,7 @@ data class BotOperative(
     var z: Float,
     var yawDeg: Float = 0f,
     var visualYawDeg: Float = yawDeg,
+    var aimYawDeg: Float = yawDeg,
     var hp: Float = 100f,
     var maxHp: Float = 100f,
     var isDead: Boolean = false,
@@ -45,23 +48,43 @@ data class BotOperative(
     var moveStrafeRatio: Float = 0f,
     var isMoving: Boolean = false,
     var hitFlinch: Float = 0f,
-    var fireCooldown: Float = 1.0f,
+    var fireCooldown: Float = 0.6f,
     var strafeDir: Float = 1f,
     var strafeTimer: Float = 1.5f,
     var muzzleFlashTimer: Float = 0f,
     var muzzleFlashRoll: Float = 0f,
     var targetSiteIndex: Int = 0,
+    var targetBombsiteIdx: Int = 0,
     var waypointIndex: Int = 0,
     var plantProgress: Float = 0f,
-    var defuseProgress: Float = 0f
+    var defuseProgress: Float = 0f,
+    var bombBeepTimer: Float = 0f,
+    // A* Navigation & anti-stuck state
+    var navPath: List<Pair<Float, Float>> = emptyList(),
+    var navPathIndex: Int = 0,
+    var repathTimer: Float = 0f,
+    var stuckTimer: Float = 0f,
+    var lastProgressX: Float = x,
+    var lastProgressZ: Float = z,
+    var unstuckTimer: Float = 0f,
+    var unstuckDir: Float = 1f,
+    // Human-like vision, reaction delay (~0.35s) & burst recoil state
+    var targetSightTime: Float = 0f,
+    var losLostGraceTimer: Float = 0f,
+    var reactionDelaySec: Float = 0.35f,
+    var lastTargetKey: Int = -1,
+    var burstShotsLeft: Int = 3,
+    var burstPauseTimer: Float = 0f,
+    var alertYawDeg: Float = yawDeg,
+    var alertTimer: Float = 0f,
+    var aimSwaySeed: Float = 0f
 )
 
 /**
- * Multi-Level Real 3D CS2 Navigation & Collision World:
- * Decodes up to 3 walkable floor layers per (x, z) cell baked directly from the real
- * 3D triangles of `map_mirage.glb` & `map_dust2.glb`, so players and bots walk seamlessly
- * through ALL indoor passages (A Ramp, Palace, Connector, Window, Market, B Apartments,
- * Underpass, B Tunnels) with accurate wall sliding and 3D raycasts!
+ * Multi-Level Real 3D Navigation & Collision World:
+ * Decodes walkable floor layers and 512x512 vertical wall bitmasks baked from
+ * `map_mirage.glb` & `map_dust2.glb`, builds a fast 72x72 A* navigation graph for bots,
+ * and computes verified wall-free 3D lobby showcase framing for both maps.
  */
 class ArenaWorld(
     context: Context,
@@ -82,17 +105,27 @@ class ArenaWorld(
     private var wallStepY: Float = 0.5f
     private var wallBits: IntArray? = null
 
+    // Precomputed coarse A* navigation grid (72x72 ≈ 1.42m per cell)
+    private val navSize: Int = 72
+    private val navWalkable = BooleanArray(navSize * navSize)
+    private val navFloorY = FloatArray(navSize * navSize) { Float.NaN }
+    // Bitmask of passable 8-neighbors per nav cell (pre-validated for step height & wall clearance)
+    private val navEdgeMask = IntArray(navSize * navSize)
+
     val bombsites: List<BombsiteZone>
     val tSpawns: List<Pair<Float, Float>>
     val ctSpawns: List<Pair<Float, Float>>
     val tAttackRoutes: List<List<Pair<Float, Float>>>
+    val tRouteBombsiteIdx: List<Int>
     val ctDefenseRoutes: List<List<Pair<Float, Float>>>
     val lobbyStandPos: Triple<Float, Float, Float>
     val lobbyCamPos: Triple<Float, Float, Float>
     val lobbyLookTarget: Triple<Float, Float, Float>
+    val lobbyDefaultCharYawDeg: Float
 
     init {
         loadMultiLayerFloors(context, mapId.floorsAssetPath)
+        buildNavGrid()
 
         when (mapId) {
             ArenaMapId.MIRAGE -> {
@@ -117,13 +150,14 @@ class ArenaWorld(
                 ).map { snapToNearestWalkable(it.first, it.second) }
 
                 tAttackRoutes = listOf(
-                    // Route A: T Spawn -> A Ramp -> Site A
+                    // Route 0 -> Site A via A Ramp
                     listOf(33.0f to 8.0f, 24.0f to 16.0f, 16.4f to 21.3f, 9.7f to 23.8f),
-                    // Route Mid -> Connector -> Site A
+                    // Route 1 -> Site A via Mid -> Connector
                     listOf(24.0f to -3.5f, 10.0f to -3.5f, 2.0f to 5.5f, 5.7f to 13.4f, 9.7f to 23.8f),
-                    // Route B: T Spawn -> B Apartments -> Site B
+                    // Route 2 -> Site B via B Apartments
                     listOf(22.0f to -18.0f, 4.0f to -24.0f, -16.0f to -30.2f, -28.0f to -24.0f)
                 ).map { route -> route.map { snapToNearestWalkable(it.first, it.second) } }
+                tRouteBombsiteIdx = listOf(0, 0, 1)
 
                 ctDefenseRoutes = listOf(
                     listOf(-4.1f to 29.4f, 5.7f to 13.4f, 9.7f to 23.8f),
@@ -131,12 +165,18 @@ class ArenaWorld(
                     listOf(-22.0f to 5.0f, -24.0f to -5.0f, -28.0f to -24.0f)
                 ).map { route -> route.map { snapToNearestWalkable(it.first, it.second) } }
 
-                // Verified 100% unobstructed sunlit Mirage T-Spawn courtyard, pulled back so full head & bandana sit below top nav bar!
-                val stand = snapToNearestWalkable(38.5f, -5.5f)
-                val standY = sampleFloorHeight(stand.first, stand.second) ?: -0.08f
-                lobbyStandPos = Triple(stand.first, standY, stand.second)
-                lobbyCamPos = Triple(stand.first + 4.10f, standY + 1.12f, stand.second + 1.10f)
-                lobbyLookTarget = Triple(stand.first, standY + 1.12f, stand.second)
+                val framing = computeOpenLobbyFraming(
+                    preferredAnchors = listOf(
+                        9.7f to 23.8f,    // Open sunlit Site A plaza
+                        35.8f to -8.0f,   // Open T-Spawn yard (well clear of outer east wall)
+                        6.0f to -3.5f,    // Open Mid plaza
+                        -15.5f to 22.0f   // Open CT courtyard
+                    )
+                )
+                lobbyStandPos = framing.standPos
+                lobbyCamPos = framing.camPos
+                lobbyLookTarget = framing.lookTarget
+                lobbyDefaultCharYawDeg = framing.charYawDeg
             }
 
             ArenaMapId.DUST2 -> {
@@ -161,10 +201,14 @@ class ArenaWorld(
                 ).map { snapToNearestWalkable(it.first, it.second) }
 
                 tAttackRoutes = listOf(
+                    // Route 0 -> Site A via Long A
                     listOf(13.3f to 31.4f, 27.8f to 10.0f, 31.9f to -20.0f, 27.9f to -34.2f),
+                    // Route 1 -> Site A via Mid / Short
                     listOf(-4.4f to 12.0f, 6.0f to -6.0f, 12.5f to -11.6f, 27.9f to -34.2f),
+                    // Route 2 -> Site B via B Tunnels
                     listOf(-24.0f to 22.0f, -35.4f to -1.1f, -35.0f to -22.0f, -26.9f to -41.1f)
                 ).map { route -> route.map { snapToNearestWalkable(it.first, it.second) } }
+                tRouteBombsiteIdx = listOf(0, 0, 1)
 
                 ctDefenseRoutes = listOf(
                     listOf(22.0f to -30.0f, 27.9f to -34.2f),
@@ -172,13 +216,453 @@ class ArenaWorld(
                     listOf(-12.0f to -27.0f, -24.4f to -28.0f, -26.9f to -41.1f)
                 ).map { route -> route.map { snapToNearestWalkable(it.first, it.second) } }
 
-                val stand = snapToNearestWalkable(27.9f, -34.2f)
-                val standY = sampleFloorHeight(stand.first, stand.second) ?: 2.17f
-                lobbyStandPos = Triple(stand.first, standY, stand.second)
-                lobbyCamPos = Triple(stand.first + 4.10f, standY + 1.12f, stand.second + 1.10f)
-                lobbyLookTarget = Triple(stand.first, standY + 1.12f, stand.second)
+                val framing = computeOpenLobbyFraming(
+                    preferredAnchors = listOf(
+                        27.5f to -33.5f,  // Open sunlit Dust 2 Site A
+                        27.8f to 8.5f,    // Wide Long A courtyard
+                        -1.5f to 45.2f,   // Open T-Spawn terrace
+                        12.5f to -25.5f   // Open CT plaza
+                    )
+                )
+                lobbyStandPos = framing.standPos
+                lobbyCamPos = framing.camPos
+                lobbyLookTarget = framing.lookTarget
+                lobbyDefaultCharYawDeg = framing.charYawDeg
             }
         }
+    }
+
+    private data class LobbyFraming(
+        val standPos: Triple<Float, Float, Float>,
+        val camPos: Triple<Float, Float, Float>,
+        val lookTarget: Triple<Float, Float, Float>,
+        val charYawDeg: Float
+    )
+
+    /**
+     * Programmatically validates open-courtyard camera & character placement against the baked
+     * wall bitmask and floor grid so the camera NEVER clips inside walls/crates and the operative
+     * stands fully visible in an open sunlit zone of Mirage or Dust 2.
+     */
+    private fun computeOpenLobbyFraming(preferredAnchors: List<Pair<Float, Float>>): LobbyFraming {
+        fun isAreaWallFree(px: Float, pz: Float, refY: Float, radius: Float, lowOff: Float, highOff: Float): Boolean {
+            val h = sampleNearestFloorHeight(px, pz, refY, maxStepUp = 1.4f, maxDrop = 2.0f) ?: return false
+            val yLow = min(refY, h) + lowOff
+            val yHigh = maxOf(refY, h) + highOff
+            if (hasWallAt(px, pz, yLow, yHigh)) return false
+            val rDiag = radius * 0.7071f
+            return !hasWallAt(px + radius, pz, yLow, yHigh) &&
+                !hasWallAt(px - radius, pz, yLow, yHigh) &&
+                !hasWallAt(px, pz + radius, yLow, yHigh) &&
+                !hasWallAt(px, pz - radius, yLow, yHigh) &&
+                !hasWallAt(px + rDiag, pz + rDiag, yLow, yHigh) &&
+                !hasWallAt(px - rDiag, pz + rDiag, yLow, yHigh) &&
+                !hasWallAt(px + rDiag, pz - rDiag, yLow, yHigh) &&
+                !hasWallAt(px - rDiag, pz - rDiag, yLow, yHigh)
+        }
+
+        fun isSightlineClean(
+            camX: Float, camZ: Float,
+            standX: Float, standZ: Float,
+            standY: Float
+        ): Boolean {
+            val dx = standX - camX
+            val dz = standZ - camZ
+            val dist = sqrt(dx * dx + dz * dz).coerceAtLeast(0.01f)
+            val ux = dx / dist
+            val uz = dz / dist
+            val px = -uz
+            val pz = ux
+            val steps = (dist / 0.18f).toInt().coerceAtLeast(10)
+            for (i in 0..steps) {
+                val t = i.toFloat() / steps
+                val sx = camX + dx * t
+                val sz = camZ + dz * t
+                // Check center + 0.34m left/right cone across feet-to-head vertical band
+                if (hasWallAt(sx, sz, standY + 0.25f, standY + 1.90f)) return false
+                if (hasWallAt(sx + px * 0.34f, sz + pz * 0.34f, standY + 0.35f, standY + 1.80f)) return false
+                if (hasWallAt(sx - px * 0.34f, sz - pz * 0.34f, standY + 0.35f, standY + 1.80f)) return false
+            }
+            return true
+        }
+
+        var bestScore = Float.NEGATIVE_INFINITY
+        var bestFraming: LobbyFraming? = null
+
+        val candidateStands = ArrayList<Pair<Float, Float>>()
+        for ((ax, az) in preferredAnchors) {
+            val base = snapToNearestWalkable(ax, az)
+            candidateStands.add(base)
+            // Also probe a 2.5m ring around each anchor to find the widest unobstructed pocket
+            for (k in 0 until 8) {
+                val ang = k * (Math.PI * 2.0 / 8.0)
+                val px = base.first + cos(ang).toFloat() * 2.2f
+                val pz = base.second + sin(ang).toFloat() * 2.2f
+                candidateStands.add(snapToNearestWalkable(px, pz))
+            }
+        }
+
+        for ((idx, stand) in candidateStands.withIndex()) {
+            val standY = sampleFloorHeight(stand.first, stand.second) ?: continue
+            if (!isAreaWallFree(stand.first, stand.second, standY, radius = 0.85f, lowOff = 0.30f, highOff = 1.85f)) {
+                continue
+            }
+            // Slight bonus for earlier (preferred) anchor zones
+            val anchorBonus = if (idx < 9) 1.5f else 0f
+
+            for (camDist in listOf(3.25f, 3.65f)) {
+                for (step in 0 until 24) {
+                    val ang = step * (Math.PI * 2.0 / 24.0)
+                    val dirX = cos(ang).toFloat()
+                    val dirZ = sin(ang).toFloat()
+                    val camX = stand.first + dirX * camDist
+                    val camZ = stand.second + dirZ * camDist
+
+                    if (!isAreaWallFree(camX, camZ, standY, radius = 0.90f, lowOff = 0.25f, highOff = 2.05f)) {
+                        continue
+                    }
+                    if (!isSightlineClean(camX, camZ, stand.first, stand.second, standY)) {
+                        continue
+                    }
+
+                    // Measure open scenic backdrop depth behind the character (away from camera)
+                    var backdropClear = 0f
+                    for (d in 1..10) {
+                        val bx = stand.first - dirX * (d * 0.9f)
+                        val bz = stand.second - dirZ * (d * 0.9f)
+                        if (hasWallAt(bx, bz, standY + 0.55f, standY + 2.10f)) break
+                        backdropClear += 0.9f
+                    }
+                    // Also measure side breathing room around character so HUD doesn't crowd walls
+                    val sideX = -dirZ
+                    val sideZ = dirX
+                    var sideClear = 0f
+                    for (s in listOf(-1.6f, 1.6f)) {
+                        if (!hasWallAt(stand.first + sideX * s, stand.second + sideZ * s, standY + 0.45f, standY + 1.85f)) {
+                            sideClear += 1.0f
+                        }
+                    }
+
+                    val score = backdropClear * 1.4f + sideClear * 1.2f + anchorBonus + (if (camDist < 3.4f) 0.5f else 0f)
+                    if (score > bestScore) {
+                        bestScore = score
+                        val yaw = Math.toDegrees(atan2((camX - stand.first).toDouble(), (camZ - stand.second).toDouble())).toFloat()
+                        bestFraming = LobbyFraming(
+                            standPos = Triple(stand.first, standY, stand.second),
+                            camPos = Triple(camX, standY + 1.16f, camZ),
+                            lookTarget = Triple(stand.first, standY + 0.98f, stand.second),
+                            charYawDeg = yaw
+                        )
+                    }
+                }
+            }
+        }
+
+        if (bestFraming != null) return bestFraming
+
+        // Safe fallback if map grid failed to load
+        val fallback = preferredAnchors.firstOrNull()?.let { snapToNearestWalkable(it.first, it.second) } ?: (0f to 0f)
+        val fy = sampleFloorHeight(fallback.first, fallback.second) ?: 0f
+        return LobbyFraming(
+            standPos = Triple(fallback.first, fy, fallback.second),
+            camPos = Triple(fallback.first, fy + 1.16f, fallback.second + 3.25f),
+            lookTarget = Triple(fallback.first, fy + 0.98f, fallback.second),
+            charYawDeg = 0f
+        )
+    }
+
+    // =========================================================================
+    // Precomputed 72x72 Nav-Grid & A* Pathfinding with String-Pulling
+    // =========================================================================
+
+    private fun navCellToWorldX(gx: Int): Float = gridMin + (gx + 0.5f) * (gridSpan / navSize)
+    private fun navCellToWorldZ(gz: Int): Float = gridMin + (gz + 0.5f) * (gridSpan / navSize)
+    private fun worldToNavX(x: Float): Int = floor((x - gridMin) / gridSpan * navSize).toInt().coerceIn(0, navSize - 1)
+    private fun worldToNavZ(z: Float): Int = floor((z - gridMin) / gridSpan * navSize).toInt().coerceIn(0, navSize - 1)
+
+    private fun buildNavGrid() {
+        val rProbe = 0.34f
+        for (gz in 0 until navSize) {
+            val wz = navCellToWorldZ(gz)
+            for (gx in 0 until navSize) {
+                val wx = navCellToWorldX(gx)
+                val idx = gz * navSize + gx
+                val h = sampleFloorHeight(wx, wz)
+                if (h == null) {
+                    navWalkable[idx] = false
+                    continue
+                }
+                val bodyLow = h + 0.58f
+                val bodyHigh = h + 1.52f
+                val blocked = hasWallAt(wx, wz, bodyLow, bodyHigh) ||
+                    hasWallAt(wx + rProbe, wz, bodyLow, bodyHigh) ||
+                    hasWallAt(wx - rProbe, wz, bodyLow, bodyHigh) ||
+                    hasWallAt(wx, wz + rProbe, bodyLow, bodyHigh) ||
+                    hasWallAt(wx, wz - rProbe, bodyLow, bodyHigh)
+                if (!blocked) {
+                    navWalkable[idx] = true
+                    navFloorY[idx] = h
+                }
+            }
+        }
+
+        // Precompute valid 8-connected neighbor edges (checking wall clearance & step height)
+        for (gz in 0 until navSize) {
+            val wz = navCellToWorldZ(gz)
+            for (gx in 0 until navSize) {
+                val idx = gz * navSize + gx
+                if (!navWalkable[idx]) continue
+                val wx = navCellToWorldX(gx)
+                val hA = navFloorY[idx]
+                var mask = 0
+                for (dir in 0 until 8) {
+                    val nx = gx + NAV_DX[dir]
+                    val nz = gz + NAV_DZ[dir]
+                    if (nx !in 0 until navSize || nz !in 0 until navSize) continue
+                    val nIdx = nz * navSize + nx
+                    if (!navWalkable[nIdx]) continue
+                    val hB = navFloorY[nIdx]
+                    if (abs(hB - hA) > 1.05f) continue
+
+                    // Prevent diagonal corner cutting around solid walls
+                    if (NAV_DX[dir] != 0 && NAV_DZ[dir] != 0) {
+                        val c1 = gz * navSize + nx
+                        val c2 = nz * navSize + gx
+                        if (!navWalkable[c1] || !navWalkable[c2]) continue
+                    }
+
+                    val nwx = navCellToWorldX(nx)
+                    val nwz = navCellToWorldZ(nz)
+                    val midX = (wx + nwx) * 0.5f
+                    val midZ = (wz + nwz) * 0.5f
+                    val midLow = min(hA, hB) + 0.58f
+                    val midHigh = maxOf(hA, hB) + 1.52f
+                    if (hasWallAt(midX, midZ, midLow, midHigh)) continue
+                    if (sampleNearestFloorHeight(midX, midZ, (hA + hB) * 0.5f, 1.15f, 2.2f) == null) continue
+
+                    mask = mask or (1 shl dir)
+                }
+                navEdgeMask[idx] = mask
+            }
+        }
+    }
+
+    private fun findNearestWalkableNavCell(x: Float, z: Float): Int {
+        val cx = worldToNavX(x)
+        val cz = worldToNavZ(z)
+        val direct = cz * navSize + cx
+        if (navWalkable[direct] && navEdgeMask[direct] != 0) return direct
+
+        var bestIdx = -1
+        var bestD2 = Float.MAX_VALUE
+        for (ring in 1..6) {
+            for (dz in -ring..ring) {
+                for (dx in -ring..ring) {
+                    if (abs(dx) != ring && abs(dz) != ring) continue
+                    val nx = cx + dx
+                    val nz = cz + dz
+                    if (nx !in 0 until navSize || nz !in 0 until navSize) continue
+                    val idx = nz * navSize + nx
+                    if (navWalkable[idx] && navEdgeMask[idx] != 0) {
+                        val wx = navCellToWorldX(nx)
+                        val wz = navCellToWorldZ(nz)
+                        val d2 = (wx - x) * (wx - x) + (wz - z) * (wz - z)
+                        if (d2 < bestD2) {
+                            bestD2 = d2
+                            bestIdx = idx
+                        }
+                    }
+                }
+            }
+            if (bestIdx >= 0) return bestIdx
+        }
+        return direct
+    }
+
+    /**
+     * Checks if a bot can walk in a straight line from (ax, az) to (bx, bz) with wall clearance.
+     */
+    fun hasWalkableLine(ax: Float, az: Float, bx: Float, bz: Float): Boolean {
+        val dx = bx - ax
+        val dz = bz - az
+        val dist = sqrt(dx * dx + dz * dz)
+        if (dist < 0.2f) return true
+        var refY = sampleFloorHeight(ax, az) ?: return false
+        val steps = (dist / 0.42f).toInt().coerceAtLeast(2)
+        for (i in 1..steps) {
+            val t = i.toFloat() / steps
+            val px = ax + dx * t
+            val pz = az + dz * t
+            val h = sampleNearestFloorHeight(px, pz, refY, maxStepUp = 0.90f, maxDrop = 2.4f) ?: return false
+            val low = h + 0.58f
+            val high = h + 1.52f
+            if (hasWallAt(px, pz, low, high) ||
+                hasWallAt(px + 0.30f, pz, low, high) ||
+                hasWallAt(px - 0.30f, pz, low, high) ||
+                hasWallAt(px, pz + 0.30f, low, high) ||
+                hasWallAt(px, pz - 0.30f, low, high)
+            ) {
+                return false
+            }
+            refY = h
+        }
+        return true
+    }
+
+    /**
+     * Computes an obstacle-free A* path through corridors & doorways from (startX, startZ)
+     * to (goalX, goalZ), then smooths waypoints via line-of-sight string-pulling.
+     */
+    fun findPath(startX: Float, startZ: Float, goalX: Float, goalZ: Float): List<Pair<Float, Float>> {
+        if (hasWalkableLine(startX, startZ, goalX, goalZ)) {
+            return listOf(goalX to goalZ)
+        }
+
+        val total = navSize * navSize
+        val startCell = findNearestWalkableNavCell(startX, startZ)
+        val goalCell = findNearestWalkableNavCell(goalX, goalZ)
+        if (startCell == goalCell) return listOf(goalX to goalZ)
+
+        val goalGx = goalCell % navSize
+        val goalGz = goalCell / navSize
+
+        val gScore = FloatArray(total) { Float.POSITIVE_INFINITY }
+        val fScore = FloatArray(total) { Float.POSITIVE_INFINITY }
+        val cameFrom = IntArray(total) { -1 }
+        val closed = BooleanArray(total)
+        val inOpen = BooleanArray(total)
+
+        // Binary min-heap of cell indices ordered by fScore
+        val heap = IntArray(total)
+        var heapSize = 0
+
+        fun heapPush(cell: Int) {
+            var i = heapSize++
+            heap[i] = cell
+            while (i > 0) {
+                val p = (i - 1) ushr 1
+                if (fScore[heap[i]] < fScore[heap[p]]) {
+                    val tmp = heap[p]; heap[p] = heap[i]; heap[i] = tmp
+                    i = p
+                } else break
+            }
+        }
+
+        fun heapPop(): Int {
+            val top = heap[0]
+            heapSize--
+            if (heapSize > 0) {
+                heap[0] = heap[heapSize]
+                var i = 0
+                while (true) {
+                    val l = (i shl 1) + 1
+                    val r = l + 1
+                    var smallest = i
+                    if (l < heapSize && fScore[heap[l]] < fScore[heap[smallest]]) smallest = l
+                    if (r < heapSize && fScore[heap[r]] < fScore[heap[smallest]]) smallest = r
+                    if (smallest != i) {
+                        val tmp = heap[i]; heap[i] = heap[smallest]; heap[smallest] = tmp
+                        i = smallest
+                    } else break
+                }
+            }
+            return top
+        }
+
+        fun heuristic(cell: Int): Float {
+            val dx = abs((cell % navSize) - goalGx).toFloat()
+            val dz = abs((cell / navSize) - goalGz).toFloat()
+            return (dx + dz) + (1.4142f - 2f) * min(dx, dz)
+        }
+
+        gScore[startCell] = 0f
+        fScore[startCell] = heuristic(startCell)
+        inOpen[startCell] = true
+        heapPush(startCell)
+
+        var bestReachable = startCell
+        var bestReachableH = fScore[startCell]
+        var expansions = 0
+        val maxExpansions = 1800
+
+        while (heapSize > 0 && expansions < maxExpansions) {
+            val cur = heapPop()
+            if (closed[cur]) continue
+            closed[cur] = true
+            expansions++
+
+            if (cur == goalCell) {
+                bestReachable = goalCell
+                break
+            }
+
+            val hCur = heuristic(cur)
+            if (hCur < bestReachableH) {
+                bestReachableH = hCur
+                bestReachable = cur
+            }
+
+            val curGx = cur % navSize
+            val curGz = cur / navSize
+            val edgeMask = navEdgeMask[cur]
+            if (edgeMask == 0) continue
+
+            for (dir in 0 until 8) {
+                if ((edgeMask and (1 shl dir)) == 0) continue
+                val nx = curGx + NAV_DX[dir]
+                val nz = curGz + NAV_DZ[dir]
+                val nCell = nz * navSize + nx
+                if (closed[nCell]) continue
+
+                val stepCost = if (NAV_DX[dir] != 0 && NAV_DZ[dir] != 0) 1.4142f else 1.0f
+                val tentativeG = gScore[cur] + stepCost
+                if (tentativeG < gScore[nCell]) {
+                    cameFrom[nCell] = cur
+                    gScore[nCell] = tentativeG
+                    fScore[nCell] = tentativeG + heuristic(nCell) * 1.08f
+                    inOpen[nCell] = true
+                    heapPush(nCell)
+                }
+            }
+        }
+
+        // Reconstruct raw cell chain
+        val rawPoints = ArrayList<Pair<Float, Float>>()
+        var trace = bestReachable
+        var safety = 0
+        while (trace != -1 && trace != startCell && safety < 256) {
+            rawPoints.add(navCellToWorldX(trace % navSize) to navCellToWorldZ(trace / navSize))
+            trace = cameFrom[trace]
+            safety++
+        }
+        rawPoints.reverse()
+        if (bestReachable == goalCell) {
+            rawPoints.add(goalX to goalZ)
+        }
+        if (rawPoints.isEmpty()) return listOf(goalX to goalZ)
+
+        // String-pulling path smoothing so bots move cleanly down corridors
+        val smoothed = ArrayList<Pair<Float, Float>>()
+        var anchorX = startX
+        var anchorZ = startZ
+        var i = 0
+        while (i < rawPoints.size) {
+            var farthest = i
+            val maxLook = min(rawPoints.size - 1, i + 8)
+            for (j in maxLook downTo i + 1) {
+                val p = rawPoints[j]
+                if (hasWalkableLine(anchorX, anchorZ, p.first, p.second)) {
+                    farthest = j
+                    break
+                }
+            }
+            val chosen = rawPoints[farthest]
+            smoothed.add(chosen)
+            anchorX = chosen.first
+            anchorZ = chosen.second
+            i = farthest + 1
+        }
+        return smoothed
     }
 
     private fun decodeRle(rle: JSONArray, totalCells: Int): IntArray {
@@ -267,7 +751,6 @@ class ArenaWorld(
 
     /**
      * Picks the best matching walkable floor height at (x, z) near [refY].
-     * Enables smooth walking inside multi-story Mirage buildings (Palace, B Apps, Connector, Underpass).
      */
     fun sampleNearestFloorHeight(
         x: Float,
@@ -339,10 +822,7 @@ class ArenaWorld(
     }
 
     /**
-     * Swept multi-step solid wall & floor collision:
-     * Uses both the 3-layer floor heightmap AND the 512x512 32-bit vertical wall slice grid
-     * (checking chest/torso elevation [floorY + 0.58m .. floorY + 1.52m] so stairs & curbs
-     * remain smoothly walkable and doorways/arches pass freely, while EVERY vertical wall is 100% solid!).
+     * Swept multi-step solid wall & floor collision.
      */
     fun resolveMovement(
         curX: Float,
@@ -394,7 +874,6 @@ class ArenaWorld(
             return if (valid >= 2) c else null
         }
 
-        // Subdivide movement into <= 0.14m swept micro-steps so players can NEVER skip through thin walls
         val steps = kotlin.math.ceil((totalDist / 0.14f).toDouble()).toInt().coerceIn(1, 12)
         val stepDx = totalDx / steps
         val stepDz = totalDz / steps
@@ -423,8 +902,7 @@ class ArenaWorld(
     }
 
     /**
-     * Marches a 3D ray through the multi-layer CS2 floors AND 512x512 vertical wall grid
-     * to block bullets & bot line-of-sight accurately on every solid wall and floor.
+     * Marches a 3D ray through the multi-layer floors AND 512x512 vertical wall grid.
      */
     fun raycastWalls(
         ox: Float, oy: Float, oz: Float,
@@ -492,5 +970,10 @@ class ArenaWorld(
         val dx = ax - bx
         val dz = az - bz
         return sqrt(dx * dx + dz * dz)
+    }
+
+    companion object {
+        private val NAV_DX = intArrayOf(1, -1, 0, 0, 1, 1, -1, -1)
+        private val NAV_DZ = intArrayOf(0, 0, 1, -1, 1, -1, 1, -1)
     }
 }
