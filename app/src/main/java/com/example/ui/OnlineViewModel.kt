@@ -11,22 +11,17 @@ import com.example.online.FriendEntry
 import com.example.online.FriendRequest
 import com.example.online.LobbyInvite
 import com.example.online.MultiplayerLobby
-import com.example.online.OnlineRepository
 import com.example.online.PlayerMatchState
 import com.example.online.PlayerProfile
-import com.google.firebase.firestore.FirebaseFirestoreException
-import kotlinx.coroutines.CancellationException
-import kotlinx.coroutines.ExperimentalCoroutinesApi
+import com.example.online.SupabaseOnlineRepository
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
-import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
-import kotlinx.coroutines.flow.catch
-import kotlinx.coroutines.flow.flatMapLatest
-import kotlinx.coroutines.flow.flowOf
-import kotlinx.coroutines.flow.map
-import kotlinx.coroutines.flow.stateIn
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import java.util.concurrent.atomic.AtomicBoolean
 
 sealed interface OnlineUiState<out T> {
     data object Loading : OnlineUiState<Nothing>
@@ -34,18 +29,31 @@ sealed interface OnlineUiState<out T> {
     data class Error(val message: String) : OnlineUiState<Nothing>
 }
 
-@OptIn(ExperimentalCoroutinesApi::class)
+/**
+ * Cloud OnlineViewModel backed by SupabaseOnlineRepository (zero Google Services).
+ * Synchronizes player profile customization, cloud friends/requests, lobby invites,
+ * 1v1 lobbies, and real-time match ticks.
+ */
 class OnlineViewModel(
     val currentUserId: String,
-    private val initialDisplayName: String?,
-    private val repository: OnlineRepository
+    private val initialLoginName: String,
+    private val repository: SupabaseOnlineRepository
 ) : ViewModel() {
 
     private val _profileState = MutableStateFlow<OnlineUiState<PlayerProfile>>(OnlineUiState.Loading)
     val profileState: StateFlow<OnlineUiState<PlayerProfile>> = _profileState.asStateFlow()
 
-    private val _activeLobbyId = MutableStateFlow<String?>(null)
-    val activeLobbyId: StateFlow<String?> = _activeLobbyId.asStateFlow()
+    private val _friendsState = MutableStateFlow<OnlineUiState<List<FriendEntry>>>(OnlineUiState.Loading)
+    val friendsState: StateFlow<OnlineUiState<List<FriendEntry>>> = _friendsState.asStateFlow()
+
+    private val _incomingRequests = MutableStateFlow<List<FriendRequest>>(emptyList())
+    val incomingRequests: StateFlow<List<FriendRequest>> = _incomingRequests.asStateFlow()
+
+    private val _outgoingRequests = MutableStateFlow<List<FriendRequest>>(emptyList())
+    val outgoingRequests: StateFlow<List<FriendRequest>> = _outgoingRequests.asStateFlow()
+
+    private val _incomingInvites = MutableStateFlow<List<LobbyInvite>>(emptyList())
+    val incomingInvites: StateFlow<List<LobbyInvite>> = _incomingInvites.asStateFlow()
 
     private val _searchResult = MutableStateFlow<PlayerProfile?>(null)
     val searchResult: StateFlow<PlayerProfile?> = _searchResult.asStateFlow()
@@ -53,83 +61,30 @@ class OnlineViewModel(
     private val _isSearching = MutableStateFlow(false)
     val isSearching: StateFlow<Boolean> = _isSearching.asStateFlow()
 
+    private val _isSavingProfile = MutableStateFlow(false)
+    val isSavingProfile: StateFlow<Boolean> = _isSavingProfile.asStateFlow()
+
     private val _statusBanner = MutableStateFlow<String?>(null)
     val statusBanner: StateFlow<String?> = _statusBanner.asStateFlow()
 
-    val friendsState: StateFlow<OnlineUiState<List<FriendEntry>>> = repository.observeFriends(currentUserId)
-        .map<List<FriendEntry>, OnlineUiState<List<FriendEntry>>> { OnlineUiState.Success(it) }
-        .catch { error ->
-            val fe = generateSequence(error) { it.cause }.filterIsInstance<FirebaseFirestoreException>().firstOrNull()
-            if (fe == null && error is CancellationException) throw error
-            emit(OnlineUiState.Error((fe ?: error).message ?: "Ошибка загрузки списка друзей"))
-        }
-        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000L), OnlineUiState.Loading)
+    private val _activeLobbyId = MutableStateFlow<String?>(null)
+    val activeLobbyId: StateFlow<String?> = _activeLobbyId.asStateFlow()
 
-    val incomingRequests: StateFlow<List<FriendRequest>> = repository.observeIncomingFriendRequests(currentUserId)
-        .catch { error ->
-            val fe = generateSequence(error) { it.cause }.filterIsInstance<FirebaseFirestoreException>().firstOrNull()
-            if (fe == null && error is CancellationException) throw error
-            emit(emptyList())
-        }
-        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000L), emptyList())
+    private val _activeLobby = MutableStateFlow<MultiplayerLobby?>(null)
+    val activeLobby: StateFlow<MultiplayerLobby?> = _activeLobby.asStateFlow()
 
-    val outgoingRequests: StateFlow<List<FriendRequest>> = repository.observeOutgoingFriendRequests(currentUserId)
-        .catch { error ->
-            val fe = generateSequence(error) { it.cause }.filterIsInstance<FirebaseFirestoreException>().firstOrNull()
-            if (fe == null && error is CancellationException) throw error
-            emit(emptyList())
-        }
-        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000L), emptyList())
+    private val _lobbyMemberStates = MutableStateFlow<List<PlayerMatchState>>(emptyList())
+    val lobbyMemberStates: StateFlow<List<PlayerMatchState>> = _lobbyMemberStates.asStateFlow()
 
-    val incomingInvites: StateFlow<List<LobbyInvite>> = repository.observeIncomingInvites(currentUserId)
-        .catch { error ->
-            val fe = generateSequence(error) { it.cause }.filterIsInstance<FirebaseFirestoreException>().firstOrNull()
-            if (fe == null && error is CancellationException) throw error
-            emit(emptyList())
-        }
-        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000L), emptyList())
-
-    val activeLobby: StateFlow<MultiplayerLobby?> = _activeLobbyId
-        .flatMapLatest { id ->
-            if (id.isNullOrBlank()) flowOf(null) else repository.observeLobby(id)
-        }
-        .catch { error ->
-            val fe = generateSequence(error) { it.cause }.filterIsInstance<FirebaseFirestoreException>().firstOrNull()
-            if (fe == null && error is CancellationException) throw error
-            emit(null)
-        }
-        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000L), null)
-
-    val lobbyMemberStates: StateFlow<List<PlayerMatchState>> = activeLobby
-        .flatMapLatest { lobby ->
-            if (lobby == null || lobby.id.isBlank()) flowOf(emptyList())
-            else repository.observeLobbyMemberStates(lobby.id, lobby.memberUids)
-        }
-        .catch { error ->
-            val fe = generateSequence(error) { it.cause }.filterIsInstance<FirebaseFirestoreException>().firstOrNull()
-            if (fe == null && error is CancellationException) throw error
-            emit(emptyList())
-        }
-        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000L), emptyList())
+    private var lobbyPollJob: Job? = null
+    private val tickInFlight = AtomicBoolean(false)
 
     init {
-        initializeProfile()
+        initializeAndStartSocialPolling()
     }
 
-    fun initializeProfile() {
-        viewModelScope.launch {
-            _profileState.value = OnlineUiState.Loading
-            repository.ensurePlayerProfile(initialDisplayName)
-                .onSuccess { profile ->
-                    _profileState.value = OnlineUiState.Success(profile)
-                }
-                .onFailure { err ->
-                    _profileState.value = OnlineUiState.Error(
-                        err.localizedMessage ?: "Не удалось загрузить профиль игрока"
-                    )
-                }
-        }
-    }
+    fun currentProfileOrNull(): PlayerProfile? =
+        (_profileState.value as? OnlineUiState.Success)?.data
 
     fun clearBanner() {
         _statusBanner.value = null
@@ -139,13 +94,83 @@ class OnlineViewModel(
         _searchResult.value = null
     }
 
-    fun currentProfileOrNull(): PlayerProfile? =
-        (_profileState.value as? OnlineUiState.Success)?.data
+    private fun initializeAndStartSocialPolling() {
+        viewModelScope.launch {
+            _profileState.value = OnlineUiState.Loading
+            repository.ensurePlayerProfile(currentUserId, initialLoginName)
+                .onSuccess { profile ->
+                    _profileState.value = OnlineUiState.Success(profile)
+                    refreshSocialData()
+                }
+                .onFailure { err ->
+                    _profileState.value = OnlineUiState.Error(
+                        err.localizedMessage ?: "Не удалось загрузить профиль игрока"
+                    )
+                }
+
+            // Periodic background cloud sync for friends, requests, and incoming lobby invites
+            while (isActive) {
+                delay(3_200L)
+                if (_activeLobby.value?.status != "playing") {
+                    if (_profileState.value !is OnlineUiState.Success) {
+                        repository.ensurePlayerProfile(currentUserId, initialLoginName)
+                            .onSuccess { _profileState.value = OnlineUiState.Success(it) }
+                    }
+                    if (_profileState.value is OnlineUiState.Success) {
+                        refreshSocialData()
+                    }
+                }
+            }
+        }
+    }
+
+    fun refreshSocialData() {
+        viewModelScope.launch {
+            repository.fetchFriends(currentUserId)
+                .onSuccess { _friendsState.value = OnlineUiState.Success(it) }
+                .onFailure { err ->
+                    if (_friendsState.value is OnlineUiState.Loading) {
+                        _friendsState.value = OnlineUiState.Error(
+                            err.localizedMessage ?: "Ошибка загрузки списка друзей"
+                        )
+                    }
+                }
+            repository.fetchFriendRequests(currentUserId)
+                .onSuccess { (incoming, outgoing) ->
+                    _incomingRequests.value = incoming
+                    _outgoingRequests.value = outgoing
+                }
+            repository.fetchIncomingInvites(currentUserId)
+                .onSuccess { _incomingInvites.value = it }
+        }
+    }
+
+    fun saveProfileCustomization(
+        displayName: String,
+        avatarData: String,
+        onSaved: () -> Unit
+    ) {
+        viewModelScope.launch {
+            _isSavingProfile.value = true
+            _statusBanner.value = null
+            repository.updatePlayerProfile(currentUserId, displayName, avatarData)
+                .onSuccess { updated ->
+                    _profileState.value = OnlineUiState.Success(updated)
+                    _statusBanner.value = "Профиль обновлён!"
+                    onSaved()
+                }
+                .onFailure { err ->
+                    _statusBanner.value = err.localizedMessage ?: "Не удалось сохранить профиль"
+                }
+            _isSavingProfile.value = false
+        }
+    }
 
     fun searchByShortId(shortId: String) {
         viewModelScope.launch {
             _isSearching.value = true
             _searchResult.value = null
+            _statusBanner.value = null
             repository.findPlayerByShortId(shortId)
                 .onSuccess { found ->
                     _searchResult.value = found
@@ -161,12 +186,12 @@ class OnlineViewModel(
     }
 
     fun sendFriendRequest(target: PlayerProfile) {
-        val me = currentProfileOrNull() ?: return
         viewModelScope.launch {
-            repository.sendFriendRequest(me, target)
+            repository.sendFriendRequest(currentUserId, target)
                 .onSuccess {
                     _statusBanner.value = "Заявка отправлена игроку ${target.displayName} (ID ${target.shortId})"
                     _searchResult.value = null
+                    refreshSocialData()
                 }
                 .onFailure { err ->
                     _statusBanner.value = err.localizedMessage ?: "Не удалось отправить заявку"
@@ -175,15 +200,15 @@ class OnlineViewModel(
     }
 
     fun respondFriendRequest(req: FriendRequest, accept: Boolean) {
-        val me = currentProfileOrNull() ?: return
         viewModelScope.launch {
-            repository.respondFriendRequest(req, me, accept)
+            repository.respondFriendRequest(req.id, accept)
                 .onSuccess {
                     _statusBanner.value = if (accept) {
                         "${req.fromName} добавлен в друзья!"
                     } else {
                         "Заявка от ${req.fromName} отклонена"
                     }
+                    refreshSocialData()
                 }
                 .onFailure { err ->
                     _statusBanner.value = err.localizedMessage ?: "Ошибка обработки заявки"
@@ -194,8 +219,13 @@ class OnlineViewModel(
     fun removeFriend(friend: FriendEntry) {
         viewModelScope.launch {
             repository.removeFriend(friend.friendUid)
-                .onSuccess { _statusBanner.value = "${friend.friendName} удалён из друзей" }
-                .onFailure { err -> _statusBanner.value = err.localizedMessage ?: "Ошибка удаления" }
+                .onSuccess {
+                    _statusBanner.value = "${friend.friendName} удалён из друзей"
+                    refreshSocialData()
+                }
+                .onFailure { err ->
+                    _statusBanner.value = err.localizedMessage ?: "Ошибка удаления"
+                }
         }
     }
 
@@ -205,7 +235,7 @@ class OnlineViewModel(
         roundsToWin: Int,
         allowBots: Boolean,
         team: TeamSide,
-        onCreated: (String) -> Unit
+        onCreated: () -> Unit
     ) {
         val me = currentProfileOrNull()
         if (me == null) {
@@ -213,13 +243,39 @@ class OnlineViewModel(
             return
         }
         viewModelScope.launch {
+            _statusBanner.value = null
             repository.createLobby(me, map, mode, roundsToWin, allowBots, team)
-                .onSuccess { lobbyId ->
-                    _activeLobbyId.value = lobbyId
-                    onCreated(lobbyId)
+                .onSuccess { lobby ->
+                    _activeLobbyId.value = lobby.id
+                    _activeLobby.value = lobby
+                    _lobbyMemberStates.value = listOf(
+                        PlayerMatchState(
+                            id = me.userId,
+                            userId = me.userId,
+                            shortId = me.shortId,
+                            displayName = me.displayName,
+                            avatarData = me.avatarData,
+                            team = team.name
+                        )
+                    )
+                    startLobbyPolling(lobby.id)
+                    onCreated()
                 }
                 .onFailure { err ->
-                    _statusBanner.value = err.localizedMessage ?: "Не удалось создать лобби"
+                    _statusBanner.value = err.localizedMessage ?: "Не удалось создать облачное лобби"
+                }
+        }
+    }
+
+    fun inviteFriendToActiveLobby(friend: FriendEntry) {
+        val lobby = _activeLobby.value ?: return
+        viewModelScope.launch {
+            repository.sendLobbyInvite(lobby, currentUserId, friend.friendUid)
+                .onSuccess {
+                    _statusBanner.value = "Приглашение отправлено: ${friend.friendName}"
+                }
+                .onFailure { err ->
+                    _statusBanner.value = err.localizedMessage ?: "Ошибка приглашения"
                 }
         }
     }
@@ -227,10 +283,14 @@ class OnlineViewModel(
     fun acceptLobbyInvite(invite: LobbyInvite, preferredTeam: TeamSide, onJoined: () -> Unit) {
         val me = currentProfileOrNull() ?: return
         viewModelScope.launch {
-            repository.respondLobbyInvite(invite, accept = true)
+            repository.respondLobbyInvite(invite.id, accept = true)
+            _incomingInvites.value = _incomingInvites.value.filterNot { it.id == invite.id }
             repository.joinLobby(invite.lobbyId, me, preferredTeam)
-                .onSuccess {
-                    _activeLobbyId.value = invite.lobbyId
+                .onSuccess { (lobby, members) ->
+                    _activeLobbyId.value = lobby.id
+                    _activeLobby.value = lobby
+                    _lobbyMemberStates.value = members
+                    startLobbyPolling(lobby.id)
                     onJoined()
                 }
                 .onFailure { err ->
@@ -240,51 +300,61 @@ class OnlineViewModel(
     }
 
     fun declineLobbyInvite(invite: LobbyInvite) {
+        _incomingInvites.value = _incomingInvites.value.filterNot { it.id == invite.id }
         viewModelScope.launch {
-            repository.respondLobbyInvite(invite, accept = false)
-        }
-    }
-
-    fun inviteFriendToActiveLobby(friend: FriendEntry) {
-        val me = currentProfileOrNull() ?: return
-        val lobby = activeLobby.value ?: return
-        viewModelScope.launch {
-            repository.sendLobbyInvite(lobby, me, friend.friendUid)
-                .onSuccess { _statusBanner.value = "Приглашение отправлено: ${friend.friendName}" }
-                .onFailure { err -> _statusBanner.value = err.localizedMessage ?: "Ошибка приглашения" }
+            repository.respondLobbyInvite(invite.id, accept = false)
         }
     }
 
     fun updateActiveLobbyConfig(map: ArenaMapId, mode: GameMode, roundsToWin: Int, allowBots: Boolean) {
-        val lobbyId = _activeLobbyId.value ?: return
+        val lobby = _activeLobby.value ?: return
+        _activeLobby.value = lobby.copy(
+            mapId = map.name,
+            mode = mode.name,
+            roundsToWin = roundsToWin,
+            allowBots = allowBots
+        )
         viewModelScope.launch {
-            repository.updateLobbyConfig(lobbyId, map, mode, roundsToWin, allowBots)
+            repository.updateLobbyConfig(lobby.id, map, mode, roundsToWin, allowBots)
                 .onFailure { err -> _statusBanner.value = err.localizedMessage ?: "Ошибка обновления лобби" }
         }
     }
 
     fun switchMyTeam(side: TeamSide) {
         val lobbyId = _activeLobbyId.value ?: return
+        _lobbyMemberStates.value = _lobbyMemberStates.value.map { st ->
+            if (st.userId == currentUserId) st.copy(team = side.name) else st
+        }
         viewModelScope.launch {
-            repository.switchMyTeam(lobbyId, side)
+            repository.switchMyTeam(lobbyId, currentUserId, side)
                 .onFailure { err -> _statusBanner.value = err.localizedMessage ?: "Ошибка смены команды" }
         }
     }
 
     fun startActiveLobbyMatch() {
-        val lobbyId = _activeLobbyId.value ?: return
+        val lobby = _activeLobby.value ?: return
         viewModelScope.launch {
-            repository.startLobbyMatch(lobbyId)
-                .onFailure { err -> _statusBanner.value = err.localizedMessage ?: "Не удалось запустить матч" }
+            repository.startLobbyMatch(lobby.id)
+                .onSuccess {
+                    _activeLobby.value = lobby.copy(status = "playing")
+                }
+                .onFailure { err ->
+                    _statusBanner.value = err.localizedMessage ?: "Не удалось запустить матч"
+                }
         }
     }
 
     fun leaveActiveLobby(onLeft: () -> Unit = {}) {
+        val lobby = _activeLobby.value
         val lobbyId = _activeLobbyId.value
+        lobbyPollJob?.cancel()
+        lobbyPollJob = null
         _activeLobbyId.value = null
+        _activeLobby.value = null
+        _lobbyMemberStates.value = emptyList()
         viewModelScope.launch {
             if (!lobbyId.isNullOrBlank()) {
-                repository.leaveLobby(lobbyId)
+                repository.leaveLobby(lobbyId, currentUserId, isHost = lobby?.hostUid == currentUserId)
             }
             onLeft()
         }
@@ -307,37 +377,85 @@ class OnlineViewModel(
         deaths: Int,
         outgoingHit: OutgoingHitEvent?
     ) {
+        if (lobbyId.isBlank()) return
+        // Avoid piling up concurrent HTTP patches; always let outgoing hit events through immediately
+        if (outgoingHit == null && !tickInFlight.compareAndSet(false, true)) return
         viewModelScope.launch {
-            repository.publishLiveMatchState(
-                lobbyId, team, x, y, z, yawDeg, pitchDeg,
-                hp, dead, moving, shooting, weaponName, kills, deaths, outgoingHit
-            )
+            try {
+                repository.publishMatchTick(
+                    lobbyId = lobbyId,
+                    userId = currentUserId,
+                    team = team,
+                    x = x,
+                    y = y,
+                    z = z,
+                    yawDeg = yawDeg,
+                    pitchDeg = pitchDeg,
+                    hp = hp,
+                    dead = dead,
+                    moving = moving,
+                    shooting = shooting,
+                    weaponName = weaponName,
+                    kills = kills,
+                    deaths = deaths,
+                    outgoingHit = outgoingHit
+                )
+            } finally {
+                if (outgoingHit == null) tickInFlight.set(false)
+            }
         }
     }
 
-    fun recordOnlineMatchStats(kills: Int, headshots: Int) {
-        viewModelScope.launch {
-            repository.recordOnlineStats(kills, headshots)
+    suspend fun setOfflineAndLeaveBeforeSignOut() {
+        val lobby = _activeLobby.value
+        val lobbyId = _activeLobbyId.value
+        lobbyPollJob?.cancel()
+        lobbyPollJob = null
+        _activeLobbyId.value = null
+        _activeLobby.value = null
+        _lobbyMemberStates.value = emptyList()
+        if (!lobbyId.isNullOrBlank()) {
+            repository.leaveLobby(lobbyId, currentUserId, isHost = lobby?.hostUid == currentUserId)
+        }
+        repository.setOnlineStatus(currentUserId, online = false)
+    }
+
+    private fun startLobbyPolling(lobbyId: String) {
+        lobbyPollJob?.cancel()
+        lobbyPollJob = viewModelScope.launch {
+            while (isActive && _activeLobbyId.value == lobbyId) {
+                repository.fetchLobbySnapshot(lobbyId)
+                    .onSuccess { snapshot ->
+                        if (snapshot == null) {
+                            _statusBanner.value = "Хост закрыл лобби."
+                            _activeLobbyId.value = null
+                            _activeLobby.value = null
+                            _lobbyMemberStates.value = emptyList()
+                            return@launch
+                        }
+                        _activeLobby.value = snapshot.first
+                        _lobbyMemberStates.value = snapshot.second
+                    }
+                val inMatch = _activeLobby.value?.status == "playing"
+                delay(if (inMatch) 160L else 1_100L)
+            }
         }
     }
 
-    fun setOfflineBeforeSignOut() {
-        viewModelScope.launch {
-            val lobbyId = _activeLobbyId.value
-            if (!lobbyId.isNullOrBlank()) repository.leaveLobby(lobbyId)
-            repository.updatePresence(online = false, activeLobbyId = "")
-        }
+    override fun onCleared() {
+        lobbyPollJob?.cancel()
+        super.onCleared()
     }
 
     companion object {
         fun factory(
             currentUserId: String,
-            initialDisplayName: String?,
-            repository: OnlineRepository
+            initialLoginName: String,
+            repository: SupabaseOnlineRepository
         ): ViewModelProvider.Factory = object : ViewModelProvider.Factory {
             @Suppress("UNCHECKED_CAST")
             override fun <T : ViewModel> create(modelClass: Class<T>): T {
-                return OnlineViewModel(currentUserId, initialDisplayName, repository) as T
+                return OnlineViewModel(currentUserId, initialLoginName, repository) as T
             }
         }
     }

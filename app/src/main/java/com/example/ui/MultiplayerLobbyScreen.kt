@@ -21,9 +21,11 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.CutCornerShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.GroupAdd
@@ -65,7 +67,6 @@ import com.example.ui.theme.RtxEmerald
 import com.example.ui.theme.TacticalAmber
 import com.example.ui.theme.TextPrimary
 import com.example.ui.theme.TextSecondary
-import com.example.ui.theme.ThreatCrimson
 
 @Composable
 fun MultiplayerLobbyScreen(
@@ -142,7 +143,7 @@ fun MultiplayerLobbyScreen(
                             color = TextPrimary
                         )
                         Text(
-                            text = "Хост: ${lobby.hostName}  •  Игроков: ${lobby.memberUids.size}/10  •  ${if (lobby.allowBots) "С ботами" else "Только друзья (1v1 / Команда)"}",
+                            text = "Хост: ${lobby.hostName}  •  Игроков: ${lobby.memberUids.size}/10  •  ${if (lobby.allowBots) "С ботами" else "1 на 1 / Только друзья"}",
                             fontSize = m.sp(9.5f),
                             color = TextSecondary
                         )
@@ -160,7 +161,7 @@ fun MultiplayerLobbyScreen(
                             containerColor = if (showInvitePanel) IceCyan else ElevatedGunmetal,
                             contentColor = if (showInvitePanel) ObsidianVoid else IceCyan
                         ),
-                        border = BorderStroke(1.dp, IceCyan.copy(alpha = 0.6f)),
+                        border = BorderStroke(1.dp, IceCyan.copy(alpha = 0.65f)),
                         contentPadding = PaddingValues(horizontal = m.s(12f), vertical = m.s(6f)),
                         modifier = Modifier
                             .height(m.s(38f).coerceAtLeast(48.dp))
@@ -168,7 +169,7 @@ fun MultiplayerLobbyScreen(
                     ) {
                         Icon(Icons.Default.GroupAdd, contentDescription = null, modifier = Modifier.size(m.s(16f)))
                         Spacer(Modifier.width(m.s(5f)))
-                        Text("ПРИГЛАСИТЬ ДРУГА", fontSize = m.sp(10f), fontWeight = FontWeight.Black)
+                        Text("ДОБАВИТЬ ДРУГА В ЛОББИ", fontSize = m.sp(9.8f), fontWeight = FontWeight.Black)
                     }
 
                     if (isHost) {
@@ -217,7 +218,7 @@ fun MultiplayerLobbyScreen(
                 )
             }
 
-            // Main Row: Team T | Team CT | Optional Invite Friends or Host Settings
+            // Main Row: Team T | Team CT | Friends Quick-Invite Panel OR Host Settings
             Row(
                 modifier = Modifier
                     .weight(1f)
@@ -250,11 +251,11 @@ fun MultiplayerLobbyScreen(
                     tag = "lobby_join_team_ct"
                 )
 
-                // Right Column: Either Friend Invite List OR Host Match Controls
+                // Right Column: Friends Quick-Invite OR Host Match Settings
                 Surface(
                     color = Color(0xD90E1624),
                     shape = RoundedCornerShape(m.s(10f)),
-                    border = BorderStroke(1.dp, BorderSteel),
+                    border = BorderStroke(1.dp, if (showInvitePanel) IceCyan.copy(alpha = 0.55f) else BorderSteel),
                     modifier = Modifier
                         .weight(0.95f)
                         .fillMaxHeight()
@@ -265,7 +266,7 @@ fun MultiplayerLobbyScreen(
                             verticalArrangement = Arrangement.spacedBy(m.s(7f))
                         ) {
                             Text(
-                                text = "ПРИГЛАСИТЬ ДРУЗЕЙ",
+                                text = "ДОБАВИТЬ ДРУГА В ЛОББИ",
                                 fontSize = m.sp(11f),
                                 fontWeight = FontWeight.Black,
                                 color = IceCyan
@@ -273,7 +274,7 @@ fun MultiplayerLobbyScreen(
                             if (friends.isEmpty()) {
                                 Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                                     Text(
-                                        text = "Добавьте друзей по 6-значному ID в главном меню.",
+                                        text = "Список друзей пуст. Добавьте друга по 6-значному ID через кнопку «ДРУЗЬЯ» в главном меню.",
                                         fontSize = m.sp(10f),
                                         color = TextSecondary
                                     )
@@ -294,16 +295,31 @@ fun MultiplayerLobbyScreen(
                                             verticalAlignment = Alignment.CenterVertically,
                                             horizontalArrangement = Arrangement.SpaceBetween
                                         ) {
-                                            Column(modifier = Modifier.weight(1f)) {
-                                                Text(
-                                                    f.friendName,
-                                                    fontSize = m.sp(11f),
-                                                    fontWeight = FontWeight.Bold,
-                                                    color = TextPrimary,
-                                                    maxLines = 1,
-                                                    overflow = TextOverflow.Ellipsis
+                                            Row(
+                                                verticalAlignment = Alignment.CenterVertically,
+                                                horizontalArrangement = Arrangement.spacedBy(m.s(7f)),
+                                                modifier = Modifier.weight(1f)
+                                            ) {
+                                                PlayerAvatar(
+                                                    avatarData = f.friendAvatarData,
+                                                    size = m.s(30f),
+                                                    borderColor = if (f.online) RtxEmerald else BorderSteel
                                                 )
-                                                Text("ID: ${f.friendShortId}", fontSize = m.sp(9.5f), color = TacticalAmber)
+                                                Column {
+                                                    Text(
+                                                        text = f.friendName,
+                                                        fontSize = m.sp(10.8f),
+                                                        fontWeight = FontWeight.Bold,
+                                                        color = TextPrimary,
+                                                        maxLines = 1,
+                                                        overflow = TextOverflow.Ellipsis
+                                                    )
+                                                    Text(
+                                                        text = "ID: ${f.friendShortId}",
+                                                        fontSize = m.sp(9.2f),
+                                                        color = TacticalAmber
+                                                    )
+                                                }
                                             }
                                             if (alreadyIn) {
                                                 Text("В ЛОББИ", fontSize = m.sp(9.5f), fontWeight = FontWeight.Bold, color = RtxEmerald)
@@ -312,7 +328,9 @@ fun MultiplayerLobbyScreen(
                                                     onClick = { onInviteFriend(f) },
                                                     colors = ButtonDefaults.buttonColors(containerColor = RtxEmerald, contentColor = ObsidianVoid),
                                                     contentPadding = PaddingValues(horizontal = m.s(10f), vertical = m.s(4f)),
-                                                    modifier = Modifier.height(m.s(32f).coerceAtLeast(48.dp))
+                                                    modifier = Modifier
+                                                        .height(m.s(32f).coerceAtLeast(48.dp))
+                                                        .testTag("lobby_invite_${f.friendShortId}")
                                                 ) {
                                                     Icon(Icons.Default.Send, contentDescription = null, modifier = Modifier.size(m.s(13f)))
                                                     Spacer(Modifier.width(m.s(4f)))
@@ -326,7 +344,10 @@ fun MultiplayerLobbyScreen(
                         }
                     } else {
                         Column(
-                            modifier = Modifier.fillMaxSize().padding(m.s(10f)),
+                            modifier = Modifier
+                                .fillMaxSize()
+                                .verticalScroll(rememberScrollState())
+                                .padding(m.s(10f)),
                             verticalArrangement = Arrangement.spacedBy(m.s(8f))
                         ) {
                             Text(
@@ -366,11 +387,11 @@ fun MultiplayerLobbyScreen(
                                 }
                             }
 
-                            // Host Toggle: Friends-only (1v1 / party) vs Fill with Bots!
+                            // Host Toggle: 1v1 / Friends-only vs Fill with Bots
                             Text("СОСТАВ КОМАНД (БОТЫ)", fontSize = m.sp(9f), fontWeight = FontWeight.Bold, color = TextSecondary)
                             Row(horizontalArrangement = Arrangement.spacedBy(m.s(6f))) {
                                 LobbyChoiceChip(
-                                    label = "ТОЛЬКО ДРУЗЬЯ",
+                                    label = "1v1 / ДРУЗЬЯ",
                                     selected = !lobby.allowBots,
                                     enabled = isHost,
                                     accent = IceCyan,
@@ -472,26 +493,37 @@ private fun TeamRosterPanel(
                                 .clip(RoundedCornerShape(m.s(7f)))
                                 .background(if (isMe) accent.copy(alpha = 0.20f) else ElevatedGunmetal.copy(alpha = 0.72f))
                                 .border(1.dp, if (isMe) accent else BorderSteel, RoundedCornerShape(m.s(7f)))
-                                .padding(horizontal = m.s(9f), vertical = m.s(6f)),
+                                .padding(horizontal = m.s(8f), vertical = m.s(6f)),
                             verticalAlignment = Alignment.CenterVertically,
                             horizontalArrangement = Arrangement.SpaceBetween
                         ) {
-                            Column(modifier = Modifier.weight(1f)) {
-                                Text(
-                                    text = p.displayName + (if (isMe) " (ВЫ)" else "") + (if (isHostMember) " ★" else ""),
-                                    fontSize = m.sp(11f),
-                                    fontWeight = FontWeight.Bold,
-                                    color = TextPrimary,
-                                    maxLines = 1,
-                                    overflow = TextOverflow.Ellipsis
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(m.s(8f)),
+                                modifier = Modifier.weight(1f)
+                            ) {
+                                PlayerAvatar(
+                                    avatarData = p.avatarData,
+                                    size = m.s(30f),
+                                    borderColor = accent
                                 )
-                                // Unique 6-digit Player ID shown strictly for real human players!
-                                Text(
-                                    text = "ID: ${p.shortId}",
-                                    fontSize = m.sp(9.5f),
-                                    color = accent,
-                                    fontWeight = FontWeight.SemiBold
-                                )
+                                Column {
+                                    Text(
+                                        text = p.displayName + (if (isMe) " (ВЫ)" else "") + (if (isHostMember) " ★" else ""),
+                                        fontSize = m.sp(11f),
+                                        fontWeight = FontWeight.Bold,
+                                        color = TextPrimary,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis
+                                    )
+                                    // Unique 6-digit Player ID shown strictly for real human players
+                                    Text(
+                                        text = "ID: ${p.shortId}",
+                                        fontSize = m.sp(9.5f),
+                                        color = accent,
+                                        fontWeight = FontWeight.SemiBold
+                                    )
+                                }
                             }
                             Box(
                                 modifier = Modifier
@@ -502,7 +534,7 @@ private fun TeamRosterPanel(
                         }
                     }
 
-                    // Show Bot slots ONLY when host enabled bots (bots NEVER have a Player ID!)
+                    // Bot slots shown ONLY when host enabled bots (bots NEVER have a Player ID)
                     if (allowBots && players.size < 5) {
                         val botsCount = (5 - players.size).coerceAtLeast(0)
                         items(botsCount) { idx ->

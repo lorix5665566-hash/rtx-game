@@ -112,6 +112,7 @@ fun MainMenuScreen(
     onPlay: () -> Unit,
     onCreateLobby: () -> Unit,
     onOpenFriends: () -> Unit,
+    onOpenProfile: () -> Unit,
     onAcceptInvite: (LobbyInvite) -> Unit,
     onDeclineInvite: (LobbyInvite) -> Unit,
     onOpenSettings: () -> Unit,
@@ -301,6 +302,13 @@ fun MainMenuScreen(
                     tag = "nav_friends"
                 )
                 Cs2NavTab(
+                    label = "ПРОФИЛЬ",
+                    selected = false,
+                    accentOverride = TacticalAmber,
+                    onClick = onOpenProfile,
+                    tag = "nav_profile"
+                )
+                Cs2NavTab(
                     label = "УПРАВЛЕНИЕ",
                     selected = false,
                     onClick = onOpenControls,
@@ -308,47 +316,46 @@ fun MainMenuScreen(
                 )
             }
 
-            // Top-Right Unique 6-Digit Human Player ID Pill + Sign Out
+            // Top-Right Avatar + Nickname + Unique 6-Digit Human Player ID Pill (opens Profile Customization) + Sign Out
             Row(
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(m.s(6f))
             ) {
                 Row(
                     verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(m.s(5f)),
+                    horizontalArrangement = Arrangement.spacedBy(m.s(6f)),
                     modifier = Modifier
-                        .clip(RoundedCornerShape(m.s(6f)))
+                        .clip(RoundedCornerShape(m.s(8f)))
                         .background(Color(0xA60A1019))
-                        .border(1.dp, TacticalAmber.copy(alpha = 0.45f), RoundedCornerShape(m.s(6f)))
-                        .clickable {
-                            playerProfile?.shortId?.takeIf { it.isNotBlank() }?.let { sid ->
-                                val cm = context.getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
-                                cm?.setPrimaryClip(ClipData.newPlainText("Player ID", sid))
-                            }
-                            onOpenFriends()
-                        }
-                        .padding(horizontal = m.s(8f), vertical = m.s(4f))
+                        .border(1.dp, TacticalAmber.copy(alpha = 0.50f), RoundedCornerShape(m.s(8f)))
+                        .clickable { onOpenProfile() }
+                        .padding(horizontal = m.s(7f), vertical = m.s(3.5f))
                         .testTag("menu_player_id_badge")
                 ) {
-                    Text(
-                        text = if (playerProfile != null) "ID: ${playerProfile.shortId}" else "ID: ...",
-                        fontSize = m.sp(10f),
-                        fontWeight = FontWeight.Black,
-                        color = TacticalAmber
-                    )
-                    Icon(
-                        imageVector = Icons.Default.ContentCopy,
-                        contentDescription = "Скопировать ID",
-                        tint = TacticalAmber.copy(alpha = 0.85f),
-                        modifier = Modifier.size(m.s(12f))
-                    )
-                    Text("•", fontSize = m.sp(10f), color = TextSecondary)
-                    Text(
-                        text = "УБ ${stats.totalKills}",
-                        fontSize = m.sp(9.5f),
-                        fontWeight = FontWeight.Bold,
-                        color = TextPrimary
-                    )
+                    if (playerProfile != null) {
+                        PlayerAvatar(
+                            avatarData = playerProfile.avatarData,
+                            size = m.s(24f),
+                            borderColor = RtxEmerald,
+                            borderWidth = 1.2.dp
+                        )
+                    }
+                    Column {
+                        Text(
+                            text = playerProfile?.displayName ?: "Загрузка...",
+                            fontSize = m.sp(9.8f),
+                            fontWeight = FontWeight.Black,
+                            color = TextPrimary,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                        Text(
+                            text = if (playerProfile != null) "ID: ${playerProfile.shortId}" else "ID: ...",
+                            fontSize = m.sp(8.6f),
+                            fontWeight = FontWeight.ExtraBold,
+                            color = TacticalAmber
+                        )
+                    }
                 }
 
                 IconButton(
@@ -370,7 +377,7 @@ fun MainMenuScreen(
             }
         }
 
-        // Live Incoming Lobby Invite Toast Banner
+        // Live Incoming Cloud Lobby Invite Banner (with sender Avatar + Name + ID)
         val activeInvite = incomingInvites.firstOrNull()
         AnimatedVisibility(
             visible = activeInvite != null,
@@ -392,15 +399,20 @@ fun MainMenuScreen(
                         verticalAlignment = Alignment.CenterVertically,
                         horizontalArrangement = Arrangement.spacedBy(m.s(10f))
                     ) {
+                        PlayerAvatar(
+                            avatarData = activeInvite.fromAvatarData,
+                            size = m.s(34f),
+                            borderColor = IceCyan
+                        )
                         Column {
                             Text(
-                                text = "ПРИГЛАШЕНИЕ В ЛОББИ ОТ ${activeInvite.fromName.uppercase()} (ID ${activeInvite.fromShortId})",
+                                text = "ПРИГЛАШЕНИЕ В ЛОББИ 1v1 ОТ ${activeInvite.fromName.uppercase()} (ID ${activeInvite.fromShortId})",
                                 fontSize = m.sp(10.5f),
                                 fontWeight = FontWeight.Black,
                                 color = IceCyan
                             )
                             Text(
-                                text = "Карта: ${activeInvite.mapId}  •  Нажмите «ПРИНЯТЬ» для выбора команды T / CT",
+                                text = "Карта: ${activeInvite.mapId}  •  Нажмите «ПРИНЯТЬ» для входа в лобби",
                                 fontSize = m.sp(9f),
                                 color = TextSecondary
                             )
@@ -430,7 +442,7 @@ fun MainMenuScreen(
             }
         }
 
-        // 3. HOME Minimalist CS2 Footer (Center 3D operative remains completely unobstructed!)
+        // 3. HOME Minimalist Footer (Center 3D operative remains completely unobstructed)
         AnimatedVisibility(
             visible = activeTab == MenuTab.HOME,
             enter = fadeIn(),
@@ -448,7 +460,7 @@ fun MainMenuScreen(
                 // Bottom-Left Operative Plate
                 Column(verticalArrangement = Arrangement.spacedBy(m.s(2f))) {
                     Text(
-                        text = if (matchConfig.playerSide == TeamSide.T) "ТЕРРОРИСТ • CS2 MIRAGE" else "СПЕЦНАЗ • CS2 MIRAGE",
+                        text = if (matchConfig.playerSide == TeamSide.T) "ТЕРРОРИСТ • MIRAGE" else "СПЕЦНАЗ • MIRAGE",
                         fontSize = m.sp(12.5f),
                         fontWeight = FontWeight.Black,
                         color = if (matchConfig.playerSide == TeamSide.T) TacticalAmber else IceCyan,
@@ -586,7 +598,7 @@ private fun MatchSetupDrawer(
                         color = TextPrimary
                     )
                     Text(
-                        text = "Режим, карта CS2 и состав команд",
+                        text = "Режим, карта и состав команд",
                         fontSize = m.sp(9.5f),
                         color = TextSecondary,
                         maxLines = 1,
@@ -631,7 +643,7 @@ private fun MatchSetupDrawer(
                     }
                 }
 
-                DrawerSectionLabel("КАРТА (CS2 .GLB)")
+                DrawerSectionLabel("КАРТА")
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.spacedBy(m.s(6f))

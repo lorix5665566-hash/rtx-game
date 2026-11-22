@@ -43,30 +43,22 @@ jobs:
           fi
           keytool -list -v -keystore debug.keystore -storepass android -alias androiddebugkey | grep -E "SHA1|SHA256" || true
 
-      - name: Prepare Google Services config
-        env:
-          GOOGLE_SERVICES_JSON: ${{ secrets.GOOGLE_SERVICES_JSON }}
-        run: |
-          if [ ! -f app/google-services.json ]; then
-            if [ -n "$GOOGLE_SERVICES_JSON" ]; then
-              trimmed="$(printf '%s' "$GOOGLE_SERVICES_JSON" | sed 's/^[[:space:]]*//')"
-              if printf '%s' "$trimmed" | grep -q '^{'; then
-                printf '%s\n' "$GOOGLE_SERVICES_JSON" > app/google-services.json
-              else
-                printf '%s' "$GOOGLE_SERVICES_JSON" | tr -d '\n\r ' | base64 -d > app/google-services.json
-              fi
-              echo "Restored app/google-services.json from GOOGLE_SERVICES_JSON secret."
-            else
-              echo "::warning::app/google-services.json is missing and secret GOOGLE_SERVICES_JSON is not set. Add GOOGLE_SERVICES_JSON in GitHub Actions secrets for Firebase & Google Sign-In."
-              mkdir -p app/src/debug/res/values
-              printf '<?xml version="1.0" encoding="utf-8"?>\n<resources>\n    <string name="default_web_client_id" translatable="false"></string>\n</resources>\n' > app/src/debug/res/values/ci_google_services_fallback.xml
-            fi
-          fi
-
       - name: Set up Gradle 9.3.1
         uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: '9.3.1'
+
+      - name: Prepare Supabase .env config
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY }}
+        run: |
+          if [ -n "$SUPABASE_URL" ] && [ -n "$SUPABASE_ANON_KEY" ]; then
+            printf "SUPABASE_URL=%s\nSUPABASE_ANON_KEY=%s\n" "$SUPABASE_URL" "$SUPABASE_ANON_KEY" > .env
+            echo "Configured .env from GitHub Actions Secrets."
+          else
+            echo "::warning::SUPABASE_URL or SUPABASE_ANON_KEY not set in GitHub Secrets; APK will build with placeholder values."
+          fi
 
       - name: Build Debug APK
         run: gradle :app:assembleDebug --no-daemon --stacktrace

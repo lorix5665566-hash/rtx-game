@@ -14,10 +14,10 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
-import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.safeDrawingPadding
 import androidx.compose.foundation.layout.size
@@ -111,6 +111,7 @@ fun FriendsOverlay(
             .fillMaxSize()
             .background(Color(0xC8050911))
             .safeDrawingPadding()
+            .imePadding()
             .padding(horizontal = m.s(18f), vertical = m.s(10f)),
         contentAlignment = Alignment.Center
     ) {
@@ -120,7 +121,7 @@ fun FriendsOverlay(
             border = BorderStroke(1.2.dp, IceCyan.copy(alpha = 0.50f)),
             modifier = Modifier
                 .fillMaxSize()
-                .widthIn(max = 820.dp)
+                .widthIn(max = 840.dp)
         ) {
             Column(
                 modifier = Modifier
@@ -128,7 +129,7 @@ fun FriendsOverlay(
                     .padding(m.s(14f)),
                 verticalArrangement = Arrangement.spacedBy(m.s(10f))
             ) {
-                // Header: Title + Personal 6-Digit Human ID Badge + Close
+                // Header: Title + Personal Avatar & Copyable 6-Digit ID + Close
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.SpaceBetween,
@@ -139,7 +140,7 @@ fun FriendsOverlay(
                         horizontalArrangement = Arrangement.spacedBy(m.s(10f))
                     ) {
                         Text(
-                            text = "ДРУЗЬЯ И ПРОФИЛЬ",
+                            text = "ДРУЗЬЯ ОНЛАЙН",
                             fontSize = m.sp(15f),
                             fontWeight = FontWeight.Black,
                             color = TextPrimary,
@@ -150,17 +151,23 @@ fun FriendsOverlay(
                                 verticalAlignment = Alignment.CenterVertically,
                                 horizontalArrangement = Arrangement.spacedBy(m.s(6f)),
                                 modifier = Modifier
-                                    .clip(RoundedCornerShape(m.s(7f)))
+                                    .clip(RoundedCornerShape(m.s(8f)))
                                     .background(TacticalAmber.copy(alpha = 0.16f))
-                                    .border(1.dp, TacticalAmber.copy(alpha = 0.65f), RoundedCornerShape(m.s(7f)))
+                                    .border(1.dp, TacticalAmber.copy(alpha = 0.65f), RoundedCornerShape(m.s(8f)))
                                     .clickable {
                                         val cm = context.getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
                                         cm?.setPrimaryClip(ClipData.newPlainText("Player ID", myProfile.shortId))
                                         copiedNotice = true
                                     }
-                                    .padding(horizontal = m.s(10f), vertical = m.s(5f))
+                                    .padding(horizontal = m.s(8f), vertical = m.s(4f))
                                     .testTag("copy_my_player_id_button")
                             ) {
+                                PlayerAvatar(
+                                    avatarData = myProfile.avatarData,
+                                    size = m.s(22f),
+                                    borderColor = TacticalAmber,
+                                    borderWidth = 1.dp
+                                )
                                 Text(
                                     text = "${myProfile.displayName}  •  ID: ${myProfile.shortId}",
                                     fontSize = m.sp(10.5f),
@@ -318,12 +325,21 @@ fun FriendsOverlay(
                                                         horizontalArrangement = Arrangement.spacedBy(m.s(10f)),
                                                         modifier = Modifier.weight(1f)
                                                     ) {
-                                                        Box(
-                                                            modifier = Modifier
-                                                                .size(m.s(10f))
-                                                                .clip(CircleShape)
-                                                                .background(RtxEmerald)
-                                                        )
+                                                        Box {
+                                                            PlayerAvatar(
+                                                                avatarData = friend.friendAvatarData,
+                                                                size = m.s(36f),
+                                                                borderColor = if (friend.online) RtxEmerald else BorderSteel
+                                                            )
+                                                            Box(
+                                                                modifier = Modifier
+                                                                    .size(m.s(10f))
+                                                                    .align(Alignment.BottomEnd)
+                                                                    .clip(CircleShape)
+                                                                    .background(if (friend.online) RtxEmerald else Color(0xFF6B7280))
+                                                                    .border(1.2.dp, ObsidianVoid, CircleShape)
+                                                            )
+                                                        }
                                                         Column {
                                                             Text(
                                                                 text = friend.friendName,
@@ -334,9 +350,9 @@ fun FriendsOverlay(
                                                                 overflow = TextOverflow.Ellipsis
                                                             )
                                                             Text(
-                                                                text = "ID: ${friend.friendShortId}",
-                                                                fontSize = m.sp(10f),
-                                                                color = TacticalAmber,
+                                                                text = "ID: ${friend.friendShortId}  •  ${if (friend.online) "В сети" else "Не в сети"}",
+                                                                fontSize = m.sp(9.8f),
+                                                                color = if (friend.online) TacticalAmber else TextSecondary,
                                                                 fontWeight = FontWeight.SemiBold
                                                             )
                                                         }
@@ -360,7 +376,7 @@ fun FriendsOverlay(
                                                         ) {
                                                             Icon(Icons.Default.Send, contentDescription = null, modifier = Modifier.size(m.s(14f)))
                                                             Spacer(Modifier.width(m.s(5f)))
-                                                            Text("В ЛОББИ", fontSize = m.sp(10f), fontWeight = FontWeight.Black)
+                                                            Text("В ЛОББИ 1v1", fontSize = m.sp(10f), fontWeight = FontWeight.Black)
                                                         }
 
                                                         IconButton(
@@ -418,22 +434,37 @@ fun FriendsOverlay(
                                             verticalAlignment = Alignment.CenterVertically,
                                             horizontalArrangement = Arrangement.SpaceBetween
                                         ) {
-                                            Column(modifier = Modifier.weight(1f)) {
-                                                Text(req.fromName, fontSize = m.sp(12f), fontWeight = FontWeight.Bold, color = TextPrimary)
-                                                Text("ID: ${req.fromShortId}", fontSize = m.sp(10f), color = TacticalAmber)
+                                            Row(
+                                                verticalAlignment = Alignment.CenterVertically,
+                                                horizontalArrangement = Arrangement.spacedBy(m.s(9f)),
+                                                modifier = Modifier.weight(1f)
+                                            ) {
+                                                PlayerAvatar(
+                                                    avatarData = req.fromAvatarData,
+                                                    size = m.s(34f),
+                                                    borderColor = TacticalAmber
+                                                )
+                                                Column {
+                                                    Text(req.fromName, fontSize = m.sp(12f), fontWeight = FontWeight.Bold, color = TextPrimary)
+                                                    Text("ID: ${req.fromShortId}", fontSize = m.sp(10f), color = TacticalAmber)
+                                                }
                                             }
                                             Row(horizontalArrangement = Arrangement.spacedBy(m.s(6f))) {
                                                 Button(
                                                     onClick = { onRespondRequest(req, true) },
                                                     colors = ButtonDefaults.buttonColors(containerColor = RtxEmerald, contentColor = ObsidianVoid),
-                                                    modifier = Modifier.testTag("accept_friend_req_${req.fromShortId}")
+                                                    modifier = Modifier
+                                                        .height(m.s(36f).coerceAtLeast(48.dp))
+                                                        .testTag("accept_friend_req_${req.fromShortId}")
                                                 ) {
                                                     Text("ПРИНЯТЬ", fontSize = m.sp(10f), fontWeight = FontWeight.Black)
                                                 }
                                                 Button(
                                                     onClick = { onRespondRequest(req, false) },
                                                     colors = ButtonDefaults.buttonColors(containerColor = ThreatCrimson.copy(alpha = 0.25f), contentColor = Color(0xFFFFB4B4)),
-                                                    modifier = Modifier.testTag("decline_friend_req_${req.fromShortId}")
+                                                    modifier = Modifier
+                                                        .height(m.s(36f).coerceAtLeast(48.dp))
+                                                        .testTag("decline_friend_req_${req.fromShortId}")
                                                 ) {
                                                     Text("ОТКЛОНИТЬ", fontSize = m.sp(10f), fontWeight = FontWeight.Bold)
                                                 }
@@ -462,9 +493,19 @@ fun FriendsOverlay(
                                             verticalAlignment = Alignment.CenterVertically,
                                             horizontalArrangement = Arrangement.SpaceBetween
                                         ) {
-                                            Column {
-                                                Text(req.toName, fontSize = m.sp(11.5f), fontWeight = FontWeight.Bold, color = TextPrimary)
-                                                Text("ID: ${req.toShortId}", fontSize = m.sp(10f), color = TextSecondary)
+                                            Row(
+                                                verticalAlignment = Alignment.CenterVertically,
+                                                horizontalArrangement = Arrangement.spacedBy(m.s(9f))
+                                            ) {
+                                                PlayerAvatar(
+                                                    avatarData = req.toAvatarData,
+                                                    size = m.s(32f),
+                                                    borderColor = BorderSteel
+                                                )
+                                                Column {
+                                                    Text(req.toName, fontSize = m.sp(11.5f), fontWeight = FontWeight.Bold, color = TextPrimary)
+                                                    Text("ID: ${req.toShortId}", fontSize = m.sp(10f), color = TextSecondary)
+                                                }
                                             }
                                             Text("ОЖИДАНИЕ...", fontSize = m.sp(9.5f), fontWeight = FontWeight.Bold, color = TacticalAmber)
                                         }
@@ -542,18 +583,28 @@ fun FriendsOverlay(
                                         verticalAlignment = Alignment.CenterVertically,
                                         horizontalArrangement = Arrangement.SpaceBetween
                                     ) {
-                                        Column {
-                                            Text(
-                                                text = searchResult.displayName,
-                                                fontSize = m.sp(13f),
-                                                fontWeight = FontWeight.Black,
-                                                color = TextPrimary
+                                        Row(
+                                            verticalAlignment = Alignment.CenterVertically,
+                                            horizontalArrangement = Arrangement.spacedBy(m.s(10f))
+                                        ) {
+                                            PlayerAvatar(
+                                                avatarData = searchResult.avatarData,
+                                                size = m.s(40f),
+                                                borderColor = RtxEmerald
                                             )
-                                            Text(
-                                                text = "ID: ${searchResult.shortId}  •  Убийств: ${searchResult.totalKills}",
-                                                fontSize = m.sp(10f),
-                                                color = TacticalAmber
-                                            )
+                                            Column {
+                                                Text(
+                                                    text = searchResult.displayName,
+                                                    fontSize = m.sp(13f),
+                                                    fontWeight = FontWeight.Black,
+                                                    color = TextPrimary
+                                                )
+                                                Text(
+                                                    text = "ID: ${searchResult.shortId}  •  Убийств: ${searchResult.totalKills}",
+                                                    fontSize = m.sp(10f),
+                                                    color = TacticalAmber
+                                                )
+                                            }
                                         }
 
                                         if (isMe) {

@@ -15,7 +15,6 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
@@ -32,8 +31,9 @@ import com.example.model.ArenaMapId
 import com.example.model.GameMode
 import com.example.model.MatchConfig
 import com.example.model.TeamSide
-import com.example.online.FirebaseAuthManager
-import com.example.online.OnlineRepository
+import com.example.online.SupabaseAuthManager
+import com.example.online.SupabaseOnlineRepository
+import com.example.online.SupabaseSession
 import com.example.ui.AppScreen
 import com.example.ui.AuthScreen
 import com.example.ui.ControlEditorScreen
@@ -44,6 +44,7 @@ import com.example.ui.MainMenuScreen
 import com.example.ui.MultiplayerLobbyScreen
 import com.example.ui.OnlineUiState
 import com.example.ui.OnlineViewModel
+import com.example.ui.ProfileCustomizationOverlay
 import com.example.ui.SettingsScreen
 import com.example.ui.theme.ResponsiveUiProvider
 import com.example.ui.theme.VanguardTheme
@@ -70,33 +71,21 @@ class MainActivity : ComponentActivity() {
 private fun VanguardAuthRoot() {
     val context = LocalContext.current
     val authManager = remember(context.applicationContext) {
-        FirebaseAuthManager(context.applicationContext)
+        SupabaseAuthManager(context.applicationContext)
     }
-    var currentUser by remember(authManager) { mutableStateOf(authManager.currentUser) }
+    val session by authManager.session.collectAsStateWithLifecycle()
 
-    DisposableEffect(authManager) {
-        val removeListener = authManager.addAuthStateListener { user ->
-            currentUser = user
-        }
-        onDispose { removeListener() }
-    }
-
-    val user = currentUser
-    if (user == null) {
+    val activeSession = session
+    if (activeSession == null) {
         AuthScreen(
             authManager = authManager,
-            onAuthSuccess = { signedInUser ->
-                currentUser = signedInUser
-            }
+            onAuthSuccess = { /* session StateFlow updates automatically */ }
         )
     } else {
-        val uid = user.uid
-        // Key strictly by UID so every ViewModel, Firestore listener, and player state resets cleanly on account switch!
-        key(uid) {
+        // Key strictly by userId so every ViewModel and cloud polling loop resets cleanly on account switch
+        key(activeSession.userId) {
             VanguardRtxApp(
-                currentUserId = uid,
-                initialDisplayName = user.displayName
-                    ?: user.email?.substringBefore("@"),
+                session = activeSession,
                 authManager = authManager
             )
         }
@@ -105,17 +94,16 @@ private fun VanguardAuthRoot() {
 
 @Composable
 fun VanguardRtxApp(
-    currentUserId: String,
-    initialDisplayName: String?,
-    authManager: FirebaseAuthManager,
+    session: SupabaseSession,
+    authManager: SupabaseAuthManager,
     vm: GameViewModel = viewModel()
 ) {
-    val context = LocalContext.current
     val scope = rememberCoroutineScope()
-    val onlineRepo = remember(context.applicationContext) { OnlineRepository(context.applicationContext) }
+    val currentUserId = session.userId
+    val onlineRepo = remember(authManager) { SupabaseOnlineRepository(authManager) }
     val onlineVm: OnlineViewModel = viewModel(
         key = currentUserId,
-        factory = OnlineViewModel.factory(currentUserId, initialDisplayName, onlineRepo)
+        factory = OnlineViewModel.factory(currentUserId, session.loginName, onlineRepo)
     )
 
     val screen by vm.screen.collectAsStateWithLifecycle()
@@ -133,14 +121,16 @@ fun VanguardRtxApp(
     val incomingInvites by onlineVm.incomingInvites.collectAsStateWithLifecycle()
     val searchResult by onlineVm.searchResult.collectAsStateWithLifecycle()
     val isSearching by onlineVm.isSearching.collectAsStateWithLifecycle()
+    val isSavingProfile by onlineVm.isSavingProfile.collectAsStateWithLifecycle()
     val statusBanner by onlineVm.statusBanner.collectAsStateWithLifecycle()
     val activeLobbyId by onlineVm.activeLobbyId.collectAsStateWithLifecycle()
     val activeLobby by onlineVm.activeLobby.collectAsStateWithLifecycle()
     val lobbyMemberStates by onlineVm.lobbyMemberStates.collectAsStateWithLifecycle()
 
     var isFriendsOpen by remember { mutableStateOf(false) }
+    var isProfileOpen by remember { mutableStateOf(false) }
 
-    // Automatically launch match for ALL players in the lobby when Host starts the match!
+    // Automatically launch match for ALL players in the cloud lobby when Host starts the match
     LaunchedEffect(activeLobby?.status, screen) {
         val lobby = activeLobby ?: return@LaunchedEffect
         if (lobby.status == "playing" && screen == AppScreen.MultiplayerLobby) {
@@ -159,15 +149,13 @@ fun VanguardRtxApp(
                 lobbyId = lobby.id,
                 allowBots = lobby.allowBots,
                 localUserId = currentUserId,
-                localDisplayName = playerProfile?.displayName ?: "Игрок",
+                localDisplayName = playerProfile?.displayName ?: session.loginName,
                 localShortId = playerProfile?.shortId ?: ""
             )
             vm.startMultiplayerMatch(mpConfig)
         }
     }
 
-    // Smooth non-overlapping fade-in veil: guarantees only ONE Google Filament Engine / SurfaceView
-    // is ever alive at a time while giving every screen switch a crisp cinematic fade transition!
     val transitionAlpha = remember { Animatable(0f) }
     LaunchedEffect(screen) {
         transitionAlpha.snapTo(0.85f)
@@ -185,7 +173,19 @@ fun VanguardRtxApp(
                 pendingFriendsCount = incomingRequests.size,
                 incomingInvites = incomingInvites,
                 onUpdateMatchConfig = vm::updateMatchConfig,
-                onPlay = vm::startGame,
+                onPlay = {
+                    val p = playerProfile
+                    if (p != null) {
+                        vm.updateMatchConfig {
+                            it.copy(
+                                localUserId = p.userId,
+                                localDisplayName = p.displayName,
+                                localShortId = p.shortId
+                            )
+                        }
+                    }
+                    vm.startGame()
+                },
                 onCreateLobby = {
                     onlineVm.createMultiplayerLobby(
                         map = matchConfig.map,
@@ -196,7 +196,15 @@ fun VanguardRtxApp(
                         onCreated = { vm.openMultiplayerLobby() }
                     )
                 },
-                onOpenFriends = { isFriendsOpen = true },
+                onOpenFriends = {
+                    isProfileOpen = false
+                    isFriendsOpen = true
+                    onlineVm.refreshSocialData()
+                },
+                onOpenProfile = {
+                    isFriendsOpen = false
+                    isProfileOpen = true
+                },
                 onAcceptInvite = { invite ->
                     onlineVm.acceptLobbyInvite(invite, matchConfig.playerSide) {
                         vm.openMultiplayerLobby()
@@ -207,10 +215,8 @@ fun VanguardRtxApp(
                 onOpenControls = { vm.openControlEditor(fromGame = false) },
                 onSignOut = {
                     scope.launch {
-                        authManager.signOut(
-                            uiContext = context,
-                            onBeforeSignOut = { onlineVm.setOfflineBeforeSignOut() }
-                        )
+                        onlineVm.setOfflineAndLeaveBeforeSignOut()
+                        authManager.logout()
                     }
                 }
             )
@@ -283,7 +289,7 @@ fun VanguardRtxApp(
             )
         }
 
-        // Friends & 6-Digit Player ID Overlay
+        // Cloud Friends & 6-Digit Player ID Overlay
         AnimatedVisibility(
             visible = isFriendsOpen && screen == AppScreen.Menu,
             enter = fadeIn(tween(180)),
@@ -327,6 +333,26 @@ fun VanguardRtxApp(
                     onlineVm.clearBanner()
                 }
             )
+        }
+
+        // Profile Customization Overlay (ID copy, Nickname editor, Gallery Photo Picker + 8 Tactical Avatars)
+        AnimatedVisibility(
+            visible = isProfileOpen && screen == AppScreen.Menu && playerProfile != null,
+            enter = fadeIn(tween(180)),
+            exit = fadeOut(tween(160))
+        ) {
+            if (playerProfile != null) {
+                ProfileCustomizationOverlay(
+                    profile = playerProfile,
+                    isSaving = isSavingProfile,
+                    statusBanner = statusBanner,
+                    onSaveProfile = onlineVm::saveProfileCustomization,
+                    onClose = {
+                        isProfileOpen = false
+                        onlineVm.clearBanner()
+                    }
+                )
+            }
         }
 
         val veil = transitionAlpha.value

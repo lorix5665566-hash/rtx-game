@@ -1,107 +1,124 @@
 package com.example.online
 
-import androidx.annotation.Keep
-import com.google.firebase.Timestamp
-import com.google.firebase.firestore.DocumentId
-import com.google.firebase.firestore.IgnoreExtraProperties
-import com.google.firebase.firestore.ServerTimestamp
+/**
+ * Built-in tactical avatar preset identifiers.
+ * Gallery photos are stored as compact JPEG data URLs: "data:image/jpeg;base64,..."
+ */
+object AvatarPresets {
+    const val GHOST = "preset:ghost"
+    const val WOLF = "preset:wolf"
+    const val SNIPER = "preset:sniper"
+    const val SHIELD = "preset:shield"
+    const val SKULL = "preset:skull"
+    const val EAGLE = "preset:eagle"
+    const val PHOENIX = "preset:phoenix"
+    const val CYBER = "preset:cyber"
 
-@Keep
-@IgnoreExtraProperties
+    const val DEFAULT_KEY = GHOST
+
+    data class PresetInfo(
+        val key: String,
+        val labelRu: String
+    )
+
+    val all: List<PresetInfo> = listOf(
+        PresetInfo(GHOST, "ПРИЗРАК"),
+        PresetInfo(WOLF, "ВОЛК"),
+        PresetInfo(SNIPER, "СНАЙПЕР"),
+        PresetInfo(SHIELD, "ЩИТ"),
+        PresetInfo(SKULL, "ЧЕРЕП"),
+        PresetInfo(EAGLE, "ОРЁЛ"),
+        PresetInfo(PHOENIX, "ФЕНИКС"),
+        PresetInfo(CYBER, "КИБЕР")
+    )
+
+    fun isValid(avatarData: String): Boolean {
+        if (all.any { it.key == avatarData }) return true
+        return avatarData.startsWith("data:image/jpeg;base64,") && avatarData.length <= 65_000
+    }
+}
+
+/**
+ * Cloud human player profile stored in Supabase.
+ * Every real human player has a permanent unique 6-digit numeric ID (bots never have IDs).
+ */
 data class PlayerProfile(
-    @DocumentId val id: String = "",
+    val id: String = "",
     val userId: String = "",
     val shortId: String = "",
     val displayName: String = "",
-    val online: Boolean = false,
-    val activeLobbyId: String = "",
+    val avatarData: String = AvatarPresets.DEFAULT_KEY,
+    val online: Boolean = true,
     val totalKills: Int = 0,
-    val totalHeadshots: Int = 0,
-    @ServerTimestamp val createdAt: Timestamp? = null,
-    @ServerTimestamp val updatedAt: Timestamp? = null
+    val totalHeadshots: Int = 0
 )
 
-@Keep
-@IgnoreExtraProperties
-data class PlayerIdReservation(
-    @DocumentId val id: String = "",
-    val shortId: String = "",
-    val userId: String = "",
-    val displayName: String = "",
-    @ServerTimestamp val createdAt: Timestamp? = null
-)
-
-@Keep
-@IgnoreExtraProperties
+/**
+ * Mutual cloud friend entry hydrated with live nickname, avatar, and online status.
+ */
 data class FriendEntry(
-    @DocumentId val id: String = "",
     val friendUid: String = "",
     val friendShortId: String = "",
     val friendName: String = "",
-    @ServerTimestamp val createdAt: Timestamp? = null
+    val friendAvatarData: String = AvatarPresets.DEFAULT_KEY,
+    val online: Boolean = false
 )
 
-@Keep
-@IgnoreExtraProperties
+/**
+ * Pending incoming or outgoing friend request.
+ */
 data class FriendRequest(
-    @DocumentId val id: String = "",
+    val id: String = "",
     val fromUid: String = "",
     val fromShortId: String = "",
     val fromName: String = "",
+    val fromAvatarData: String = AvatarPresets.DEFAULT_KEY,
     val toUid: String = "",
     val toShortId: String = "",
     val toName: String = "",
-    val status: String = "pending",
-    @ServerTimestamp val createdAt: Timestamp? = null,
-    @ServerTimestamp val updatedAt: Timestamp? = null
+    val toAvatarData: String = AvatarPresets.DEFAULT_KEY,
+    val status: String = "pending"
 )
 
-@Keep
-@IgnoreExtraProperties
-data class LobbyInvite(
-    @DocumentId val id: String = "",
-    val lobbyId: String = "",
-    val fromUid: String = "",
-    val fromName: String = "",
-    val fromShortId: String = "",
-    val toUid: String = "",
-    val mapId: String = "MIRAGE",
-    val mode: String = "BOMB_DEFUSAL",
-    val status: String = "pending",
-    @ServerTimestamp val createdAt: Timestamp? = null,
-    @ServerTimestamp val updatedAt: Timestamp? = null
-)
-
-@Keep
-@IgnoreExtraProperties
+/**
+ * Active cloud multiplayer lobby (defaults to 1v1 / friends-only, host can toggle bots).
+ */
 data class MultiplayerLobby(
-    @DocumentId val id: String = "",
+    val id: String = "",
     val hostUid: String = "",
     val hostName: String = "",
     val mapId: String = "MIRAGE",
     val mode: String = "BOMB_DEFUSAL",
     val roundsToWin: Int = 8,
     val allowBots: Boolean = false,
-    val status: String = "waiting",
-    val memberUids: List<String> = emptyList(),
-    val tScore: Int = 0,
-    val ctScore: Int = 0,
-    val roundNumber: Int = 1,
-    val bombState: String = "CARRIED",
-    val bombX: Double = 0.0,
-    val bombY: Double = 0.0,
-    val bombZ: Double = 0.0,
-    @ServerTimestamp val createdAt: Timestamp? = null,
-    @ServerTimestamp val updatedAt: Timestamp? = null
+    val status: String = "waiting", // "waiting" | "playing" | "finished"
+    val memberUids: List<String> = emptyList()
 )
 
-@Keep
-@IgnoreExtraProperties
+/**
+ * Cloud invitation sent from a lobby host/member to a friend.
+ */
+data class LobbyInvite(
+    val id: String = "",
+    val lobbyId: String = "",
+    val fromUid: String = "",
+    val fromShortId: String = "",
+    val fromName: String = "",
+    val fromAvatarData: String = AvatarPresets.DEFAULT_KEY,
+    val toUid: String = "",
+    val mapId: String = "MIRAGE",
+    val status: String = "pending"
+)
+
+/**
+ * Real-time synchronized state of a human player inside an online multiplayer lobby/match.
+ */
 data class PlayerMatchState(
-    @DocumentId val id: String = "",
+    val id: String = "",
     val userId: String = "",
     val shortId: String = "",
     val displayName: String = "",
+    val avatarData: String = AvatarPresets.DEFAULT_KEY,
     val team: String = "T",
     val ready: Boolean = true,
     val x: Double = 0.0,
@@ -113,19 +130,12 @@ data class PlayerMatchState(
     val dead: Boolean = false,
     val moving: Boolean = false,
     val shooting: Boolean = false,
-    val weapon: String = "AK47",
+    val weapon: String = "GLOCK_18",
     val kills: Int = 0,
     val deaths: Int = 0,
     val hitTargetUid: String = "",
     val hitDamage: Int = 0,
     val hitHeadshot: Boolean = false,
     val hitWeapon: String = "",
-    val hitSeq: Int = 0,
-    @ServerTimestamp val updatedAt: Timestamp? = null
-)
-
-data class FriendWithPresence(
-    val entry: FriendEntry,
-    val online: Boolean = false,
-    val activeLobbyId: String = ""
+    val hitSeq: Int = 0
 )

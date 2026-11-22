@@ -1,0 +1,300 @@
+package com.example.online
+
+import android.content.Context
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withContext
+import okhttp3.MediaType.Companion.toMediaType
+import okhttp3.Request
+import okhttp3.RequestBody.Companion.toRequestBody
+import org.json.JSONObject
+import java.security.MessageDigest
+
+data class SupabaseSession(
+    val userId: String,
+    val accessToken: String,
+    val refreshToken: String,
+    val expiresAtSec: Long,
+    val loginName: String
+)
+
+sealed interface AuthActionResult {
+    data class Success(val session: SupabaseSession) : AuthActionResult
+    data class Error(val message: String) : AuthActionResult
+}
+
+/**
+ * Cloud username + password authentication manager powered by Supabase GoTrue HTTPS API.
+ * Requires zero Google Play Services and persists encrypted/private session tokens across restarts.
+ */
+class SupabaseAuthManager(context: Context) {
+
+    private val prefs = context.applicationContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+    private val refreshMutex = Mutex()
+
+    private val _session = MutableStateFlow<SupabaseSession?>(loadPersistedSession())
+    val session: StateFlow<SupabaseSession?> = _session.asStateFlow()
+
+    val isConfigured: Boolean
+        get() = SupabaseConfig.isConfigured
+
+    suspend fun register(
+        rawLogin: String,
+        password: String,
+        confirmPassword: String
+    ): AuthActionResult = withContext(Dispatchers.IO) {
+        if (!SupabaseConfig.isConfigured) {
+            return@withContext AuthActionResult.Error(SupabaseConfig.MISSING_CONFIG_MESSAGE)
+        }
+        val login = rawLogin.trim()
+        val validationError = validateCredentials(login, password)
+        if (validationError != null) return@withContext AuthActionResult.Error(validationError)
+        if (password != confirmPassword) {
+            return@withContext AuthActionResult.Error("Пароли не совпадают.")
+        }
+
+        val syntheticEmail = loginToSupabaseEmail(login)
+        val body = JSONObject().apply {
+            put("email", syntheticEmail)
+            put("password", password)
+            put("data", JSONObject().apply { put("display_name", login) })
+        }
+
+        val req = Request.Builder()
+            .url("${SupabaseConfig.baseUrl}/auth/v1/signup")
+            .addHeader("apikey", SupabaseConfig.anonKey)
+            .addHeader("Content-Type", "application/json")
+            .post(body.toString().toRequestBody(JSON_MEDIA))
+            .build()
+
+        runCatching {
+            SupabaseConfig.httpClient.newCall(req).execute().use { resp ->
+                val text = resp.body?.string().orEmpty()
+                val json = runCatching { JSONObject(text) }.getOrNull()
+                if (!resp.isSuccessful) {
+                    return@use AuthActionResult.Error(mapAuthError(json, text, isSignup = true))
+                }
+                val parsed = parseSession(json, fallbackLogin = login)
+                if (parsed == null) {
+                    // Happens when Supabase "Confirm email" toggle is still enabled
+                    return@use AuthActionResult.Error(
+                        "Аккаунт создан, но в Supabase включено подтверждение почты. Отключите «Confirm email» в Authentication → Providers → Email и войдите снова."
+                    )
+                }
+                saveSession(parsed)
+                AuthActionResult.Success(parsed)
+            }
+        }.getOrElse { err ->
+            AuthActionResult.Error("Ошибка сети при регистрации: ${err.localizedMessage ?: "нет подключения"}")
+        }
+    }
+
+    suspend fun login(
+        rawLogin: String,
+        password: String
+    ): AuthActionResult = withContext(Dispatchers.IO) {
+        if (!SupabaseConfig.isConfigured) {
+            return@withContext AuthActionResult.Error(SupabaseConfig.MISSING_CONFIG_MESSAGE)
+        }
+        val login = rawLogin.trim()
+        val validationError = validateCredentials(login, password)
+        if (validationError != null) return@withContext AuthActionResult.Error(validationError)
+
+        val syntheticEmail = loginToSupabaseEmail(login)
+        val body = JSONObject().apply {
+            put("email", syntheticEmail)
+            put("password", password)
+        }
+
+        val req = Request.Builder()
+            .url("${SupabaseConfig.baseUrl}/auth/v1/token?grant_type=password")
+            .addHeader("apikey", SupabaseConfig.anonKey)
+            .addHeader("Content-Type", "application/json")
+            .post(body.toString().toRequestBody(JSON_MEDIA))
+            .build()
+
+        runCatching {
+            SupabaseConfig.httpClient.newCall(req).execute().use { resp ->
+                val text = resp.body?.string().orEmpty()
+                val json = runCatching { JSONObject(text) }.getOrNull()
+                if (!resp.isSuccessful) {
+                    return@use AuthActionResult.Error(mapAuthError(json, text, isSignup = false))
+                }
+                val parsed = parseSession(json, fallbackLogin = login)
+                    ?: return@use AuthActionResult.Error("Сервер вернул некорректную сессию.")
+                saveSession(parsed)
+                AuthActionResult.Success(parsed)
+            }
+        }.getOrElse { err ->
+            AuthActionResult.Error("Ошибка сети при входе: ${err.localizedMessage ?: "нет подключения"}")
+        }
+    }
+
+    /**
+     * Returns a fresh Bearer JWT access token, transparently refreshing via refresh_token when needed.
+     */
+    suspend fun getValidAccessToken(): String? = refreshMutex.withLock {
+        val current = _session.value ?: return null
+        val nowSec = System.currentTimeMillis() / 1000L
+        if (current.expiresAtSec > nowSec + 45L && current.accessToken.isNotBlank()) {
+            return current.accessToken
+        }
+        if (current.refreshToken.isBlank() || !SupabaseConfig.isConfigured) {
+            return current.accessToken.takeIf { it.isNotBlank() }
+        }
+
+        val refreshed = withContext(Dispatchers.IO) {
+            val body = JSONObject().apply { put("refresh_token", current.refreshToken) }
+            val req = Request.Builder()
+                .url("${SupabaseConfig.baseUrl}/auth/v1/token?grant_type=refresh_token")
+                .addHeader("apikey", SupabaseConfig.anonKey)
+                .addHeader("Content-Type", "application/json")
+                .post(body.toString().toRequestBody(JSON_MEDIA))
+                .build()
+            runCatching {
+                SupabaseConfig.httpClient.newCall(req).execute().use { resp ->
+                    if (!resp.isSuccessful) return@use null
+                    val json = runCatching { JSONObject(resp.body?.string().orEmpty()) }.getOrNull()
+                    parseSession(json, fallbackLogin = current.loginName)
+                }
+            }.getOrNull()
+        }
+
+        if (refreshed != null) {
+            saveSession(refreshed)
+            refreshed.accessToken
+        } else {
+            // Token expired and cannot be refreshed -> force clean re-login
+            clearSession()
+            null
+        }
+    }
+
+    suspend fun logout() {
+        val token = _session.value?.accessToken
+        clearSession()
+        if (!token.isNullOrBlank() && SupabaseConfig.isConfigured) {
+            withContext(Dispatchers.IO) {
+                runCatching {
+                    val req = Request.Builder()
+                        .url("${SupabaseConfig.baseUrl}/auth/v1/logout")
+                        .addHeader("apikey", SupabaseConfig.anonKey)
+                        .addHeader("Authorization", "Bearer $token")
+                        .post("".toRequestBody(JSON_MEDIA))
+                        .build()
+                    SupabaseConfig.httpClient.newCall(req).execute().close()
+                }
+            }
+        }
+    }
+
+    private fun validateCredentials(login: String, password: String): String? {
+        if (login.length < 3 || login.length > 20) {
+            return "Логин должен содержать от 3 до 20 символов."
+        }
+        if (!LOGIN_REGEX.matches(login)) {
+            return "Логин может содержать только буквы, цифры, «_», «-» и «.»."
+        }
+        if (password.length < 6 || password.length > 64) {
+            return "Пароль должен содержать от 6 до 64 символов."
+        }
+        return null
+    }
+
+    private fun loginToSupabaseEmail(login: String): String {
+        val lower = login.trim().lowercase()
+        if (lower.contains("@")) return lower
+        return if (ASCII_LOGIN_REGEX.matches(lower)) {
+            "u_$lower@vanguardrtx.app"
+        } else {
+            val digest = MessageDigest.getInstance("SHA-256").digest(lower.toByteArray(Charsets.UTF_8))
+            val hex = digest.take(10).joinToString("") { "%02x".format(it) }
+            "u_$hex@vanguardrtx.app"
+        }
+    }
+
+    private fun parseSession(json: JSONObject?, fallbackLogin: String): SupabaseSession? {
+        if (json == null) return null
+        val access = json.optString("access_token")
+        val refresh = json.optString("refresh_token")
+        val userObj = json.optJSONObject("user")
+        val uid = userObj?.optString("id").orEmpty()
+        if (access.isBlank() || uid.isBlank()) return null
+
+        val expiresIn = json.optLong("expires_in", 3600L).coerceAtLeast(60L)
+        val expiresAt = json.optLong("expires_at", (System.currentTimeMillis() / 1000L) + expiresIn)
+        val metaName = userObj?.optJSONObject("user_metadata")?.optString("display_name")
+            ?.takeIf { it.isNotBlank() } ?: fallbackLogin
+
+        return SupabaseSession(
+            userId = uid,
+            accessToken = access,
+            refreshToken = refresh,
+            expiresAtSec = expiresAt,
+            loginName = metaName
+        )
+    }
+
+    private fun mapAuthError(json: JSONObject?, raw: String, isSignup: Boolean): String {
+        val msg = (json?.optString("msg").orEmpty()
+            .ifBlank { json?.optString("error_description").orEmpty() }
+            .ifBlank { json?.optString("message").orEmpty() }
+            .ifBlank { raw }).lowercase()
+        return when {
+            msg.contains("already registered") || msg.contains("user_already_exists") ->
+                "Аккаунт с этим логином уже существует. Выберите «ВОЙТИ»."
+            msg.contains("invalid login credentials") || msg.contains("invalid_credentials") ->
+                "Неверный логин или пароль. Если у вас ещё нет аккаунта, выберите «РЕГИСТРАЦИЯ»."
+            msg.contains("email not confirmed") ->
+                "В Supabase включено подтверждение почты. Отключите «Confirm email» в настройках Email провайдера."
+            msg.contains("password") && msg.contains("6") ->
+                "Пароль должен быть не короче 6 символов."
+            msg.contains("rate limit") ->
+                "Слишком много попыток. Подождите немного и попробуйте снова."
+            isSignup -> "Не удалось зарегистрироваться: ${json?.optString("msg")?.ifBlank { "проверьте настройки Supabase" } ?: "ошибка сервера"}"
+            else -> "Не удалось войти: ${json?.optString("msg")?.ifBlank { "проверьте логин и пароль" } ?: "ошибка сервера"}"
+        }
+    }
+
+    private fun saveSession(session: SupabaseSession) {
+        prefs.edit()
+            .putString(KEY_UID, session.userId)
+            .putString(KEY_ACCESS, session.accessToken)
+            .putString(KEY_REFRESH, session.refreshToken)
+            .putLong(KEY_EXPIRES_AT, session.expiresAtSec)
+            .putString(KEY_LOGIN_NAME, session.loginName)
+            .apply()
+        _session.value = session
+    }
+
+    private fun clearSession() {
+        prefs.edit().clear().apply()
+        _session.value = null
+    }
+
+    private fun loadPersistedSession(): SupabaseSession? {
+        if (!SupabaseConfig.isConfigured) return null
+        val uid = prefs.getString(KEY_UID, null)?.takeIf { it.isNotBlank() } ?: return null
+        val access = prefs.getString(KEY_ACCESS, null)?.takeIf { it.isNotBlank() } ?: return null
+        val refresh = prefs.getString(KEY_REFRESH, "").orEmpty()
+        val expires = prefs.getLong(KEY_EXPIRES_AT, 0L)
+        val login = prefs.getString(KEY_LOGIN_NAME, "Игрок").orEmpty().ifBlank { "Игрок" }
+        return SupabaseSession(uid, access, refresh, expires, login)
+    }
+
+    companion object {
+        private const val PREFS_NAME = "vanguard_supabase_session_v1"
+        private const val KEY_UID = "uid"
+        private const val KEY_ACCESS = "access"
+        private const val KEY_REFRESH = "refresh"
+        private const val KEY_EXPIRES_AT = "expires_at"
+        private const val KEY_LOGIN_NAME = "login_name"
+        private val JSON_MEDIA = "application/json; charset=utf-8".toMediaType()
+        private val LOGIN_REGEX = Regex("^[a-zA-Z0-9_.\\-а-яА-ЯёЁ@]+$")
+        private val ASCII_LOGIN_REGEX = Regex("^[a-z0-9_.\\-]+$")
+    }
+}

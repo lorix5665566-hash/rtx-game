@@ -20,7 +20,7 @@ enum class GameMode(
     val titleRu: String,
     val subtitleRu: String
 ) {
-    BOMB_DEFUSAL("ЗАКЛАДКА БОМБЫ", "Классический CS2 • Установка, взрыв и разминирование C4"),
+    BOMB_DEFUSAL("ЗАКЛАДКА БОМБЫ", "Классический режим • Установка, взрыв и разминирование C4"),
     TEAM_DEATHMATCH("БОЙ НАСМЕРТЬ", "Мгновенное возрождение • Бесплатный магазин")
 }
 
@@ -33,15 +33,15 @@ enum class ArenaMapId(
 ) {
     MIRAGE(
         titleRu = "MIRAGE",
-        subtitleRu = "Оригинальная 3D-карта CS2 Mirage (.GLB)",
-        envTagRu = "CS2 • .GLB",
+        subtitleRu = "Тактическая карта Mirage",
+        envTagRu = "MIRAGE",
         floorsAssetPath = "models/mirage-floors.json",
         radarAssetPath = "models/mirage-radar.png"
     ),
     DUST2(
         titleRu = "DUST 2",
-        subtitleRu = "Оригинальная 3D-карта CS2 Dust 2 (.GLB)",
-        envTagRu = "CS2 • .GLB",
+        subtitleRu = "Тактическая карта Dust 2",
+        envTagRu = "DUST 2",
         floorsAssetPath = "models/dust2-floors.json",
         radarAssetPath = "models/dust2-radar.png"
     )
