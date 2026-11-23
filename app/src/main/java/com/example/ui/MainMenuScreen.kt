@@ -476,7 +476,7 @@ fun MainMenuScreen(
                         letterSpacing = m.sp(1.1f)
                     )
                     Text(
-                        text = "Потяните бойца для обзора 360° • PBR Filament",
+                        text = "Vanguard v${com.example.BuildConfig.VERSION_NAME} • Потяните бойца для обзора 360°",
                         fontSize = m.sp(9.5f),
                         color = Color.White.copy(alpha = 0.78f)
                     )

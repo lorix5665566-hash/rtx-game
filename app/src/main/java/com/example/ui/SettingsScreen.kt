@@ -270,7 +270,7 @@ private fun GraphicsSettingsSection(
         )
     }
 
-    SettingsCard(title = "ТОНКАЯ НАСТРОЙКА RTX & PBR") {
+    SettingsCard(title = "ТОНКАЯ НАСТРОЙКА ГРАФИКИ & PBR") {
         Row(
             modifier = Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.spacedBy(18.dp)
@@ -296,7 +296,7 @@ private fun GraphicsSettingsSection(
         }
 
         SettingsToggleRow(
-            title = "RTX-отражения на стали, асфальте и броне",
+            title = "PBR-отражения на стали, асфальте и броне",
             subtitle = "Зеркальные блики окружения и металла в реальном времени",
             checked = graphics.rtxReflections,
             onCheckedChange = { onUpdate(graphics.copy(rtxReflections = it)) },

@@ -10,6 +10,7 @@ import com.example.model.GraphicsSettings
 import com.example.model.ModelAssetRegistry
 import com.example.model.ModelSlot
 import com.example.model.TeamSide
+import com.example.model.WeaponType
 import com.google.android.filament.Camera
 import com.google.android.filament.Engine
 import com.google.android.filament.EntityManager
@@ -65,6 +66,8 @@ class FilamentLobbyController(
     private var mapModel: LoadedGlbModel? = null
     private var tCharModel: LoadedGlbModel? = null
     private var ctCharModel: LoadedGlbModel? = null
+    private var ak47WeaponModel: LoadedGlbModel? = null
+    private var m4WeaponModel: LoadedGlbModel? = null
 
     private var lastGraphics: GraphicsSettings? = null
     private var surfaceWidth = 1
@@ -75,6 +78,9 @@ class FilamentLobbyController(
     private var isDestroyed = false
 
     private val tmpMat = FloatArray(16)
+    private val weaponMat = FloatArray(16)
+    private val rigAnimator = OperativeRigAnimator()
+    private val turnShuffleState = TurnShuffleState()
 
     fun addSpinDrag(deltaPixels: Float) {
         val deltaDeg = deltaPixels * 0.40f
@@ -139,6 +145,8 @@ class FilamentLobbyController(
     private fun loadCharacters() {
         destroyModel(tCharModel); tCharModel = null
         destroyModel(ctCharModel); ctCharModel = null
+        destroyModel(ak47WeaponModel); ak47WeaponModel = null
+        destroyModel(m4WeaponModel); m4WeaponModel = null
 
         tCharModel = FilamentSceneHelpers.loadGlb(
             assetLoader, resourceLoader,
@@ -147,6 +155,14 @@ class FilamentLobbyController(
         ctCharModel = FilamentSceneHelpers.loadGlb(
             assetLoader, resourceLoader,
             registry.loadBundledAssetBuffer(ModelSlot.CHARACTER_CT.bundledAssetPath)
+        )
+        ak47WeaponModel = FilamentSceneHelpers.loadGlb(
+            assetLoader, resourceLoader,
+            registry.loadBundledAssetBuffer(ModelSlot.WEAPON_AK47.bundledAssetPath)
+        )
+        m4WeaponModel = FilamentSceneHelpers.loadGlb(
+            assetLoader, resourceLoader,
+            registry.loadBundledAssetBuffer(ModelSlot.WEAPON_M4A1_S.bundledAssetPath)
         )
     }
 
@@ -181,6 +197,7 @@ class FilamentLobbyController(
         loadedMap = targetMap
         characterYawDeg = activeWorld.lobbyDefaultCharYawDeg
         yawVelocityDegPerSec = 0f
+        turnShuffleState.reset()
     }
 
     fun start() {
@@ -215,6 +232,8 @@ class FilamentLobbyController(
         destroyModel(mapModel); mapModel = null
         destroyModel(tCharModel); tCharModel = null
         destroyModel(ctCharModel); ctCharModel = null
+        destroyModel(ak47WeaponModel); ak47WeaponModel = null
+        destroyModel(m4WeaponModel); m4WeaponModel = null
 
         runCatching { resourceLoader.destroy() }
         runCatching { assetLoader.destroy() }
@@ -299,8 +318,13 @@ class FilamentLobbyController(
 
         val tm = engine.transformManager
         val isT = showcaseSide == TeamSide.T
+        val showcaseWeapon = if (isT) WeaponType.AK47 else WeaponType.M4A1_S
         FilamentSceneHelpers.setAssetVisible(scene, tCharModel, isT)
         FilamentSceneHelpers.setAssetVisible(scene, ctCharModel, !isT)
+        FilamentSceneHelpers.setAssetVisible(scene, ak47WeaponModel, isT)
+        FilamentSceneHelpers.setAssetVisible(scene, m4WeaponModel, !isT)
+
+        turnShuffleState.update(characterYawDeg, dt, isMoving = false, isDead = false)
 
         val activeChar = if (isT) tCharModel else ctCharModel
         if (activeChar != null) {
@@ -321,8 +345,36 @@ class FilamentLobbyController(
             if (anim.animationCount > 0 && activeChar.idleAnimIdx >= 0) {
                 val dur = anim.getAnimationDuration(activeChar.idleAnimIdx).coerceAtLeast(0.1f)
                 anim.applyAnimation(activeChar.idleAnimIdx, timeSec % dur)
+                rigAnimator.applyProceduralPose(
+                    engine = engine,
+                    handles = activeChar.rigHandles,
+                    weapon = showcaseWeapon,
+                    turnState = turnShuffleState,
+                    timeSec = timeSec,
+                    isMoving = false,
+                    isDead = false,
+                    deathProgress = 0f,
+                    isShooting = false
+                )
                 anim.updateBoneMatrices()
             }
+        }
+
+        val activeWeaponModel = if (isT) ak47WeaponModel else m4WeaponModel
+        if (activeWeaponModel != null) {
+            rigAnimator.buildHeldWeaponMatrix(
+                out = weaponMat,
+                weapon = showcaseWeapon,
+                charX = sx,
+                charY = sy,
+                charZ = sz,
+                charYawDeg = characterYawDeg,
+                timeSec = timeSec,
+                isMoving = false,
+                deathProgress = 0f,
+                isShooting = false
+            )
+            tm.setTransform(tm.getInstance(activeWeaponModel.asset.root), weaponMat)
         }
 
         val sc = swapChain ?: return

@@ -80,6 +80,7 @@ class GameEngine(
     @Volatile private var pendingReset: Boolean = false
     @Volatile private var pendingSlotSwitch: WeaponSlot? = null
     @Volatile private var pendingQuickSwitch: Boolean = false
+    @Volatile private var pendingInspect: Boolean = false
     @Volatile private var pendingBuyWeapon: WeaponType? = null
     @Volatile private var pendingBuyArmor: Boolean = false
     @Volatile private var pendingBuyKit: Boolean = false
@@ -125,6 +126,13 @@ class GameEngine(
         get() = equipTimer > 0.001f
     val equipProgress: Float
         get() = if (equipDuration <= 0.001f) 1f else (1f - equipTimer / equipDuration).coerceIn(0f, 1f)
+
+    var inspectTimer: Float = 0f
+    var inspectDuration: Float = 3.2f
+    val isInspecting: Boolean
+        get() = inspectTimer > 0.001f
+    val inspectProgress: Float
+        get() = if (inspectDuration <= 0.001f) 0f else (1f - inspectTimer / inspectDuration).coerceIn(0f, 1f)
 
     // Smooth 3D viewmodel inertia (camera-turn sway, strafe bank, jump/landing spring)
     var weaponSwayX: Float = 0f
@@ -561,6 +569,7 @@ class GameEngine(
 
     fun selectSlot(slot: WeaponSlot) { pendingSlotSwitch = slot }
     fun quickSwitchWeapon() { pendingQuickSwitch = true }
+    fun triggerWeaponInspect() { pendingInspect = true }
     fun buyWeapon(weapon: WeaponType) { pendingBuyWeapon = weapon }
     fun buyArmor() { pendingBuyArmor = true }
     fun buyDefuseKit() { pendingBuyKit = true }
@@ -579,6 +588,7 @@ class GameEngine(
     fun toggleAds() {
         if (!isEquipping && activeWeapon != WeaponType.KNIFE && activeWeapon != WeaponType.C4_BOMB) {
             isAdsToggle = !isAdsToggle
+            if (isAdsToggle) inspectTimer = 0f
         }
     }
     fun toggleCrouch() { isCrouching = !isCrouching }
@@ -675,6 +685,21 @@ class GameEngine(
         }
         if (equipTimer > 0f) {
             equipTimer = (equipTimer - dt).coerceAtLeast(0f)
+        }
+        if (pendingInspect) {
+            pendingInspect = false
+            if (!isPlayerDead && !isEquipping && !isReloading && bombPlantProgress <= 0.001f) {
+                isAdsToggle = false
+                inspectDuration = ViewmodelAnimator.inspectDurationSec(activeWeapon)
+                inspectTimer = inspectDuration
+            }
+        }
+        if (inspectTimer > 0f) {
+            if (isPlayerDead || isEquipping || isReloading || isAdsToggle || bombPlantProgress > 0.001f) {
+                inspectTimer = 0f
+            } else {
+                inspectTimer = (inspectTimer - dt).coerceAtLeast(0f)
+            }
         }
 
         processShopRequests()
@@ -1277,6 +1302,8 @@ class GameEngine(
         activeWeapon = next
         equipDuration = next.equipDurationSec
         equipTimer = next.equipDurationSec
+        inspectTimer = 0f
+        pendingInspect = false
         isReloading = false
         reloadTimer = 0f
         pendingReload = false
@@ -1431,6 +1458,7 @@ class GameEngine(
         val wantsFire = if (w.isAutomatic) isFiring else triggerJustPressed
 
         if (wantsFire && fireTimer <= 0f && !isReloading) {
+            inspectTimer = 0f
             when (w) {
                 WeaponType.KNIFE -> performKnifeSlash()
                 WeaponType.C4_BOMB -> Unit
@@ -1675,6 +1703,7 @@ class GameEngine(
         if (isReloading || curMag >= w.magSize || curRes <= 0) return
         isReloading = true
         reloadTimer = 0f
+        inspectTimer = 0f
         isAdsToggle = false
         soundEngine.playReload()
     }
@@ -2821,6 +2850,8 @@ class GameEngine(
             reloadProgress = if (isReloading && w.reloadSec > 0f) (reloadTimer / w.reloadSec).coerceIn(0f, 1f) else 0f,
             isEquipping = isEquipping,
             equipProgress = equipProgress,
+            isInspecting = isInspecting,
+            inspectProgress = inspectProgress,
             isAds = isAdsToggle,
             adsBlend = adsBlend,
             isCrouching = isCrouching,

@@ -63,6 +63,7 @@ class LoadedGlbModel(
     val deathAnimIdx: Int = -1
 ) {
     val maxExtent: Float = maxOf(sizeX, maxOf(sizeY, sizeZ)).coerceAtLeast(0.001f)
+    val rigHandles: OperativeRigHandles = OperativeRigHandles(asset)
     var inScene: Boolean = false
 }
 

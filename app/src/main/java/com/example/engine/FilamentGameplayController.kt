@@ -98,7 +98,20 @@ class FilamentGameplayController(
     private val tmpMat = FloatArray(16)
     private val camMat = FloatArray(16)
     private val localMat = FloatArray(16)
+    private val handLocalMat = FloatArray(16)
     private val finalMat = FloatArray(16)
+
+    // Procedural skeletal rig animator (2-bone dual-arm IK + bidirectional turn-in-place foot shuffling)
+    private val rigAnimator = OperativeRigAnimator()
+    private val turnStates = HashMap<String, TurnShuffleState>(12)
+    private val reloadDelta = ViewmodelPoseDelta()
+    private val inspectDelta = ViewmodelPoseDelta()
+
+    companion object {
+        // Perspective-invariant miniature viewmodel scale: visually 1:1 identical on screen while keeping
+        // even the longest AWP barrel strictly inside the player's 0.36m collision cylinder (ZERO wall clipping!)
+        private const val VM_SCALE = 0.24f
+    }
 
     fun attachTo(surfaceView: SurfaceView) {
         FilamentBootstrap.ensureInitialized()
@@ -391,7 +404,7 @@ class FilamentGameplayController(
         }
 
         updateCamera()
-        updateBots()
+        updateBots(dt)
         updateFirstPersonWeaponAndMuzzle()
         updatePlantedBombAndExplosion()
 
@@ -412,7 +425,8 @@ class FilamentGameplayController(
         } else {
             (baseFov * (1f - gameEngine.adsBlend * (1f - zoomTarget))).toDouble()
         }
-        camera.setProjection(liveFov, aspect, 0.04, 240.0, Camera.Fov.VERTICAL)
+        // 0.015m near plane paired with VM_SCALE=0.24f guarantees zero first-person weapon wall clipping
+        camera.setProjection(liveFov, aspect, 0.015, 220.0, Camera.Fov.VERTICAL)
 
         // Apply dramatic C4 explosion camera shake!
         val shake = gameEngine.cameraShake
@@ -475,25 +489,29 @@ class FilamentGameplayController(
         charY: Float,
         charZ: Float,
         charYawDeg: Float,
+        timeSec: Float,
+        isMoving: Boolean,
         deathProgress: Float,
         isShooting: Boolean
     ) {
         val wModel = acquireThirdPersonWeapon(weapon) ?: return
         FilamentSceneHelpers.setAssetVisible(scene, wModel, true)
-        FilamentSceneHelpers.buildThirdPersonWeaponMatrix(
+        rigAnimator.buildHeldWeaponMatrix(
             out = tmpMat,
             weapon = weapon,
             charX = charX,
             charY = charY,
             charZ = charZ,
             charYawDeg = charYawDeg,
+            timeSec = timeSec,
+            isMoving = isMoving,
             deathProgress = deathProgress,
             isShooting = isShooting
         )
         engine.transformManager.setTransform(engine.transformManager.getInstance(wModel.asset.root), tmpMat)
     }
 
-    private fun updateBots() {
+    private fun updateBots(dt: Float) {
         val tm = engine.transformManager
         var ctIdx = 0
         var tIdx = 0
@@ -510,8 +528,11 @@ class FilamentGameplayController(
                 if (slotIdx >= pool.size) continue
                 val model = pool[slotIdx]
                 val charSlot = if (rp.team == TeamSide.CT) ModelSlot.CHARACTER_CT else ModelSlot.CHARACTER_T
+                val isCustomChar = registry.hasCustomFile(charSlot)
                 // Local camera looks along -Z at yaw=0 while rigged character meshes face +Z natively -> +180° aligns eyes directly toward us!
                 val visualYawDeg = rp.yawDeg + 180f
+                val turnState = turnStates.getOrPut("remote_${rp.userId}") { TurnShuffleState() }
+                turnState.update(visualYawDeg, dt, isMoving = rp.isMoving, isDead = rp.isDead)
 
                 FilamentSceneHelpers.setAssetVisible(scene, model, true)
                 FilamentSceneHelpers.buildCharacterMatrix(
@@ -523,7 +544,7 @@ class FilamentGameplayController(
                     yawDeg = visualYawDeg,
                     deathProgress = rp.deathProgress,
                     targetHeight = 1.76f,
-                    isCustomImported = registry.hasCustomFile(charSlot)
+                    isCustomImported = isCustomChar
                 )
                 tm.setTransform(tm.getInstance(model.asset.root), tmpMat)
 
@@ -533,32 +554,46 @@ class FilamentGameplayController(
                         if (model.deathAnimIdx >= 0) {
                             val dur = animator.getAnimationDuration(model.deathAnimIdx).coerceAtLeast(0.1f)
                             animator.applyAnimation(model.deathAnimIdx, rp.deathProgress.coerceIn(0f, 0.995f) * dur)
-                            animator.updateBoneMatrices()
                         }
                     } else {
                         val animIdx = if (rp.isMoving) model.runAnimIdx else model.idleAnimIdx
                         if (animIdx >= 0) {
                             val dur = animator.getAnimationDuration(animIdx).coerceAtLeast(0.1f)
                             animator.applyAnimation(animIdx, (gameEngine.timeSec + idx * 0.41f) % dur)
-                            animator.updateBoneMatrices()
                         }
                     }
+                    if (!isCustomChar) {
+                        rigAnimator.applyProceduralPose(
+                            engine = engine,
+                            handles = model.rigHandles,
+                            weapon = rp.weapon,
+                            turnState = turnState,
+                            timeSec = gameEngine.timeSec + idx * 0.41f,
+                            isMoving = rp.isMoving,
+                            isDead = rp.isDead,
+                            deathProgress = rp.deathProgress,
+                            isShooting = rp.isShooting
+                        )
+                    }
+                    animator.updateBoneMatrices()
                 }
 
-                // Render remote player's real equipped 3D weapon in hands (or dropped beside them on death)
+                // Render remote player's real equipped 3D weapon locked directly in BOTH hands (or dropped beside them on death)
                 placeThirdPersonWeapon(
                     weapon = rp.weapon,
                     charX = rp.x,
                     charY = rp.y,
                     charZ = rp.z,
                     charYawDeg = visualYawDeg,
+                    timeSec = gameEngine.timeSec + idx * 0.41f,
+                    isMoving = rp.isMoving,
                     deathProgress = rp.deathProgress,
                     isShooting = rp.isShooting
                 )
             }
         }
 
-        // 2. Render AI bots (with biomechanical knees, skeletal Death collapse, and equipped 3D weapons!)
+        // 2. Render AI bots (with bidirectional turn-in-place foot shuffling, 2-handed weapon IK, and skeletal Death!)
         for (b in gameEngine.bots) {
             val pool = if (b.team == TeamSide.CT) ctPool else tPool
             val slotIdx = if (b.team == TeamSide.CT) ctIdx++ else tIdx++
@@ -566,6 +601,12 @@ class FilamentGameplayController(
             val model = pool[slotIdx]
 
             val charSlot = if (b.team == TeamSide.CT) ModelSlot.CHARACTER_CT else ModelSlot.CHARACTER_T
+            val isCustomChar = registry.hasCustomFile(charSlot)
+            val turnState = turnStates.getOrPut("bot_${b.id}") { TurnShuffleState() }
+            turnState.update(b.visualYawDeg, dt, isMoving = b.isMoving, isDead = b.isDead)
+            val botShooting = !b.isDead && b.fireCooldown > b.weapon.fireIntervalSec * 0.55f && b.hasLineOfSight
+            val botAnimClock = gameEngine.timeSec + b.id * 0.37f
+
             FilamentSceneHelpers.setAssetVisible(scene, model, true)
             FilamentSceneHelpers.buildCharacterMatrix(
                 out = tmpMat,
@@ -576,7 +617,7 @@ class FilamentGameplayController(
                 yawDeg = b.visualYawDeg,
                 deathProgress = b.deathProgress,
                 targetHeight = 1.76f,
-                isCustomImported = registry.hasCustomFile(charSlot)
+                isCustomImported = isCustomChar
             )
             tm.setTransform(tm.getInstance(model.asset.root), tmpMat)
 
@@ -584,12 +625,11 @@ class FilamentGameplayController(
             val dz = b.z - pz
             val distSq = dx * dx + dz * dz
             val animator = model.asset.instance.animator
-            if (animator.animationCount > 0 && distSq < 46f * 46f) {
+            if (animator.animationCount > 0 && distSq < 54f * 54f) {
                 if (b.isDead) {
                     if (model.deathAnimIdx >= 0) {
                         val dur = animator.getAnimationDuration(model.deathAnimIdx).coerceAtLeast(0.1f)
                         animator.applyAnimation(model.deathAnimIdx, b.deathProgress.coerceIn(0f, 0.995f) * dur)
-                        animator.updateBoneMatrices()
                     }
                 } else {
                     val animIdx = when {
@@ -599,23 +639,37 @@ class FilamentGameplayController(
                     }
                     if (animIdx >= 0) {
                         val dur = animator.getAnimationDuration(animIdx).coerceAtLeast(0.1f)
-                        val animTime = (gameEngine.timeSec + b.id * 0.37f) % dur
-                        animator.applyAnimation(animIdx, animTime)
-                        animator.updateBoneMatrices()
+                        animator.applyAnimation(animIdx, botAnimClock % dur)
                     }
                 }
+                if (!isCustomChar) {
+                    rigAnimator.applyProceduralPose(
+                        engine = engine,
+                        handles = model.rigHandles,
+                        weapon = b.weapon,
+                        turnState = turnState,
+                        timeSec = botAnimClock,
+                        isMoving = b.isMoving,
+                        isDead = b.isDead,
+                        deathProgress = b.deathProgress,
+                        isShooting = botShooting
+                    )
+                }
+                animator.updateBoneMatrices()
             }
 
-            // Render every teammate & enemy bot's real bought/equipped 3D weapon!
-            if (distSq < 54f * 54f) {
+            // Render every teammate & enemy bot's real bought/equipped 3D weapon firmly inside BOTH hands!
+            if (distSq < 56f * 56f) {
                 placeThirdPersonWeapon(
                     weapon = b.weapon,
                     charX = b.x,
                     charY = b.y,
                     charZ = b.z,
                     charYawDeg = b.visualYawDeg,
+                    timeSec = botAnimClock,
+                    isMoving = b.isMoving,
                     deathProgress = b.deathProgress,
-                    isShooting = b.fireCooldown > b.weapon.fireIntervalSec * 0.55f && b.hasLineOfSight
+                    isShooting = botShooting
                 )
             }
         }
@@ -708,13 +762,24 @@ class FilamentGameplayController(
         val bobY = kotlin.math.abs(cos(gameEngine.walkBobPhase)) * 0.013f * gameEngine.moveSpeedRatio * (1f - ads * 0.72f)
         val recoilZ = gameEngine.recoilKick * 0.048f
         val recoilPitch = gameEngine.recoilKick * 7.2f
-        val reloadDip = if (hud.isReloading) sin(hud.reloadProgress * Math.PI).toFloat() * 0.16f else 0f
         val knifeSwing = if (w == WeaponType.KNIFE && gameEngine.knifeSwingProgress > 0f) {
             sin(gameEngine.knifeSwingProgress * Math.PI).toFloat()
         } else 0f
         val boltTilt = if (w == WeaponType.AWP && gameEngine.boltProgress > 0f) {
             sin(gameEngine.boltProgress * Math.PI).toFloat()
         } else 0f
+
+        // Evaluate distinct multi-stage per-weapon reload & inspect animations
+        if (hud.isReloading) {
+            ViewmodelAnimator.computeReloadPose(w, hud.reloadProgress, reloadDelta)
+        } else {
+            reloadDelta.reset()
+        }
+        if (hud.isInspecting && !hud.isReloading && !hud.isEquipping) {
+            ViewmodelAnimator.computeInspectPose(w, hud.inspectProgress, inspectDelta)
+        } else {
+            inspectDelta.reset()
+        }
 
         // Calibrated 1:1 CS2 hip offsets for our meter-authored weapons (grip at origin, barrel along -Z)
         val hipX = when (w) {
@@ -745,13 +810,19 @@ class FilamentGameplayController(
             else -> -0.140f
         }
 
-        val offX = hipX * (1f - ads) + bobX + gameEngine.weaponSwayX - knifeSwing * 0.22f + eqX
-        val offY = (hipY * (1f - ads) + adsY * ads) - bobY + gameEngine.weaponSwayY - gameEngine.landingDip - reloadDip + knifeSwing * 0.05f + eqY
-        val offZ = hipZ + recoilZ - knifeSwing * 0.14f + eqZ
+        val offX = hipX * (1f - ads) + bobX + gameEngine.weaponSwayX - knifeSwing * 0.22f + eqX + reloadDelta.tx + inspectDelta.tx
+        val offY = (hipY * (1f - ads) + adsY * ads) - bobY + gameEngine.weaponSwayY - gameEngine.landingDip + knifeSwing * 0.05f + eqY + reloadDelta.ty + inspectDelta.ty
+        val offZ = hipZ + recoilZ - knifeSwing * 0.14f + eqZ + reloadDelta.tz + inspectDelta.tz
 
-        val yawDeg = eqYaw + gameEngine.weaponSwayX * 145f + knifeSwing * 46f + boltTilt * 6f
-        val pitchDeg = recoilPitch + gameEngine.weaponSwayY * 130f - gameEngine.landingDip * 90f - reloadDip * 78f + eqPitch + boltTilt * 10f
-        val rollDeg = (if (hud.isReloading) -26f else -knifeSwing * 36f) + gameEngine.strafeRoll + eqRoll + boltTilt * 22f
+        val yawDeg = eqYaw + gameEngine.weaponSwayX * 145f + knifeSwing * 46f + boltTilt * 6f + reloadDelta.yawDeg + inspectDelta.yawDeg
+        val pitchDeg = recoilPitch + gameEngine.weaponSwayY * 130f - gameEngine.landingDip * 90f + eqPitch + boltTilt * 10f + reloadDelta.pitchDeg + inspectDelta.pitchDeg
+        val rollDeg = (-knifeSwing * 36f) + gameEngine.strafeRoll + eqRoll + boltTilt * 22f + reloadDelta.rollDeg + inspectDelta.rollDeg
+
+        // Apply perspective-invariant VM_SCALE so the weapon renders identically on screen
+        // while staying physically inside the 0.36m player collision cylinder (ZERO wall clipping!)
+        val vmX = offX * VM_SCALE
+        val vmY = offY * VM_SCALE
+        val vmZ = offZ * VM_SCALE
 
         for ((slot, model) in fpWeapons) {
             val visible = !hideWeapon && slot == activeSlot
@@ -759,19 +830,17 @@ class FilamentGameplayController(
             if (!visible) continue
 
             if (!isCustomWeapon) {
-                // Exact 1:1 calibrated CS2 PBR weapon model (grip at origin, barrel along -Z)
                 FilamentSceneHelpers.buildDirectWeaponMatrix(
                     out = localMat,
-                    tx = offX,
-                    ty = offY,
-                    tz = offZ,
+                    tx = vmX,
+                    ty = vmY,
+                    tz = vmZ,
                     yawDeg = yawDeg,
                     pitchDeg = pitchDeg,
                     rollDeg = rollDeg,
-                    scale = 1.0f
+                    scale = VM_SCALE
                 )
             } else {
-                // Auto-normalized fallback for user-imported Sketchfab weapon .GLBs
                 val targetSpan = when (w) {
                     WeaponType.AWP -> 0.78f
                     WeaponType.AK47, WeaponType.M4A1_S -> 0.64f
@@ -779,7 +848,7 @@ class FilamentGameplayController(
                     WeaponType.USP_S, WeaponType.GLOCK_18, WeaponType.DESERT_EAGLE -> 0.28f
                     WeaponType.KNIFE -> 0.28f
                     WeaponType.C4_BOMB -> 0.24f
-                }
+                } * VM_SCALE
                 val autoYaw = when {
                     w == WeaponType.C4_BOMB -> 180f
                     w == WeaponType.KNIFE -> 165f
@@ -790,9 +859,9 @@ class FilamentGameplayController(
                     out = localMat,
                     model = model,
                     targetMaxExtent = targetSpan,
-                    tx = offX,
-                    ty = offY,
-                    tz = offZ - 0.08f,
+                    tx = vmX,
+                    ty = vmY,
+                    tz = (offZ - 0.08f) * VM_SCALE,
                     yawDeg = autoYaw + yawDeg,
                     pitchDeg = pitchDeg,
                     rollDeg = rollDeg,
@@ -803,7 +872,7 @@ class FilamentGameplayController(
             tm.setTransform(tm.getInstance(model.asset.root), finalMat)
         }
 
-        // Synced Faction First-Person Tactical Hands & Gloves (T vs CT; Rifle / Pistol / Knife poses)
+        // Synced Faction First-Person Tactical Hands & Gloves (with anti-wall-clip scale + reload hand motion)
         val isT = gameEngine.matchConfig.playerSide == TeamSide.T
         val activeHands: LoadedGlbModel? = if (hideWeapon || isCustomWeapon || w == WeaponType.C4_BOMB) {
             null
@@ -819,22 +888,31 @@ class FilamentGameplayController(
             val vis = (h != null && h === activeHands)
             FilamentSceneHelpers.setAssetVisible(scene, h, vis)
             if (vis && h != null) {
-                // Hands share the EXACT same localMat as our calibrated weapon model!
-                Matrix.multiplyMM(finalMat, 0, camMat, 0, localMat, 0)
+                FilamentSceneHelpers.buildDirectWeaponMatrix(
+                    out = handLocalMat,
+                    tx = (offX + reloadDelta.handTx) * VM_SCALE,
+                    ty = (offY + reloadDelta.handTy) * VM_SCALE,
+                    tz = (offZ + reloadDelta.handTz) * VM_SCALE,
+                    yawDeg = yawDeg,
+                    pitchDeg = pitchDeg + reloadDelta.handPitchDeg,
+                    rollDeg = rollDeg + reloadDelta.handRollDeg,
+                    scale = VM_SCALE
+                )
+                Matrix.multiplyMM(finalMat, 0, camMat, 0, handLocalMat, 0)
                 tm.setTransform(tm.getInstance(h.asset.root), finalMat)
             }
         }
 
-        // Crisp 45ms 3D Muzzle Flash (.GLB) anchored to exact weapon barrel tip!
+        // Crisp 45ms 3D Muzzle Flash (.GLB) anchored to exact weapon barrel tip (scaled in viewmodel space!)
         val flashAmt = gameEngine.muzzleFlashTimer
         val showFlash = !hideWeapon && !gameEngine.isEquipping && flashAmt > 0.08f &&
             w != WeaponType.KNIFE && w != WeaponType.C4_BOMB
         FilamentSceneHelpers.setAssetVisible(scene, muzzleFlashModel, showFlash)
         if (showFlash && muzzleFlashModel != null) {
-            val fxX = offX
-            val fxY = offY + 0.072f
-            val fxZ = offZ + w.muzzleOffsetZ
-            val flashSize = (0.18f + flashAmt * 0.24f) * if (w.isSuppressed) 0.42f else 1.0f
+            val fxX = offX * VM_SCALE
+            val fxY = (offY + 0.072f) * VM_SCALE
+            val fxZ = (offZ + w.muzzleOffsetZ) * VM_SCALE
+            val flashSize = (0.18f + flashAmt * 0.24f) * (if (w.isSuppressed) 0.42f else 1.0f) * VM_SCALE
             FilamentSceneHelpers.buildNormalizedPropMatrix(
                 out = localMat,
                 model = muzzleFlashModel!!,

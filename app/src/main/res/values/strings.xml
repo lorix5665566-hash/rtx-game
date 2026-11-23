@@ -1,6 +1,6 @@
 <resources>
-    <string name="app_name">Vanguard RTX</string>
-    <string name="subtitle_rtx_engine">PBR RAY-TRACED PIPELINE • OPENGL ES 3.0</string>
+    <string name="app_name">Vanguard</string>
+    <string name="subtitle_rtx_engine">PBR 3D PIPELINE • OPENGL ES 3.0</string>
     <string name="btn_play">В БОЙ</string>
     <string name="btn_settings">НАСТРОЙКИ</string>
     <string name="btn_controls">УПРАВЛЕНИЕ</string>

@@ -188,13 +188,29 @@ fun AuthScreen(
                         )
                     }
                     Column {
-                        Text(
-                            text = "VANGUARD RTX",
-                            fontSize = m.sp(20f),
-                            fontWeight = FontWeight.Black,
-                            letterSpacing = m.sp(2f),
-                            color = TextPrimary
-                        )
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(m.s(8f))
+                        ) {
+                            Text(
+                                text = "VANGUARD",
+                                fontSize = m.sp(20f),
+                                fontWeight = FontWeight.Black,
+                                letterSpacing = m.sp(2f),
+                                color = TextPrimary
+                            )
+                            Text(
+                                text = "v${com.example.BuildConfig.VERSION_NAME}",
+                                fontSize = m.sp(9.5f),
+                                fontWeight = FontWeight.ExtraBold,
+                                color = TacticalAmber,
+                                modifier = Modifier
+                                    .clip(RoundedCornerShape(m.s(5f)))
+                                    .background(TacticalAmber.copy(alpha = 0.16f))
+                                    .border(1.dp, TacticalAmber.copy(alpha = 0.55f), RoundedCornerShape(m.s(5f)))
+                                    .padding(horizontal = m.s(6f), vertical = m.s(2f))
+                            )
+                        }
                         Text(
                             text = "ТАКТИЧЕСКИЙ ШУТЕР • ОНЛАЙН",
                             fontSize = m.sp(9.5f),

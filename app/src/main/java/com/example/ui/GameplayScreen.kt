@@ -1003,9 +1003,9 @@ fun GameplayScreen(
                         engine.selectSlot(slot)
                         swipeFeedback = label
                     },
-                    onQuickSwitch = {
-                        engine.quickSwitchWeapon()
-                        swipeFeedback = "СМЕНА"
+                    onInspectWeapon = {
+                        engine.triggerWeaponInspect()
+                        swipeFeedback = "ОСМОТР"
                     }
                 )
             }
@@ -1193,7 +1193,7 @@ private fun WeaponSwipeControl(
     swipeFeedback: String,
     modifier: Modifier = Modifier,
     onSelectSlot: (WeaponSlot, String) -> Unit,
-    onQuickSwitch: () -> Unit
+    onInspectWeapon: () -> Unit
 ) {
     val m = LocalUiMetrics.current
     val density = LocalDensity.current
@@ -1224,7 +1224,8 @@ private fun WeaponSwipeControl(
                         val change = event.changes.firstOrNull { it.id == down.id } ?: break
                         if (!change.pressed) {
                             if (!swiped) {
-                                onQuickSwitch()
+                                // Normal tap triggers weapon inspect animation; swipe switches weapons!
+                                onInspectWeapon()
                             }
                             break
                         }
@@ -1266,12 +1267,31 @@ private fun WeaponSwipeControl(
                 color = accentColor,
                 trackColor = Color.White.copy(alpha = 0.14f)
             )
+        } else if (hud.isInspecting) {
+            LinearProgressIndicator(
+                progress = { hud.inspectProgress },
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(m.s(2.5f))
+                    .align(Alignment.TopCenter)
+                    .clip(RoundedCornerShape(2.dp)),
+                color = IceCyan,
+                trackColor = Color.White.copy(alpha = 0.14f)
+            )
         } else if (hud.mode == GameMode.BOMB_DEFUSAL && hud.hasBomb) {
             Text(
-                text = "▲ C4",
-                fontSize = m.sp(7.5f),
+                text = "▲ C4 • ТАП: ОСМОТР",
+                fontSize = m.sp(7.2f),
                 fontWeight = FontWeight.Bold,
                 color = ThreatCrimson.copy(alpha = 0.92f),
+                modifier = Modifier.align(Alignment.TopCenter)
+            )
+        } else {
+            Text(
+                text = "ТАП: ОСМОТР",
+                fontSize = m.sp(7.0f),
+                fontWeight = FontWeight.SemiBold,
+                color = TextSecondary.copy(alpha = 0.78f),
                 modifier = Modifier.align(Alignment.TopCenter)
             )
         }
@@ -1301,6 +1321,7 @@ private fun WeaponSwipeControl(
                 )
                 val ammoLabel = when {
                     hud.isEquipping -> "ДОСТАЁТ..."
+                    hud.isInspecting -> "ОСМОТР..."
                     hud.activeWeapon == WeaponType.KNIFE -> "БЛИЖНИЙ"
                     hud.activeWeapon == WeaponType.C4_BOMB -> "ЗАРЯД C4"
                     else -> "${hud.ammo} / ${hud.reserveAmmo}"
@@ -1308,7 +1329,11 @@ private fun WeaponSwipeControl(
                 Text(
                     text = ammoLabel,
                     fontSize = m.sp(9.5f),
-                    color = if (hud.isEquipping) TacticalAmber else TextPrimary
+                    color = when {
+                        hud.isEquipping -> TacticalAmber
+                        hud.isInspecting -> IceCyan
+                        else -> TextPrimary
+                    }
                 )
             }
         }

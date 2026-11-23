@@ -8,7 +8,7 @@ enum class GraphicsPreset(
     LOW(0, "НИЗКИЕ", "Максимум FPS • Быстрый Filament PBR"),
     MEDIUM(1, "СРЕДНИЕ", "Баланс • Filament PBR + FXAA"),
     HIGH(2, "ВЫСОКИЕ", "Тени 2K • Bloom • ACES HDR"),
-    ULTRA_RTX(3, "УЛЬТРА RTX", "Максимум PBR • Тени • SSAO • IBL-отражения")
+    ULTRA_RTX(3, "УЛЬТРА", "Максимум PBR • Тени • SSAO • IBL-отражения")
 }
 
 enum class TeamSide(val shortRu: String, val titleRu: String) {
@@ -595,6 +595,8 @@ data class HudSnapshot(
     val reloadProgress: Float = 0f,
     val isEquipping: Boolean = false,
     val equipProgress: Float = 1f,
+    val isInspecting: Boolean = false,
+    val inspectProgress: Float = 0f,
     val isAds: Boolean = false,
     val adsBlend: Float = 0f,
     val isCrouching: Boolean = false,
