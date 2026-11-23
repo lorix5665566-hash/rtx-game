@@ -1,8 +1,10 @@
 package com.example.online
 
 import android.os.SystemClock
+import com.example.model.AdminActionEvent
 import com.example.model.BombState
 import com.example.model.BombSyncEvent
+import com.example.model.KillFeedSyncEvent
 import com.example.model.MatchSyncEvent
 import com.example.model.OutgoingHitEvent
 import com.example.model.TeamSide
@@ -33,6 +35,8 @@ class SupabaseRealtimeClient(
     private val onRemoteStateReceived: (PlayerMatchState) -> Unit,
     private val onBombSyncReceived: (BombSyncEvent) -> Unit,
     private val onMatchSyncReceived: (MatchSyncEvent) -> Unit,
+    private val onKillFeedReceived: (KillFeedSyncEvent) -> Unit = {},
+    private val onAdminActionReceived: (AdminActionEvent) -> Unit = {},
     private val onPingMeasured: (Int) -> Unit,
     private val onConnectionChanged: (Boolean) -> Unit
 ) {
@@ -384,6 +388,67 @@ class SupabaseRealtimeClient(
         return ws.send(frame.toString())
     }
 
+    /**
+     * Broadcasts a killfeed entry immediately so all players in the match see identical killfeed rows.
+     */
+    fun sendKillFeedEvent(event: KillFeedSyncEvent): Boolean {
+        val ws = webSocket ?: return false
+        if (!isJoined) return false
+        val data = JSONObject().apply {
+            put("u", currentUserId)
+            put("q", event.seq)
+            put("kn", event.killerName.take(28))
+            put("kt", event.killerTeam.take(4))
+            put("vn", event.victimName.take(28))
+            put("vt", event.victimTeam.take(4))
+            put("w", event.weaponLabel.take(20))
+            put("hs", event.isHeadshot)
+            put("ku", event.killerUid.take(64))
+            put("vu", event.victimUid.take(64))
+        }
+        val outerPayload = JSONObject().apply {
+            put("type", "broadcast")
+            put("event", "killfeed")
+            put("payload", data)
+        }
+        val frame = JSONObject().apply {
+            put("topic", currentTopic)
+            put("event", "broadcast")
+            put("payload", outerPayload)
+            put("ref", JSONObject.NULL)
+        }
+        return ws.send(frame.toString())
+    }
+
+    /**
+     * Broadcasts an instant admin moderation action (kick / ban / unban) across the active match room.
+     */
+    fun sendAdminAction(event: AdminActionEvent): Boolean {
+        val ws = webSocket ?: return false
+        if (!isJoined) return false
+        val data = JSONObject().apply {
+            put("u", currentUserId)
+            put("q", event.seq)
+            put("act", event.action.take(16))
+            put("tu", event.targetUid.take(64))
+            put("ts", event.targetShortId.take(16))
+            put("rs", event.reason.take(120))
+            put("ss", event.senderShortId.take(16))
+        }
+        val outerPayload = JSONObject().apply {
+            put("type", "broadcast")
+            put("event", "admin")
+            put("payload", data)
+        }
+        val frame = JSONObject().apply {
+            put("topic", currentTopic)
+            put("event", "broadcast")
+            put("payload", outerPayload)
+            put("ref", JSONObject.NULL)
+        }
+        return ws.send(frame.toString())
+    }
+
     private fun handleIncomingMessage(text: String) {
         val root = runCatching { JSONObject(text) }.getOrNull() ?: return
         val event = root.optString("event")
@@ -477,6 +542,39 @@ class SupabaseRealtimeClient(
                 val uid = data.optString("u")
                 if (uid == currentUserId) return
                 onMatchSyncReceived(parseMatchSync(data, uid))
+            }
+            "killfeed" -> {
+                val uid = data.optString("u")
+                if (uid.isBlank() || uid == currentUserId) return
+                onKillFeedReceived(
+                    KillFeedSyncEvent(
+                        seq = data.optInt("q", 0),
+                        killerName = data.optString("kn", ""),
+                        killerTeam = data.optString("kt", "T"),
+                        victimName = data.optString("vn", ""),
+                        victimTeam = data.optString("vt", "CT"),
+                        weaponLabel = data.optString("w", ""),
+                        isHeadshot = data.optBoolean("hs", false),
+                        killerUid = data.optString("ku", ""),
+                        victimUid = data.optString("vu", ""),
+                        senderUid = uid
+                    )
+                )
+            }
+            "admin" -> {
+                val uid = data.optString("u")
+                if (uid.isBlank() || uid == currentUserId) return
+                onAdminActionReceived(
+                    AdminActionEvent(
+                        seq = data.optInt("q", 0),
+                        action = data.optString("act", ""),
+                        targetUid = data.optString("tu", ""),
+                        targetShortId = data.optString("ts", ""),
+                        reason = data.optString("rs", ""),
+                        senderUid = uid,
+                        senderShortId = data.optString("ss", "")
+                    )
+                )
             }
         }
     }

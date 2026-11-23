@@ -2,6 +2,7 @@ package com.example.engine
 
 import android.content.Context
 import android.opengl.Matrix
+import android.os.Build
 import android.view.Choreographer
 import android.view.Surface
 import android.view.SurfaceView
@@ -96,9 +97,12 @@ class FilamentGameplayController(
     private val bulletTracerPool = ArrayList<LoadedGlbModel>(12)
 
     private var lastGraphics: GraphicsSettings? = null
+    private var activeSurface: Surface? = null
+    private var appliedSurfaceFps: Int = 0
     private var surfaceWidth: Int = 1
     private var surfaceHeight: Int = 1
     private var lastFrameNs: Long = 0L
+    private var lastRenderedFrameNs: Long = 0L
     private var isRunning: Boolean = false
     private var isDestroyed: Boolean = false
 
@@ -150,6 +154,9 @@ class FilamentGameplayController(
         uiHelper.renderCallback = object : UiHelper.RendererCallback {
             override fun onNativeWindowChanged(surface: Surface) {
                 if (isDestroyed) return
+                activeSurface = surface
+                appliedSurfaceFps = 0
+                applySurfaceFrameRate(surface, gameEngine.settings.graphics.targetFps.fps)
                 swapChain?.let { engine.destroySwapChain(it) }
                 swapChain = engine.createSwapChain(surface)
                 surfaceView.display?.let { displayHelper.attach(renderer, it) }
@@ -157,6 +164,8 @@ class FilamentGameplayController(
 
             override fun onDetachedFromSurface() {
                 if (isDestroyed) return
+                activeSurface = null
+                appliedSurfaceFps = 0
                 displayHelper.detach()
                 swapChain?.let {
                     engine.destroySwapChain(it)
@@ -169,6 +178,7 @@ class FilamentGameplayController(
                 if (isDestroyed) return
                 surfaceWidth = width.coerceAtLeast(1)
                 surfaceHeight = height.coerceAtLeast(1)
+                gameEngine.viewportAspect = surfaceWidth.toFloat() / surfaceHeight.toFloat()
                 view.viewport = Viewport(0, 0, surfaceWidth, surfaceHeight)
             }
         }
@@ -437,9 +447,45 @@ class FilamentGameplayController(
         }
     }
 
+    private fun applySurfaceFrameRate(surface: Surface?, targetFps: Int) {
+        if (surface == null || !surface.isValid) return
+        if (appliedSurfaceFps == targetFps) return
+        appliedSurfaceFps = targetFps
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            runCatching {
+                surface.setFrameRate(
+                    targetFps.toFloat(),
+                    Surface.FRAME_RATE_COMPATIBILITY_FIXED_SOURCE,
+                    Surface.CHANGE_FRAME_RATE_ALWAYS
+                )
+            }
+        } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            runCatching {
+                surface.setFrameRate(
+                    targetFps.toFloat(),
+                    Surface.FRAME_RATE_COMPATIBILITY_FIXED_SOURCE
+                )
+            }
+        }
+    }
+
     override fun doFrame(frameTimeNanos: Long) {
         if (!isRunning || isDestroyed) return
         Choreographer.getInstance().postFrameCallback(this)
+
+        val gfx = gameEngine.settings.graphics
+        val targetFps = gfx.targetFps.fps
+        if (appliedSurfaceFps != targetFps) {
+            applySurfaceFrameRate(activeSurface, targetFps)
+        }
+        // Frame pacing for 60 / 90 FPS caps; 120 FPS runs completely uncapped for maximum smoothness
+        if (targetFps < 120 && lastRenderedFrameNs > 0L) {
+            val minIntervalNs = (1_000_000_000L / targetFps) - 900_000L
+            if (frameTimeNanos - lastRenderedFrameNs < minIntervalNs) {
+                return
+            }
+        }
+        lastRenderedFrameNs = frameTimeNanos
 
         val dt = ((frameTimeNanos - lastFrameNs) / 1_000_000_000.0f).coerceIn(0.001f, 0.05f)
         lastFrameNs = frameTimeNanos
@@ -447,7 +493,6 @@ class FilamentGameplayController(
         gameEngine.update(dt)
         ensureMapAndRegistryCurrent()
 
-        val gfx = gameEngine.settings.graphics
         if (gfx != lastGraphics) {
             FilamentSceneHelpers.applyGraphicsSettings(engine, view, gfx, gameEngine.world.mapId)
             lastGraphics = gfx

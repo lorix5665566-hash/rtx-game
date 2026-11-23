@@ -4,13 +4,17 @@ import android.content.Context
 import android.os.SystemClock
 import com.example.audio.SoundEngine
 import com.example.model.ArenaMapId
+import com.example.model.AspectRatioMode
 import com.example.model.BombState
 import com.example.model.BombSyncEvent
 import com.example.model.DeathRecapInfo
+import com.example.model.EspBox
 import com.example.model.GameMode
 import com.example.model.GameSettings
+import com.example.model.GraphicsSettings
 import com.example.model.HudSnapshot
 import com.example.model.KillFeedEntry
+import com.example.model.KillFeedSyncEvent
 import com.example.model.MatchConfig
 import com.example.model.MatchSyncEvent
 import com.example.model.OutgoingHitEvent
@@ -20,13 +24,16 @@ import com.example.model.ScoreboardRow
 import com.example.model.TeamSide
 import com.example.model.WeaponSlot
 import com.example.model.WeaponType
+import com.example.online.ADMIN_SHORT_ID
 import java.util.concurrent.ConcurrentHashMap
+import kotlin.math.PI
 import kotlin.math.abs
 import kotlin.math.atan2
 import kotlin.math.cos
 import kotlin.math.exp
 import kotlin.math.sin
 import kotlin.math.sqrt
+import kotlin.math.tan
 import kotlin.random.Random
 
 data class BulletImpactMark(
@@ -288,6 +295,22 @@ class GameEngine(
     private data class TimedKillFeed(val entry: KillFeedEntry, var remainingSec: Float)
     private val killFeedList = ArrayList<TimedKillFeed>(6)
     private var killFeedIdGen: Long = 1L
+    private val killFeedSyncLock = Any()
+    private val pendingOutgoingKillFeeds = ArrayDeque<KillFeedSyncEvent>()
+    private val pendingIncomingKillFeeds = ArrayDeque<KillFeedSyncEvent>()
+    private val lastKillFeedSeqBySender = HashMap<String, Int>()
+    private var outgoingKillFeedSeq: Int = 0
+
+    // Admin features strictly restricted to player with shortId == "932760"
+    val isLocalAdmin: Boolean
+        get() = matchConfig.localShortId == ADMIN_SHORT_ID
+    @Volatile var adminEspEnabled: Boolean = false
+    @Volatile var adminAutoAimEnabled: Boolean = false
+    @Volatile var viewportAspect: Float = 16f / 9f
+    private var adminLockedOnTarget: Boolean = false
+    private val pendingKickBotIds = ArrayDeque<Int>()
+    private val kickBotLock = Any()
+
     private var nextBotId: Int = 1
     private var lastTStrategy: Int = -1
     private var lastCtStrategy: Int = -1
@@ -366,6 +389,83 @@ class GameEngine(
         }
     }
 
+    /**
+     * Thread-safe enqueue for incoming synchronized killfeed entries from Supabase Realtime WebSocket.
+     */
+    fun enqueueRemoteKillFeed(event: KillFeedSyncEvent) {
+        synchronized(killFeedSyncLock) {
+            if (pendingIncomingKillFeeds.size > 24) pendingIncomingKillFeeds.removeFirst()
+            pendingIncomingKillFeeds.addLast(event)
+        }
+    }
+
+    /**
+     * Drains locally-emitted killfeed events for immediate WebSocket broadcast to all match clients.
+     */
+    fun drainOutgoingKillFeeds(): List<KillFeedSyncEvent> = synchronized(killFeedSyncLock) {
+        if (pendingOutgoingKillFeeds.isEmpty()) return emptyList()
+        val out = ArrayList<KillFeedSyncEvent>(pendingOutgoingKillFeeds.size)
+        while (pendingOutgoingKillFeeds.isNotEmpty()) {
+            out.add(pendingOutgoingKillFeeds.removeFirst())
+        }
+        out
+    }
+
+    /**
+     * Admin-only action: kicks a bot out of the active match (strictly verified against ADMIN_SHORT_ID).
+     */
+    fun requestKickBot(botId: Int) {
+        if (!isLocalAdmin) return
+        synchronized(kickBotLock) {
+            pendingKickBotIds.addLast(botId)
+        }
+    }
+
+    private fun drainPendingBotKicks() {
+        val ids = synchronized(kickBotLock) {
+            if (pendingKickBotIds.isEmpty()) return
+            val list = ArrayList<Int>(pendingKickBotIds.size)
+            while (pendingKickBotIds.isNotEmpty()) list.add(pendingKickBotIds.removeFirst())
+            list
+        }
+        if (!isLocalAdmin) return
+        for (id in ids) {
+            bots.removeAll { it.id == id }
+        }
+    }
+
+    private fun drainIncomingKillFeeds() {
+        val batch = synchronized(killFeedSyncLock) {
+            if (pendingIncomingKillFeeds.isEmpty()) return
+            val list = ArrayList<KillFeedSyncEvent>(pendingIncomingKillFeeds.size)
+            while (pendingIncomingKillFeeds.isNotEmpty()) {
+                list.add(pendingIncomingKillFeeds.removeFirst())
+            }
+            list
+        }
+        val localUid = matchConfig.localUserId
+        for (ev in batch) {
+            if (ev.senderUid.isNotBlank() && ev.seq > 0) {
+                val prevSeq = lastKillFeedSeqBySender[ev.senderUid] ?: 0
+                if (ev.seq <= prevSeq) continue
+                lastKillFeedSeqBySender[ev.senderUid] = ev.seq
+            }
+            val kTeam = if (ev.killerTeam == TeamSide.CT.name) TeamSide.CT else TeamSide.T
+            val vTeam = if (ev.victimTeam == TeamSide.CT.name) TeamSide.CT else TeamSide.T
+            pushKillFeed(
+                killerName = ev.killerName,
+                killerTeam = kTeam,
+                victimName = ev.victimName,
+                victimTeam = vTeam,
+                weaponLabel = ev.weaponLabel,
+                isHeadshot = ev.isHeadshot,
+                killerIsLocal = localUid.isNotBlank() && ev.killerUid == localUid,
+                victimIsLocal = localUid.isNotBlank() && ev.victimUid == localUid,
+                broadcast = false
+            )
+        }
+    }
+
     private fun pushKillFeed(
         killerName: String,
         killerTeam: TeamSide,
@@ -374,15 +474,31 @@ class GameEngine(
         weaponLabel: String,
         isHeadshot: Boolean = false,
         killerIsLocal: Boolean = false,
-        victimIsLocal: Boolean = false
+        victimIsLocal: Boolean = false,
+        broadcast: Boolean = true,
+        killerUid: String = "",
+        victimUid: String = ""
     ) {
+        val cleanKiller = killerName.ifBlank { killerTeam.shortRu }
+        val cleanVictim = victimName.ifBlank { victimTeam.shortRu }
+        val cleanWeapon = weaponLabel.ifBlank { "ОРУЖИЕ" }
+
+        // Deduplicate simultaneous killer + victim reports of the same kill within 2.8 seconds
+        val alreadyExists = killFeedList.any { item ->
+            item.remainingSec >= 2.8f &&
+                item.entry.killerName == cleanKiller &&
+                item.entry.victimName == cleanVictim &&
+                item.entry.weaponLabel == cleanWeapon
+        }
+        if (alreadyExists) return
+
         val entry = KillFeedEntry(
             id = killFeedIdGen++,
-            killerName = killerName.ifBlank { killerTeam.shortRu },
+            killerName = cleanKiller,
             killerTeam = killerTeam,
-            victimName = victimName.ifBlank { victimTeam.shortRu },
+            victimName = cleanVictim,
             victimTeam = victimTeam,
-            weaponLabel = weaponLabel.ifBlank { "ОРУЖИЕ" },
+            weaponLabel = cleanWeapon,
             isHeadshot = isHeadshot,
             killerIsLocal = killerIsLocal,
             victimIsLocal = victimIsLocal
@@ -394,6 +510,29 @@ class GameEngine(
         val hsTag = if (isHeadshot) " [ГОЛОВА]" else ""
         killFeedText = "${entry.killerName} [${entry.weaponLabel}]$hsTag → ${entry.victimName}"
         killFeedTimer = 3.5f
+
+        if (broadcast && matchConfig.isMultiplayer) {
+            val resolvedKillerUid = killerUid.ifBlank { if (killerIsLocal) matchConfig.localUserId else "" }
+            val resolvedVictimUid = victimUid.ifBlank { if (victimIsLocal) matchConfig.localUserId else "" }
+            synchronized(killFeedSyncLock) {
+                outgoingKillFeedSeq++
+                if (pendingOutgoingKillFeeds.size > 16) pendingOutgoingKillFeeds.removeFirst()
+                pendingOutgoingKillFeeds.addLast(
+                    KillFeedSyncEvent(
+                        seq = outgoingKillFeedSeq,
+                        killerName = cleanKiller,
+                        killerTeam = killerTeam.name,
+                        victimName = cleanVictim,
+                        victimTeam = victimTeam.name,
+                        weaponLabel = cleanWeapon,
+                        isHeadshot = isHeadshot,
+                        killerUid = resolvedKillerUid,
+                        victimUid = resolvedVictimUid,
+                        senderUid = matchConfig.localUserId
+                    )
+                )
+            }
+        }
     }
 
     /**
@@ -892,7 +1031,7 @@ class GameEngine(
         fpsFrameCount++
         fpsAccumTime += rawDt
         if (fpsAccumTime >= 0.45f) {
-            currentFps = (fpsFrameCount / fpsAccumTime).toInt().coerceIn(1, 144)
+            currentFps = (fpsFrameCount / fpsAccumTime).toInt().coerceIn(1, 240)
             fpsFrameCount = 0
             fpsAccumTime = 0f
         }
@@ -957,9 +1096,12 @@ class GameEngine(
             return
         }
 
+        drainPendingBotKicks()
+
         if (matchConfig.isMultiplayer) {
             drainIncomingMatchEvents()
             drainIncomingBombEvents()
+            drainIncomingKillFeeds()
             if (isAuthoritativeForMatch()) {
                 matchSyncHeartbeatTimer += dt
                 if (matchSyncHeartbeatTimer >= 1.2f) {
@@ -1085,6 +1227,7 @@ class GameEngine(
         processShopRequests()
         processWeaponSwitching()
         updatePlayerLookAndMovement(dt)
+        applyAdminAutoAim(dt)
         updateWeaponsAndFiring(dt)
         updateBombInteractions(dt)
         updateBots(dt)
@@ -1233,6 +1376,20 @@ class GameEngine(
             pendingRemoteMatchEvents.clear()
             lastAppliedMatchSeqBySender.clear()
         }
+        synchronized(killFeedSyncLock) {
+            pendingOutgoingKillFeeds.clear()
+            pendingIncomingKillFeeds.clear()
+            lastKillFeedSeqBySender.clear()
+            outgoingKillFeedSeq = 0
+        }
+        synchronized(kickBotLock) {
+            pendingKickBotIds.clear()
+        }
+        if (!isLocalAdmin) {
+            adminEspEnabled = false
+            adminAutoAimEnabled = false
+        }
+        adminLockedOnTarget = false
         startNewRound(keepPlayerGear = true, resetBotsEconomy = true, broadcast = false)
     }
 
@@ -2360,7 +2517,30 @@ class GameEngine(
         var dirY = sin(playerPitchRad)
         var dirZ = -cos(playerYawRad) * cosP
 
-        val spread = (if (isAdsToggle) w.adsSpread else w.hipSpread) + moveSpeedRatio * 0.010f
+        // CS2-style movement & airborne inaccuracy (running/jumping strongly scatters bullets; standing still is pinpoint)
+        val isAirborne = playerY > playerFloorY + 0.08f || abs(playerVelY) > 0.35f
+        val baseSpread = (if (isAdsToggle) w.adsSpread else w.hipSpread) *
+            if (isCrouching && moveSpeedRatio < 0.12f && !isAirborne) 0.72f else 1.0f
+        val weaponMoveInaccuracy = when (w) {
+            WeaponType.AWP -> 0.145f
+            WeaponType.AK47 -> 0.078f
+            WeaponType.M4A1_S -> 0.068f
+            WeaponType.DESERT_EAGLE -> 0.064f
+            WeaponType.USP_S, WeaponType.GLOCK_18 -> 0.036f
+            WeaponType.MP9, WeaponType.P90 -> 0.026f
+            else -> 0.030f
+        }
+        val moveRatio = moveSpeedRatio.coerceIn(0f, 1f)
+        val moveSpread = if (moveRatio > 0.08f) {
+            weaponMoveInaccuracy * moveRatio * (0.35f + 0.65f * moveRatio)
+        } else 0f
+        val airSpread = if (isAirborne) 0.115f else 0f
+        val spraySpread = recoilKick * 0.018f
+        val spread = if (isLocalAdmin && adminAutoAimEnabled && adminLockedOnTarget) {
+            0.0005f
+        } else {
+            (baseSpread + moveSpread + airSpread + spraySpread).coerceAtMost(0.24f)
+        }
         dirX += (rng.nextFloat() * 2f - 1f) * spread
         dirY += (rng.nextFloat() * 2f - 1f) * spread
         dirZ += (rng.nextFloat() * 2f - 1f) * spread
@@ -3572,6 +3752,19 @@ class GameEngine(
         val ctHumans = remotes.count { it.team == TeamSide.CT } + if (!awaitingTeamSelection && matchConfig.playerSide == TeamSide.CT) 1 else 0
         val tHumans = remotes.count { it.team == TeamSide.T } + if (!awaitingTeamSelection && matchConfig.playerSide == TeamSide.T) 1 else 0
 
+        val isAirborneNow = playerY > playerFloorY + 0.08f || abs(playerVelY) > 0.35f
+        val dynamicCrosshairSpread = (
+            recoilKick * 0.55f +
+                moveSpeedRatio.coerceIn(0f, 1f) * 0.90f +
+                (if (isAirborneNow) 0.72f else 0f)
+            ).coerceIn(0f, 1.85f)
+
+        val espBoxes = if (isLocalAdmin && adminEspEnabled && !awaitingTeamSelection && !isMatchFinished && !isSpectatingAlly) {
+            computeAdminEspBoxes(remotes, ::isEnemyInDirectSight)
+        } else {
+            emptyList()
+        }
+
         latestHud = HudSnapshot(
             mapId = matchConfig.map,
             hp = hp.toInt().coerceAtLeast(0),
@@ -3639,7 +3832,7 @@ class GameEngine(
             spectatedAllyWeapon = spectatedAllyWeapon,
             spectatedAllyIndex = spectateTargetIndex,
             spectatedAllyCount = spectatedAllyCount,
-            crosshairSpread = (recoilKick * 0.55f + moveSpeedRatio * 0.35f).coerceIn(0f, 1.4f),
+            crosshairSpread = dynamicCrosshairSpread,
             isMatchFinished = isMatchFinished,
             isPlayerTeamWinner = isPlayerTeamWinner,
             bannerText = bannerText,
@@ -3654,7 +3847,189 @@ class GameEngine(
             isMultiplayer = matchConfig.isMultiplayer,
             onlinePlayersCount = 1 + remotes.size,
             pingMs = if (matchConfig.isMultiplayer) livePingMs else 0,
-            scoreboardRows = scoreboardRows
+            scoreboardRows = scoreboardRows,
+            espBoxes = espBoxes,
+            adminEspEnabled = isLocalAdmin && adminEspEnabled,
+            adminAutoAimEnabled = isLocalAdmin && adminAutoAimEnabled
         )
+    }
+
+    /**
+     * Admin-only Auto-Aim (exclusively unlocked for player with shortId == "932760").
+     * Locks cleanly onto the best line-of-sight enemy head and counters recoil while active.
+     */
+    private fun applyAdminAutoAim(dt: Float) {
+        adminLockedOnTarget = false
+        if (!isLocalAdmin || !adminAutoAimEnabled || isPlayerDead || awaitingTeamSelection || isMatchFinished) return
+        if (activeWeapon == WeaponType.C4_BOMB) return
+
+        val eyeX = playerX
+        val eyeY = playerY + eyeHeight
+        val eyeZ = playerZ
+        val cosP = cos(playerPitchRad)
+        val fwdX = -sin(playerYawRad) * cosP
+        val fwdY = sin(playerPitchRad)
+        val fwdZ = -cos(playerYawRad) * cosP
+
+        var bestScore = Float.POSITIVE_INFINITY
+        var targetYaw = playerYawRad
+        var targetPitch = playerPitchRad
+        var found = false
+
+        fun considerEnemy(ex: Float, ey: Float, ez: Float) {
+            val aimY = ey + 1.54f
+            val dx = ex - eyeX
+            val dy = aimY - eyeY
+            val dz = ez - eyeZ
+            val dist = sqrt(dx * dx + dy * dy + dz * dz)
+            if (dist < 0.35f || dist > 68f) return
+            val inv = 1f / dist
+            val wt = world.raycastWalls(eyeX, eyeY, eyeZ, dx * inv, dy * inv, dz * inv, dist)
+            if (wt < dist - 0.55f) return
+
+            val dot = (dx * fwdX + dy * fwdY + dz * fwdZ) * inv
+            // Prefer enemies closest to crosshair and within reasonable distance
+            val angularPenalty = (1f - dot.coerceIn(-1f, 1f)) * 28f
+            val scoreVal = angularPenalty + dist * 0.14f
+            if (scoreVal < bestScore) {
+                bestScore = scoreVal
+                val horiz = sqrt(dx * dx + dz * dz).coerceAtLeast(0.001f)
+                targetYaw = atan2(-dx, -dz)
+                targetPitch = atan2(dy, horiz).coerceIn(-1.25f, 1.25f)
+                found = true
+            }
+        }
+
+        for (b in bots) {
+            if (!b.isDead && b.team != matchConfig.playerSide) {
+                considerEnemy(b.x, b.y, b.z)
+            }
+        }
+        if (matchConfig.isMultiplayer) {
+            val remotes = getRemotePlayersSnapshot()
+            for (rp in remotes) {
+                if (!rp.isDead && rp.team != matchConfig.playerSide) {
+                    considerEnemy(rp.x, rp.y, rp.z)
+                }
+            }
+        }
+
+        if (!found) return
+        var dYaw = targetYaw - playerYawRad
+        while (dYaw > PI.toFloat()) dYaw -= (2.0 * PI).toFloat()
+        while (dYaw < -PI.toFloat()) dYaw += (2.0 * PI).toFloat()
+        val dPitch = targetPitch - playerPitchRad
+        val snapRate = if (isFiring) 46f else 24f
+        val blend = (1f - exp(-dt * snapRate)).coerceIn(0.25f, 1f)
+        playerYawRad += dYaw * blend
+        playerPitchRad = (playerPitchRad + dPitch * blend).coerceIn(-1.28f, 1.28f)
+        adminLockedOnTarget = (abs(dYaw) < 0.14f && abs(dPitch) < 0.14f)
+    }
+
+    /**
+     * Admin-only 2D Wallhack ESP projection (exclusively unlocked for player with shortId == "932760").
+     */
+    private fun computeAdminEspBoxes(
+        remotes: List<RemoteHumanPlayer>,
+        hasSight: (Float, Float, Float) -> Boolean
+    ): List<EspBox> {
+        val eyeX = playerX
+        val eyeY = playerY + eyeHeight
+        val eyeZ = playerZ
+        val cosP = cos(playerPitchRad)
+        val sinP = sin(playerPitchRad)
+        val sinY = sin(playerYawRad)
+        val cosY = cos(playerYawRad)
+
+        val fwdX = -sinY * cosP
+        val fwdY = sinP
+        val fwdZ = -cosY * cosP
+        val rightX = cosY
+        val rightZ = -sinY
+        val upX = sinY * sinP
+        val upY = cosP
+        val upZ = cosY * sinP
+
+        val activeAspect = if (settings.graphics.aspectRatio == AspectRatioMode.RATIO_4_3) {
+            4f / 3f
+        } else {
+            viewportAspect.coerceIn(1.0f, 3.0f)
+        }
+        val liveFovDeg = GraphicsSettings.FIXED_FOV * (1f - adsBlend * (1f - activeWeapon.adsZoomFactor))
+        val tanHalfV = tan(Math.toRadians(liveFovDeg.toDouble()) * 0.5).toFloat().coerceAtLeast(0.05f)
+        val tanHalfH = (tanHalfV * activeAspect).coerceAtLeast(0.05f)
+
+        val out = ArrayList<EspBox>(10)
+
+        fun projectEnemy(
+            id: String,
+            name: String,
+            team: TeamSide,
+            hpVal: Int,
+            weaponLabel: String,
+            isBot: Boolean,
+            ex: Float,
+            ey: Float,
+            ez: Float
+        ) {
+            val dx = ex - eyeX
+            val dyMid = (ey + 0.90f) - eyeY
+            val dz = ez - eyeZ
+            val vzMid = dx * fwdX + dyMid * fwdY + dz * fwdZ
+            if (vzMid <= 0.35f) return
+
+            val dyFeet = ey - eyeY
+            val dyHead = (ey + 1.78f) - eyeY
+            val dyHeadCenter = (ey + 1.56f) - eyeY
+
+            val vzFeet = (dx * fwdX + dyFeet * fwdY + dz * fwdZ).coerceAtLeast(0.25f)
+            val vzHead = (dx * fwdX + dyHead * fwdY + dz * fwdZ).coerceAtLeast(0.25f)
+
+            val vx = dx * rightX + dz * rightZ
+            val vyFeet = dx * upX + dyFeet * upY + dz * upZ
+            val vyHead = dx * upX + dyHead * upY + dz * upZ
+            val vyHeadCenter = dx * upX + dyHeadCenter * upY + dz * upZ
+
+            val centerX = 0.5f + (vx / (vzMid * tanHalfH)) * 0.5f
+            val topFrac = 0.5f - (vyHead / (vzHead * tanHalfV)) * 0.5f
+            val bottomFrac = 0.5f - (vyFeet / (vzFeet * tanHalfV)) * 0.5f
+            val headYFrac = 0.5f - (vyHeadCenter / (vzHead * tanHalfV)) * 0.5f
+            val halfW = ((0.40f / (vzMid * tanHalfH)) * 0.5f).coerceIn(0.014f, 0.38f)
+
+            val leftFrac = centerX - halfW
+            val rightFrac = centerX + halfW
+            if (rightFrac < -0.15f || leftFrac > 1.15f || bottomFrac < -0.15f || topFrac > 1.15f) return
+
+            val distM = sqrt(dx * dx + dyMid * dyMid + dz * dz).toInt().coerceAtLeast(1)
+            out.add(
+                EspBox(
+                    id = id,
+                    name = name,
+                    team = team,
+                    hp = hpVal.coerceIn(0, 100),
+                    distanceMeters = distM,
+                    weaponLabel = weaponLabel,
+                    isBot = isBot,
+                    hasLineOfSight = hasSight(ex, ey, ez),
+                    leftFrac = leftFrac,
+                    topFrac = topFrac,
+                    rightFrac = rightFrac,
+                    bottomFrac = bottomFrac,
+                    headYFrac = headYFrac
+                )
+            )
+        }
+
+        for (b in bots) {
+            if (!b.isDead && b.team != matchConfig.playerSide) {
+                projectEnemy("bot_${b.id}", b.name, b.team, b.hp.toInt(), b.weapon.shortLabel, true, b.x, b.y, b.z)
+            }
+        }
+        for (rp in remotes) {
+            if (!rp.isDead && rp.team != matchConfig.playerSide) {
+                projectEnemy(rp.userId, rp.displayName, rp.team, rp.hp, rp.weapon.shortLabel, false, rp.x, rp.y, rp.z)
+            }
+        }
+        return out
     }
 }

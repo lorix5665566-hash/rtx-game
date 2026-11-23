@@ -402,10 +402,21 @@ enum class AspectRatioMode(
     RATIO_4_3("4:3", "Растянутый 4:3 (как в CS2)")
 }
 
+enum class TargetFpsMode(
+    val fps: Int,
+    val labelRu: String,
+    val subtitleRu: String
+) {
+    FPS_60(60, "60 FPS", "Стандартная частота • Экономия батареи"),
+    FPS_90(90, "90 FPS", "Повышенная плавность"),
+    FPS_120(120, "120 FPS", "Максимум плавности для всех устройств")
+}
+
 data class GraphicsSettings(
     val preset: GraphicsPreset = GraphicsPreset.ULTRA_RTX,
     val resolutionScale: Float = 1.0f,
     val aspectRatio: AspectRatioMode = AspectRatioMode.RATIO_16_9,
+    val targetFps: TargetFpsMode = TargetFpsMode.FPS_120,
     val rtxReflections: Boolean = true,
     val dynamicLighting: Boolean = true,
     val hdTextures: Boolean = true,
@@ -609,6 +620,45 @@ data class KillFeedEntry(
     val victimIsLocal: Boolean = false
 )
 
+data class KillFeedSyncEvent(
+    val seq: Int = 0,
+    val killerName: String = "",
+    val killerTeam: String = "T",
+    val victimName: String = "",
+    val victimTeam: String = "CT",
+    val weaponLabel: String = "",
+    val isHeadshot: Boolean = false,
+    val killerUid: String = "",
+    val victimUid: String = "",
+    val senderUid: String = ""
+)
+
+data class AdminActionEvent(
+    val seq: Int = 0,
+    val action: String = "", // "kick" | "ban" | "unban"
+    val targetUid: String = "",
+    val targetShortId: String = "",
+    val reason: String = "",
+    val senderUid: String = "",
+    val senderShortId: String = ""
+)
+
+data class EspBox(
+    val id: String,
+    val name: String,
+    val team: TeamSide,
+    val hp: Int,
+    val distanceMeters: Int,
+    val weaponLabel: String,
+    val isBot: Boolean,
+    val hasLineOfSight: Boolean,
+    val leftFrac: Float,
+    val topFrac: Float,
+    val rightFrac: Float,
+    val bottomFrac: Float,
+    val headYFrac: Float
+)
+
 data class DeathRecapInfo(
     val killerName: String = "",
     val killerWeapon: String = "",
@@ -703,7 +753,10 @@ data class HudSnapshot(
     val isMultiplayer: Boolean = false,
     val onlinePlayersCount: Int = 1,
     val pingMs: Int = 0,
-    val scoreboardRows: List<ScoreboardRow> = emptyList()
+    val scoreboardRows: List<ScoreboardRow> = emptyList(),
+    val espBoxes: List<EspBox> = emptyList(),
+    val adminEspEnabled: Boolean = false,
+    val adminAutoAimEnabled: Boolean = false
 ) {
     val isFreezeTime: Boolean
         get() = freezeTimeSec > 0.05f

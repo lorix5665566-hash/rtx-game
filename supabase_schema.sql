@@ -15,8 +15,14 @@ create table if not exists public.profiles (
     online boolean not null default true,
     total_kills integer not null default 0 check (total_kills >= 0),
     total_headshots integer not null default 0 check (total_headshots >= 0),
+    banned boolean not null default false,
+    ban_reason text not null default '' check (char_length(ban_reason) <= 120),
     updated_at timestamptz not null default now()
 );
+
+-- Idempotent migration for existing deployments
+alter table public.profiles add column if not exists banned boolean not null default false;
+alter table public.profiles add column if not exists ban_reason text not null default '';
 
 -- 2. Friend Requests
 create table if not exists public.friend_requests (
@@ -312,5 +318,143 @@ $$;
 grant execute on function public.ensure_my_profile(text) to authenticated;
 grant execute on function public.accept_friend_request(uuid) to authenticated;
 grant execute on function public.remove_friendship(uuid) to authenticated;
+
+-- ============================================================================
+-- Admin Moderation & Anti-Tamper Protection (Strictly gated to short_id '932760')
+-- ============================================================================
+create or replace function public.prevent_non_admin_ban_tamper()
+returns trigger
+language plpgsql
+as $$
+begin
+    if (new.banned is distinct from old.banned or new.ban_reason is distinct from old.ban_reason)
+       and current_setting('app.admin_rpc', true) is distinct from '1' then
+        raise exception 'Forbidden: ban status can only be modified by administrator';
+    end if;
+    return new;
+end;
+$$;
+
+drop trigger if exists trg_prevent_non_admin_ban_tamper on public.profiles;
+create trigger trg_prevent_non_admin_ban_tamper
+    before update on public.profiles
+    for each row
+    execute function public.prevent_non_admin_ban_tamper();
+
+create or replace function public.admin_set_ban(
+    p_target_short_id text,
+    p_banned boolean,
+    p_reason text default ''
+)
+returns public.profiles
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+    v_is_admin boolean;
+    v_clean_id text;
+    v_clean_reason text;
+    v_updated public.profiles%rowtype;
+begin
+    select exists(
+        select 1 from public.profiles
+        where user_id = auth.uid() and short_id = '932760'
+    ) into v_is_admin;
+
+    if not v_is_admin then
+        raise exception 'Forbidden: admin privileges required';
+    end if;
+
+    v_clean_id := trim(coalesce(p_target_short_id, ''));
+    if v_clean_id !~ '^[1-9][0-9]{5}$' then
+        raise exception 'Invalid 6-digit player ID';
+    end if;
+    if v_clean_id = '932760' then
+        raise exception 'Cannot ban the administrator account';
+    end if;
+
+    v_clean_reason := left(trim(coalesce(p_reason, '')), 120);
+    perform set_config('app.admin_rpc', '1', true);
+
+    update public.profiles
+    set banned = coalesce(p_banned, false),
+        ban_reason = case when coalesce(p_banned, false) then v_clean_reason else '' end,
+        online = case when coalesce(p_banned, false) then false else online end,
+        updated_at = now()
+    where short_id = v_clean_id
+    returning * into v_updated;
+
+    if not found then
+        raise exception 'Player with ID % not found', v_clean_id;
+    end if;
+
+    if coalesce(p_banned, false) then
+        delete from public.lobby_members where user_id = v_updated.user_id;
+    end if;
+
+    return v_updated;
+end;
+$$;
+
+create or replace function public.admin_list_banned()
+returns setof public.profiles
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+    v_is_admin boolean;
+begin
+    select exists(
+        select 1 from public.profiles
+        where user_id = auth.uid() and short_id = '932760'
+    ) into v_is_admin;
+
+    if not v_is_admin then
+        raise exception 'Forbidden: admin privileges required';
+    end if;
+
+    return query
+    select * from public.profiles
+    where banned = true
+    order by updated_at desc
+    limit 100;
+end;
+$$;
+
+create or replace function public.admin_kick_member(
+    p_lobby_id uuid,
+    p_target_uid uuid
+)
+returns void
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+    v_is_admin boolean;
+begin
+    select exists(
+        select 1 from public.profiles
+        where user_id = auth.uid() and short_id = '932760'
+    ) into v_is_admin;
+
+    if not v_is_admin then
+        raise exception 'Forbidden: admin privileges required';
+    end if;
+
+    if p_target_uid = auth.uid() then
+        raise exception 'Cannot kick yourself';
+    end if;
+
+    delete from public.lobby_members
+    where lobby_id = p_lobby_id and user_id = p_target_uid;
+end;
+$$;
+
+grant execute on function public.admin_set_ban(text, boolean, text) to authenticated;
+grant execute on function public.admin_list_banned() to authenticated;
+grant execute on function public.admin_kick_member(uuid, uuid) to authenticated;
 
 notify pgrst, 'reload schema';

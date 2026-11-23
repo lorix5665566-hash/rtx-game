@@ -67,6 +67,7 @@ import com.example.model.GameSettings
 import com.example.model.GraphicsPreset
 import com.example.model.GraphicsSettings
 import com.example.model.SensitivitySettings
+import com.example.model.TargetFpsMode
 import com.example.ui.theme.BorderSteel
 import com.example.ui.theme.ElevatedGunmetal
 import com.example.ui.theme.LocalUiMetrics
@@ -346,6 +347,68 @@ private fun GraphicsSettingsSection(
                     overflow = TextOverflow.Ellipsis
                 )
             }
+        }
+
+        // Target FPS selector: 60 / 90 / 120 FPS (unlocked 120 FPS for all Android devices)
+        Column(
+            modifier = Modifier.fillMaxWidth(),
+            verticalArrangement = Arrangement.spacedBy(6.dp)
+        ) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(
+                    text = "Частота кадров (FPS)",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = TextPrimary
+                )
+                Text(
+                    text = graphics.targetFps.labelRu,
+                    style = MaterialTheme.typography.labelLarge,
+                    color = RtxEmerald
+                )
+            }
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                TargetFpsMode.entries.forEach { fpsMode ->
+                    val selected = graphics.targetFps == fpsMode
+                    val accent = if (fpsMode == TargetFpsMode.FPS_120) TacticalAmber else RtxEmerald
+                    val shape = CutCornerShape(topStart = 8.dp, bottomEnd = 8.dp)
+                    Box(
+                        modifier = Modifier
+                            .weight(1f)
+                            .clip(shape)
+                            .background(if (selected) accent.copy(alpha = 0.22f) else ElevatedGunmetal)
+                            .border(
+                                width = if (selected) 1.5.dp else 1.dp,
+                                color = if (selected) accent else BorderSteel,
+                                shape = shape
+                            )
+                            .clickable { onUpdate(graphics.copy(targetFps = fpsMode)) }
+                            .padding(vertical = 10.dp, horizontal = 8.dp)
+                            .testTag("fps_${fpsMode.fps}"),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Text(
+                            text = fpsMode.labelRu,
+                            style = MaterialTheme.typography.labelLarge,
+                            color = if (selected) accent else TextPrimary,
+                            maxLines = 1
+                        )
+                    }
+                }
+            }
+            Text(
+                text = graphics.targetFps.subtitleRu,
+                style = MaterialTheme.typography.bodySmall,
+                color = TextSecondary,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
+            )
         }
 
         SettingsToggleRow(

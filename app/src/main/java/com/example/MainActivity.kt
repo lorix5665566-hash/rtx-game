@@ -41,8 +41,10 @@ import com.example.model.TeamSide
 import com.example.online.SupabaseAuthManager
 import com.example.online.SupabaseOnlineRepository
 import com.example.online.SupabaseSession
+import com.example.ui.AdminPanelOverlay
 import com.example.ui.AppScreen
 import com.example.ui.AuthScreen
+import com.example.ui.BannedAccountScreen
 import com.example.ui.ControlEditorScreen
 import com.example.ui.FriendsOverlay
 import com.example.ui.GameViewModel
@@ -54,10 +56,29 @@ import com.example.ui.OnlineViewModel
 import com.example.ui.ProfileCustomizationOverlay
 import com.example.ui.SettingsScreen
 import com.example.ui.theme.ResponsiveUiProvider
+import com.example.ui.theme.TacticalAmber
+import com.example.ui.theme.TacticalSurface
+import com.example.ui.theme.TextPrimary
+import com.example.ui.theme.ThreatCrimson
 import com.example.ui.theme.VanguardTheme
+import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.safeDrawingPadding
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material3.Surface
+import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import kotlinx.coroutines.launch
+import kotlin.math.abs
 
 class MainActivity : ComponentActivity() {
+    private var currentTargetFps: Int = 120
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge(
@@ -68,7 +89,9 @@ class MainActivity : ComponentActivity() {
         setContent {
             VanguardTheme {
                 ResponsiveUiProvider {
-                    VanguardAuthRoot()
+                    VanguardAuthRoot(
+                        onTargetFpsChanged = { fps -> applyPreferredRefreshRate(fps) }
+                    )
                 }
             }
         }
@@ -77,12 +100,49 @@ class MainActivity : ComponentActivity() {
     override fun onResume() {
         super.onResume()
         applyImmersiveFullscreen()
+        applyPreferredRefreshRate(currentTargetFps)
     }
 
     override fun onWindowFocusChanged(hasFocus: Boolean) {
         super.onWindowFocusChanged(hasFocus)
         if (hasFocus) {
             applyImmersiveFullscreen()
+            applyPreferredRefreshRate(currentTargetFps)
+        }
+    }
+
+    /**
+     * Requests 60 / 90 / 120+ Hz display refresh mode across all Android devices (API 24..36).
+     */
+    fun applyPreferredRefreshRate(targetFps: Int) {
+        currentTargetFps = targetFps
+        runCatching {
+            val activeDisplay = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                display
+            } else {
+                @Suppress("DEPRECATION")
+                windowManager.defaultDisplay
+            }
+            val attrs = window.attributes
+            attrs.preferredRefreshRate = targetFps.toFloat()
+
+            if (activeDisplay != null) {
+                val activeMode = activeDisplay.mode
+                val sameResModes = activeDisplay.supportedModes.filter {
+                    it.physicalWidth == activeMode.physicalWidth &&
+                        it.physicalHeight == activeMode.physicalHeight
+                }.ifEmpty { activeDisplay.supportedModes.toList() }
+
+                val chosenMode = if (targetFps >= 120) {
+                    sameResModes.maxByOrNull { it.refreshRate }
+                } else {
+                    sameResModes.minByOrNull { abs(it.refreshRate - targetFps.toFloat()) }
+                }
+                if (chosenMode != null) {
+                    attrs.preferredDisplayModeId = chosenMode.modeId
+                }
+            }
+            window.attributes = attrs
         }
     }
 
@@ -101,7 +161,9 @@ class MainActivity : ComponentActivity() {
 }
 
 @Composable
-private fun VanguardAuthRoot() {
+private fun VanguardAuthRoot(
+    onTargetFpsChanged: (Int) -> Unit
+) {
     val context = LocalContext.current
     val authManager = remember(context.applicationContext) {
         SupabaseAuthManager(context.applicationContext)
@@ -119,7 +181,8 @@ private fun VanguardAuthRoot() {
         key(activeSession.userId) {
             VanguardRtxApp(
                 session = activeSession,
-                authManager = authManager
+                authManager = authManager,
+                onTargetFpsChanged = onTargetFpsChanged
             )
         }
     }
@@ -129,6 +192,7 @@ private fun VanguardAuthRoot() {
 fun VanguardRtxApp(
     session: SupabaseSession,
     authManager: SupabaseAuthManager,
+    onTargetFpsChanged: (Int) -> Unit,
     vm: GameViewModel = viewModel()
 ) {
     val scope = rememberCoroutineScope()
@@ -156,6 +220,11 @@ fun VanguardRtxApp(
                 if (vm.engine.matchConfig.isMultiplayer) {
                     vm.engine.enqueueRemoteMatchSync(ev)
                 }
+            },
+            onKillFeed = { ev ->
+                if (vm.engine.matchConfig.isMultiplayer) {
+                    vm.engine.enqueueRemoteKillFeed(ev)
+                }
             }
         )
         vm.engine.onTeamChanged = { side ->
@@ -164,7 +233,7 @@ fun VanguardRtxApp(
             }
         }
         onDispose {
-            onlineVm.attachDirectMatchSinks(null, null, null)
+            onlineVm.attachDirectMatchSinks(null, null, null, null)
             vm.engine.onTeamChanged = null
         }
     }
@@ -190,9 +259,69 @@ fun VanguardRtxApp(
     val activeLobby by onlineVm.activeLobby.collectAsStateWithLifecycle()
     val lobbyMemberStates by onlineVm.lobbyMemberStates.collectAsStateWithLifecycle()
     val pingMs by onlineVm.pingMs.collectAsStateWithLifecycle()
+    val bannedAccounts by onlineVm.bannedAccounts.collectAsStateWithLifecycle()
+    val adminBusy by onlineVm.adminBusy.collectAsStateWithLifecycle()
+    val adminStatus by onlineVm.adminStatus.collectAsStateWithLifecycle()
+    val kickedMessage by onlineVm.kickedMessage.collectAsStateWithLifecycle()
+    val localBanNotice by onlineVm.localBanNotice.collectAsStateWithLifecycle()
+
+    val isAdmin = playerProfile?.isAdmin == true
+    val isBanned = (playerProfile?.banned == true) || !localBanNotice.isNullOrBlank()
 
     var isFriendsOpen by rememberSaveable { mutableStateOf(false) }
     var isProfileOpen by rememberSaveable { mutableStateOf(false) }
+    var isAdminPanelOpen by rememberSaveable { mutableStateOf(false) }
+    var espUiEnabled by rememberSaveable { mutableStateOf(false) }
+    var autoAimUiEnabled by rememberSaveable { mutableStateOf(false) }
+
+    // Apply target FPS (60 / 90 / 120 FPS) to Android display mode immediately on change
+    LaunchedEffect(settings.graphics.targetFps) {
+        onTargetFpsChanged(settings.graphics.targetFps.fps)
+    }
+
+    // Keep engine admin flags synced and strictly disabled for non-admin accounts
+    LaunchedEffect(isAdmin, espUiEnabled, autoAimUiEnabled) {
+        vm.engine.adminEspEnabled = isAdmin && espUiEnabled
+        vm.engine.adminAutoAimEnabled = isAdmin && autoAimUiEnabled
+        if (!isAdmin) {
+            isAdminPanelOpen = false
+        }
+    }
+
+    // Force exit to menu immediately if kicked by admin during match or lobby
+    LaunchedEffect(kickedMessage) {
+        if (!kickedMessage.isNullOrBlank() && (screen == AppScreen.Playing || screen == AppScreen.MultiplayerLobby)) {
+            vm.exitToMainMenu()
+        }
+    }
+
+    // Force exit and lock out immediately if account is banned
+    LaunchedEffect(isBanned) {
+        if (isBanned) {
+            isFriendsOpen = false
+            isProfileOpen = false
+            isAdminPanelOpen = false
+            if (screen != AppScreen.Menu) {
+                vm.exitToMainMenu()
+            }
+        }
+    }
+
+    if (isBanned) {
+        BannedAccountScreen(
+            shortId = playerProfile?.shortId.orEmpty(),
+            banReason = playerProfile?.banReason?.ifBlank { localBanNotice.orEmpty() }
+                ?: localBanNotice.orEmpty(),
+            onCheckStatus = onlineVm::refreshBanStatusNow,
+            onSignOut = {
+                scope.launch {
+                    onlineVm.setOfflineAndLeaveBeforeSignOut()
+                    authManager.logout()
+                }
+            }
+        )
+        return
+    }
 
     // Automatically launch match for ALL players in the cloud lobby when Host starts the match
     LaunchedEffect(activeLobby?.status, screen) {
@@ -238,19 +367,23 @@ fun VanguardRtxApp(
                 fallbackLoginName = session.loginName,
                 pendingFriendsCount = incomingRequests.size,
                 incomingInvites = incomingInvites,
+                isAdmin = isAdmin,
+                onOpenAdminPanel = {
+                    if (isAdmin) {
+                        isFriendsOpen = false
+                        isProfileOpen = false
+                        isAdminPanelOpen = true
+                        onlineVm.refreshBannedAccounts()
+                    }
+                },
                 onUpdateMatchConfig = vm::updateMatchConfig,
                 onPlay = {
                     val p = playerProfile
-                    if (p != null) {
-                        vm.updateMatchConfig {
-                            it.copy(
-                                localUserId = p.userId,
-                                localDisplayName = p.displayName,
-                                localShortId = p.shortId
-                            )
-                        }
-                    }
-                    vm.startGame()
+                    vm.startGame(
+                        localUserId = p?.userId ?: currentUserId,
+                        localDisplayName = p?.displayName ?: session.loginName,
+                        localShortId = p?.shortId ?: ""
+                    )
                 },
                 onCreateLobby = {
                     onlineVm.createMultiplayerLobby(
@@ -329,11 +462,20 @@ fun VanguardRtxApp(
                 onPublishLiveState = onlineVm::publishMatchTick,
                 onPublishBombSync = onlineVm::publishBombSync,
                 onPublishMatchSync = onlineVm::publishMatchSync,
+                onPublishKillFeed = onlineVm::publishKillFeedSync,
+                isAdmin = isAdmin,
+                onOpenAdminPanel = {
+                    if (isAdmin) {
+                        isAdminPanelOpen = true
+                        onlineVm.refreshBannedAccounts()
+                    }
+                },
                 onSetPaused = vm::setPaused,
                 onRestart = vm::restartMatch,
                 onOpenSettings = { vm.openSettings(fromGame = true) },
                 onOpenControlEditor = { vm.openControlEditor(fromGame = true) },
                 onExitToMenu = {
+                    isAdminPanelOpen = false
                     if (!activeLobbyId.isNullOrBlank()) {
                         onlineVm.leaveActiveLobby()
                     }
@@ -433,6 +575,74 @@ fun VanguardRtxApp(
                     onlineVm.clearBanner()
                 }
             )
+        }
+
+        // Exclusive Admin Panel Overlay (strictly gated to player with ID 932760)
+        AnimatedVisibility(
+            visible = isAdmin && isAdminPanelOpen,
+            enter = fadeIn(tween(160)),
+            exit = fadeOut(tween(140))
+        ) {
+            AdminPanelOverlay(
+                inMatch = screen == AppScreen.Playing,
+                currentUserId = currentUserId,
+                espEnabled = espUiEnabled,
+                autoAimEnabled = autoAimUiEnabled,
+                onToggleEsp = { enabled ->
+                    espUiEnabled = enabled
+                    vm.engine.adminEspEnabled = isAdmin && enabled
+                },
+                onToggleAutoAim = { enabled ->
+                    autoAimUiEnabled = enabled
+                    vm.engine.adminAutoAimEnabled = isAdmin && enabled
+                },
+                lobbyMembers = lobbyMemberStates,
+                scoreboardRows = vm.engine.latestHud.scoreboardRows,
+                bannedAccounts = bannedAccounts,
+                isBusy = adminBusy,
+                statusMessage = adminStatus,
+                onRefreshBanned = onlineVm::refreshBannedAccounts,
+                onKickHuman = onlineVm::adminKickPlayer,
+                onKickBot = { botId ->
+                    vm.engine.requestKickBot(botId)
+                },
+                onBanAccount = onlineVm::adminBanAccount,
+                onUnbanAccount = onlineVm::adminUnbanAccount,
+                onClearStatus = onlineVm::clearAdminStatus,
+                onClose = {
+                    isAdminPanelOpen = false
+                    onlineVm.clearAdminStatus()
+                }
+            )
+        }
+
+        // Kicked from match notice banner in Main Menu
+        if (!kickedMessage.isNullOrBlank() && screen == AppScreen.Menu) {
+            Surface(
+                color = TacticalSurface,
+                shape = RoundedCornerShape(10.dp),
+                border = BorderStroke(1.5.dp, ThreatCrimson),
+                modifier = Modifier
+                    .align(Alignment.BottomCenter)
+                    .safeDrawingPadding()
+                    .padding(bottom = 14.dp, start = 16.dp, end = 16.dp)
+            ) {
+                Row(
+                    modifier = Modifier.padding(horizontal = 14.dp, vertical = 8.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(10.dp)
+                ) {
+                    Text(
+                        text = kickedMessage.orEmpty(),
+                        color = TextPrimary,
+                        fontSize = 12.sp,
+                        fontWeight = FontWeight.Bold
+                    )
+                    TextButton(onClick = onlineVm::clearKickedMessage) {
+                        Text("ОК", color = TacticalAmber, fontWeight = FontWeight.Black)
+                    }
+                }
+            }
         }
 
         val veil = transitionAlpha.value

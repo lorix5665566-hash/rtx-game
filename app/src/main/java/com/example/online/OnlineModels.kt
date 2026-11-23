@@ -38,6 +38,8 @@ object AvatarPresets {
     }
 }
 
+const val ADMIN_SHORT_ID: String = "932760"
+
 /**
  * Cloud human player profile stored in Supabase.
  * Every real human player has a permanent unique 6-digit numeric ID (bots never have IDs).
@@ -50,8 +52,13 @@ data class PlayerProfile(
     val avatarData: String = AvatarPresets.DEFAULT_KEY,
     val online: Boolean = true,
     val totalKills: Int = 0,
-    val totalHeadshots: Int = 0
-)
+    val totalHeadshots: Int = 0,
+    val banned: Boolean = false,
+    val banReason: String = ""
+) {
+    val isAdmin: Boolean
+        get() = shortId == ADMIN_SHORT_ID
+}
 
 /**
  * Mutual cloud friend entry hydrated with live nickname, avatar, and online status.

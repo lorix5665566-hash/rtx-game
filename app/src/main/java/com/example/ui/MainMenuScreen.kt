@@ -109,6 +109,8 @@ fun MainMenuScreen(
     fallbackLoginName: String,
     pendingFriendsCount: Int,
     incomingInvites: List<LobbyInvite>,
+    isAdmin: Boolean = false,
+    onOpenAdminPanel: () -> Unit = {},
     onUpdateMatchConfig: ((MatchConfig) -> MatchConfig) -> Unit,
     onPlay: () -> Unit,
     onCreateLobby: () -> Unit,
@@ -309,6 +311,15 @@ fun MainMenuScreen(
                     onClick = onOpenControls,
                     tag = "nav_controls"
                 )
+                if (isAdmin) {
+                    Cs2NavTab(
+                        label = "АДМИН",
+                        selected = false,
+                        accentOverride = ThreatCrimson,
+                        onClick = onOpenAdminPanel,
+                        tag = "nav_admin"
+                    )
+                }
             }
 
             // Top-Right Avatar + Nickname + Unique 6-Digit Human Player ID Pill (opens Profile Customization)

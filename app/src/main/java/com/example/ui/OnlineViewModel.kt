@@ -3,12 +3,15 @@ package com.example.ui
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
+import com.example.model.AdminActionEvent
 import com.example.model.ArenaMapId
 import com.example.model.BombSyncEvent
 import com.example.model.GameMode
+import com.example.model.KillFeedSyncEvent
 import com.example.model.MatchSyncEvent
 import com.example.model.OutgoingHitEvent
 import com.example.model.TeamSide
+import com.example.online.ADMIN_SHORT_ID
 import com.example.online.FriendEntry
 import com.example.online.FriendRequest
 import com.example.online.LobbyInvite
@@ -87,11 +90,28 @@ class OnlineViewModel(
     private val _realtimeConnected = MutableStateFlow(false)
     val realtimeConnected: StateFlow<Boolean> = _realtimeConnected.asStateFlow()
 
+    private val _bannedAccounts = MutableStateFlow<List<PlayerProfile>>(emptyList())
+    val bannedAccounts: StateFlow<List<PlayerProfile>> = _bannedAccounts.asStateFlow()
+
+    private val _adminBusy = MutableStateFlow(false)
+    val adminBusy: StateFlow<Boolean> = _adminBusy.asStateFlow()
+
+    private val _adminStatus = MutableStateFlow<String?>(null)
+    val adminStatus: StateFlow<String?> = _adminStatus.asStateFlow()
+
+    private val _kickedMessage = MutableStateFlow<String?>(null)
+    val kickedMessage: StateFlow<String?> = _kickedMessage.asStateFlow()
+
+    private val _localBanNotice = MutableStateFlow<String?>(null)
+    val localBanNotice: StateFlow<String?> = _localBanNotice.asStateFlow()
+
     // Direct zero-latency listeners invoked straight from the WebSocket thread into GameEngine!
     @Volatile private var directRemoteStateSink: ((PlayerMatchState) -> Unit)? = null
     @Volatile private var directBombSyncSink: ((BombSyncEvent) -> Unit)? = null
     @Volatile private var directMatchSyncSink: ((MatchSyncEvent) -> Unit)? = null
+    @Volatile private var directKillFeedSink: ((KillFeedSyncEvent) -> Unit)? = null
     @Volatile private var lastDbMirrorMs: Long = 0L
+    private var adminActionSeq: Int = 0
 
     private val realtimeClient = SupabaseRealtimeClient(
         authManager = authManager,
@@ -103,6 +123,12 @@ class OnlineViewModel(
         },
         onMatchSyncReceived = { matchEvent ->
             directMatchSyncSink?.invoke(matchEvent)
+        },
+        onKillFeedReceived = { killFeedEvent ->
+            directKillFeedSink?.invoke(killFeedEvent)
+        },
+        onAdminActionReceived = { adminEvent ->
+            handleIncomingAdminAction(adminEvent)
         },
         onPingMeasured = { rttMs ->
             recordRtt(rttMs)
@@ -118,11 +144,13 @@ class OnlineViewModel(
     fun attachDirectMatchSinks(
         onRemoteState: ((PlayerMatchState) -> Unit)?,
         onBombSync: ((BombSyncEvent) -> Unit)?,
-        onMatchSync: ((MatchSyncEvent) -> Unit)? = null
+        onMatchSync: ((MatchSyncEvent) -> Unit)? = null,
+        onKillFeed: ((KillFeedSyncEvent) -> Unit)? = null
     ) {
         directRemoteStateSink = onRemoteState
         directBombSyncSink = onBombSync
         directMatchSyncSink = onMatchSync
+        directKillFeedSink = onKillFeed
     }
 
     init {
@@ -157,6 +185,173 @@ class OnlineViewModel(
         }
     }
 
+    fun clearKickedMessage() {
+        _kickedMessage.value = null
+    }
+
+    fun clearAdminStatus() {
+        _adminStatus.value = null
+    }
+
+    fun refreshBanStatusNow() {
+        viewModelScope.launch {
+            repository.refreshMyProfile(currentUserId).onSuccess { updated ->
+                if (updated != null) {
+                    _profileState.value = OnlineUiState.Success(updated)
+                    if (!updated.banned) {
+                        _localBanNotice.value = null
+                    }
+                }
+            }
+        }
+    }
+
+    private fun handleIncomingAdminAction(ev: AdminActionEvent) {
+        // Strictly validate that the sender is the designated admin account (ID 932760)
+        if (ev.senderShortId != ADMIN_SHORT_ID) return
+        val knownSender = _lobbyMemberStates.value.firstOrNull { it.userId == ev.senderUid }
+        if (knownSender != null && knownSender.shortId.isNotBlank() && knownSender.shortId != ADMIN_SHORT_ID) {
+            return
+        }
+        val myShortId = currentProfileOrNull()?.shortId.orEmpty()
+        val isTargeted = (ev.targetUid.isNotBlank() && ev.targetUid == currentUserId) ||
+            (ev.targetShortId.isNotBlank() && ev.targetShortId == myShortId)
+        if (!isTargeted) return
+
+        when (ev.action) {
+            "kick" -> {
+                leaveActiveLobby()
+                _kickedMessage.value = "Администратор исключил вас из матча."
+            }
+            "ban" -> {
+                val msg = ev.reason.ifBlank { "Аккаунт заблокирован администратором." }
+                leaveActiveLobby()
+                _localBanNotice.value = msg
+                refreshBanStatusNow()
+            }
+            "unban" -> {
+                _localBanNotice.value = null
+                refreshBanStatusNow()
+            }
+        }
+    }
+
+    fun refreshBannedAccounts() {
+        if (currentProfileOrNull()?.isAdmin != true) return
+        viewModelScope.launch {
+            _adminBusy.value = true
+            repository.adminFetchBannedProfiles()
+                .onSuccess { list ->
+                    _bannedAccounts.value = list
+                }
+                .onFailure { err ->
+                    _adminStatus.value = err.localizedMessage ?: "Не удалось загрузить список банов"
+                }
+            _adminBusy.value = false
+        }
+    }
+
+    fun adminKickPlayer(targetUid: String, targetShortId: String, targetName: String) {
+        val me = currentProfileOrNull()
+        if (me?.isAdmin != true) return
+        if (targetUid == currentUserId || targetShortId == ADMIN_SHORT_ID) {
+            _adminStatus.value = "Нельзя кикнуть самого себя."
+            return
+        }
+        val lobbyId = _activeLobbyId.value
+        val ev = AdminActionEvent(
+            seq = ++adminActionSeq,
+            action = "kick",
+            targetUid = targetUid,
+            targetShortId = targetShortId,
+            reason = "Кик администратором",
+            senderUid = currentUserId,
+            senderShortId = me.shortId
+        )
+        realtimeClient.sendAdminAction(ev)
+        _lobbyMemberStates.value = _lobbyMemberStates.value.filterNot { it.userId == targetUid }
+        _adminStatus.value = "Игрок $targetName исключён из матча"
+        if (!lobbyId.isNullOrBlank() && targetUid.isNotBlank()) {
+            viewModelScope.launch {
+                repository.adminKickFromLobby(lobbyId, targetUid)
+                    .onFailure { err ->
+                        _adminStatus.value = "Кик отправлен в матч (БД: ${err.localizedMessage ?: "обновите SQL-схему"})"
+                    }
+            }
+        }
+    }
+
+    fun adminBanAccount(shortIdRaw: String, reasonRaw: String, targetUid: String = "") {
+        val me = currentProfileOrNull()
+        if (me?.isAdmin != true) return
+        val cleanId = shortIdRaw.trim()
+        val cleanReason = reasonRaw.trim().ifBlank { "Нарушение правил сервера" }.take(120)
+        if (cleanId == ADMIN_SHORT_ID) {
+            _adminStatus.value = "Нельзя заблокировать аккаунт администратора."
+            return
+        }
+        viewModelScope.launch {
+            _adminBusy.value = true
+            // Broadcast instant realtime kick/ban in current match room if active
+            val ev = AdminActionEvent(
+                seq = ++adminActionSeq,
+                action = "ban",
+                targetUid = targetUid,
+                targetShortId = cleanId,
+                reason = cleanReason,
+                senderUid = currentUserId,
+                senderShortId = me.shortId
+            )
+            realtimeClient.sendAdminAction(ev)
+
+            repository.adminSetAccountBan(cleanId, banned = true, reasonRaw = cleanReason)
+                .onSuccess { bannedProfile ->
+                    // Also broadcast using resolved UID in case targetUid wasn't supplied
+                    if (targetUid.isBlank() && bannedProfile.userId.isNotBlank()) {
+                        realtimeClient.sendAdminAction(ev.copy(seq = ++adminActionSeq, targetUid = bannedProfile.userId))
+                    }
+                    _lobbyMemberStates.value = _lobbyMemberStates.value.filterNot {
+                        it.userId == bannedProfile.userId || it.shortId == cleanId
+                    }
+                    _adminStatus.value = "Аккаунт ${bannedProfile.displayName} (ID $cleanId) забанен."
+                    refreshBannedAccounts()
+                }
+                .onFailure { err ->
+                    _adminStatus.value = err.localizedMessage ?: "Ошибка бана аккаунта"
+                }
+            _adminBusy.value = false
+        }
+    }
+
+    fun adminUnbanAccount(shortIdRaw: String) {
+        val me = currentProfileOrNull()
+        if (me?.isAdmin != true) return
+        val cleanId = shortIdRaw.trim()
+        viewModelScope.launch {
+            _adminBusy.value = true
+            repository.adminSetAccountBan(cleanId, banned = false, reasonRaw = "")
+                .onSuccess { unbannedProfile ->
+                    realtimeClient.sendAdminAction(
+                        AdminActionEvent(
+                            seq = ++adminActionSeq,
+                            action = "unban",
+                            targetUid = unbannedProfile.userId,
+                            targetShortId = cleanId,
+                            reason = "",
+                            senderUid = currentUserId,
+                            senderShortId = me.shortId
+                        )
+                    )
+                    _adminStatus.value = "Аккаунт ${unbannedProfile.displayName} (ID $cleanId) разбанен."
+                    refreshBannedAccounts()
+                }
+                .onFailure { err ->
+                    _adminStatus.value = err.localizedMessage ?: "Ошибка разбана аккаунта"
+                }
+            _adminBusy.value = false
+        }
+    }
+
     private fun initializeAndStartSocialPolling() {
         viewModelScope.launch {
             _profileState.value = OnlineUiState.Loading
@@ -171,9 +366,11 @@ class OnlineViewModel(
                     )
                 }
 
-            // Periodic background cloud sync for profile recovery, friends, requests, and lobby invites
+            // Periodic background cloud sync for profile recovery, ban status, friends, requests, and invites
+            var pollCycle = 0
             while (isActive) {
                 delay(3_500L)
+                pollCycle++
                 if (_activeLobby.value?.status != "playing") {
                     if (_profileState.value !is OnlineUiState.Success) {
                         repository.ensurePlayerProfile(currentUserId, initialLoginName)
@@ -188,6 +385,14 @@ class OnlineViewModel(
                             }
                     } else {
                         refreshSocialData()
+                        if (pollCycle % 2 == 0) {
+                            repository.refreshMyProfile(currentUserId).onSuccess { refreshed ->
+                                if (refreshed != null) {
+                                    _profileState.value = OnlineUiState.Success(refreshed)
+                                    if (!refreshed.banned) _localBanNotice.value = null
+                                }
+                            }
+                        }
                     }
                 }
             }
@@ -442,6 +647,11 @@ class OnlineViewModel(
         realtimeClient.sendMatchEvent(event)
     }
 
+    fun publishKillFeedSync(lobbyId: String, event: KillFeedSyncEvent) {
+        if (lobbyId.isBlank()) return
+        realtimeClient.sendKillFeedEvent(event)
+    }
+
     fun publishMatchTick(
         lobbyId: String,
         team: TeamSide,
@@ -576,6 +786,15 @@ class OnlineViewModel(
                                 _activeLobby.value = null
                                 _lobbyMemberStates.value = emptyList()
                                 _pingMs.value = 0
+                                return@launch
+                            }
+                            if (snapshot.second.none { it.userId == currentUserId }) {
+                                realtimeClient.disconnect()
+                                _activeLobbyId.value = null
+                                _activeLobby.value = null
+                                _lobbyMemberStates.value = emptyList()
+                                _pingMs.value = 0
+                                _kickedMessage.value = "Вы были исключены из матча."
                                 return@launch
                             }
                             _activeLobby.value = snapshot.first

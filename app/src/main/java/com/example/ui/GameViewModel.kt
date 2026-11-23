@@ -74,10 +74,23 @@ class GameViewModel(application: Application) : AndroidViewModel(application) {
         _matchConfig.value = transform(_matchConfig.value)
     }
 
-    fun startGame() {
+    fun startGame(
+        localUserId: String = "",
+        localDisplayName: String = "",
+        localShortId: String = ""
+    ) {
         _isPauseOverlayOpen.value = false
         engine.settings = _settings.value
-        engine.startNewMatch(_matchConfig.value.copy(isMultiplayer = false, lobbyId = null, allowBots = true))
+        engine.startNewMatch(
+            _matchConfig.value.copy(
+                isMultiplayer = false,
+                lobbyId = null,
+                allowBots = true,
+                localUserId = localUserId,
+                localDisplayName = localDisplayName,
+                localShortId = localShortId
+            )
+        )
         _screen.value = AppScreen.Playing
     }
 
@@ -136,6 +149,7 @@ class GameViewModel(application: Application) : AndroidViewModel(application) {
         val current = _settings.value.graphics
         val next = GraphicsSettings.forPreset(preset).copy(
             aspectRatio = current.aspectRatio,
+            targetFps = current.targetFps,
             fov = GraphicsSettings.FIXED_FOV,
             showFps = current.showFps
         )

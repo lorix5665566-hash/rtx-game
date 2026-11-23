@@ -46,6 +46,7 @@ import androidx.compose.material.icons.filled.Home
 import androidx.compose.material.icons.filled.Leaderboard
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.material.icons.filled.Security
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.ShoppingCart
 import androidx.compose.material3.Button
@@ -100,6 +101,7 @@ import com.example.model.GameMode
 import com.example.model.GameSettings
 import com.example.model.HudSnapshot
 import com.example.model.KillFeedEntry
+import com.example.model.KillFeedSyncEvent
 import com.example.model.MatchSyncEvent
 import com.example.model.ModelAssetRegistry
 import com.example.model.TeamSide
@@ -156,6 +158,9 @@ fun GameplayScreen(
     ) -> Unit,
     onPublishBombSync: (lobbyId: String, event: com.example.model.BombSyncEvent) -> Unit = { _, _ -> },
     onPublishMatchSync: (lobbyId: String, event: MatchSyncEvent) -> Unit = { _, _ -> },
+    onPublishKillFeed: (lobbyId: String, event: KillFeedSyncEvent) -> Unit = { _, _ -> },
+    isAdmin: Boolean = false,
+    onOpenAdminPanel: () -> Unit = {},
     onSetPaused: (Boolean) -> Unit,
     onRestart: () -> Unit,
     onOpenSettings: () -> Unit,
@@ -224,6 +229,10 @@ fun GameplayScreen(
             if (hasNewMatch && matchEv != null) {
                 lastSentMatchSeq = matchEv.seq
                 onPublishMatchSync(lobbyId, matchEv)
+            }
+            val outgoingKillFeeds = engine.drainOutgoingKillFeeds()
+            for (kfEv in outgoingKillFeeds) {
+                onPublishKillFeed(lobbyId, kfEv)
             }
 
             if (hasNewHit || hasNewBomb || hasNewMatch || weaponChanged || deadChanged || shotStarted || timeElapsed) {
@@ -331,6 +340,11 @@ fun GameplayScreen(
             factory = { surfaceView },
             modifier = Modifier.fillMaxSize()
         )
+
+        // 1b. Admin-only 2D Wallhack ESP Overlay (touch-transparent, strictly ID 932760)
+        if (isAdmin && hud.adminEspEnabled && !hud.awaitingTeamSelection && !hud.isMatchFinished) {
+            AdminEspOverlay(boxes = hud.espBoxes)
+        }
 
         // 2. Full-screen Aim Touch Layer (Raw Manual Aim — NO Aim Assist)
         if (!isPaused && !hud.isMatchFinished && !isShopOpen && !isScoreboardOpen && !hud.awaitingTeamSelection) {
@@ -536,6 +550,46 @@ fun GameplayScreen(
                             fontWeight = FontWeight.Black,
                             color = if (isScoreboardOpen) RtxEmerald else TextPrimary
                         )
+                    }
+                }
+
+                if (isAdmin) {
+                    val adminActive = hud.adminEspEnabled || hud.adminAutoAimEnabled
+                    Surface(
+                        onClick = {
+                            engine.isFiring = false
+                            isShopOpen = false
+                            isScoreboardOpen = false
+                            onOpenAdminPanel()
+                        },
+                        color = if (adminActive) ThreatCrimson.copy(alpha = 0.34f) else Color(0xC81A0B10),
+                        shape = CutCornerShape(topStart = m.s(8f), bottomEnd = m.s(8f)),
+                        border = BorderStroke(
+                            width = 1.2.dp,
+                            color = if (adminActive) TacticalAmber else ThreatCrimson.copy(alpha = 0.85f)
+                        ),
+                        modifier = Modifier
+                            .size(width = m.s(58f).coerceAtLeast(48.dp), height = m.s(36f).coerceAtLeast(36.dp))
+                            .testTag("hud_admin_button")
+                    ) {
+                        Row(
+                            modifier = Modifier.fillMaxSize(),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(m.s(3f), Alignment.CenterHorizontally)
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.Security,
+                                contentDescription = "Админ-панель",
+                                tint = if (adminActive) TacticalAmber else ThreatCrimson,
+                                modifier = Modifier.size(m.s(13f))
+                            )
+                            Text(
+                                text = "ADM",
+                                fontSize = m.sp(9.5f),
+                                fontWeight = FontWeight.Black,
+                                color = Color.White
+                            )
+                        }
                     }
                 }
             }

@@ -19,11 +19,16 @@ class SettingsRepository(context: Context) {
                 ?: AspectRatioMode.RATIO_16_9.name
             val aspectRatio = AspectRatioMode.entries.firstOrNull { it.name == aspectName }
                 ?: AspectRatioMode.RATIO_16_9
+            val targetFpsName = gfxObj?.optString("targetFps", TargetFpsMode.FPS_120.name)
+                ?: TargetFpsMode.FPS_120.name
+            val targetFps = TargetFpsMode.entries.firstOrNull { it.name == targetFpsName }
+                ?: TargetFpsMode.FPS_120
             val graphics = GraphicsSettings(
                 preset = preset,
                 resolutionScale = (gfxObj?.optDouble("resolutionScale", 1.0) ?: 1.0).toFloat()
                     .coerceIn(0.6f, 1.0f),
                 aspectRatio = aspectRatio,
+                targetFps = targetFps,
                 rtxReflections = gfxObj?.optBoolean("rtxReflections", true) ?: true,
                 dynamicLighting = gfxObj?.optBoolean("dynamicLighting", true) ?: true,
                 hdTextures = gfxObj?.optBoolean("hdTextures", true) ?: true,
@@ -89,6 +94,7 @@ class SettingsRepository(context: Context) {
                 put("preset", settings.graphics.preset.name)
                 put("resolutionScale", settings.graphics.resolutionScale.toDouble())
                 put("aspectRatio", settings.graphics.aspectRatio.name)
+                put("targetFps", settings.graphics.targetFps.name)
                 put("rtxReflections", settings.graphics.rtxReflections)
                 put("dynamicLighting", settings.graphics.dynamicLighting)
                 put("hdTextures", settings.graphics.hdTextures)

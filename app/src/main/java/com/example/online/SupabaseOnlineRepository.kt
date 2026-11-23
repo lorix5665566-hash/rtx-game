@@ -195,6 +195,89 @@ class SupabaseOnlineRepository(
             }
         }
 
+    suspend fun refreshMyProfile(userId: String): Result<PlayerProfile?> =
+        withContext(Dispatchers.IO) {
+            runCatching { fetchProfileByUid(userId) }
+        }
+
+    suspend fun adminSetAccountBan(
+        targetShortIdRaw: String,
+        banned: Boolean,
+        reasonRaw: String = ""
+    ): Result<PlayerProfile> = withContext(Dispatchers.IO) {
+        runCatching {
+            val shortId = targetShortIdRaw.trim()
+            require(SHORT_ID_REGEX.matches(shortId)) {
+                "ID игрока должен состоять из 6 цифр."
+            }
+            require(shortId != ADMIN_SHORT_ID) {
+                "Нельзя заблокировать аккаунт администратора."
+            }
+            val cleanReason = reasonRaw.trim().take(120)
+            val body = JSONObject().apply {
+                put("p_target_short_id", shortId)
+                put("p_banned", banned)
+                put("p_reason", cleanReason)
+            }
+            val raw = callRpc("admin_set_ban", body).getOrThrow().trim()
+            val obj = runCatching {
+                if (raw.startsWith("[")) JSONArray(raw).optJSONObject(0) else JSONObject(raw)
+            }.getOrNull() ?: error("Не удалось прочитать ответ сервера.")
+            parseProfile(obj)
+        }
+    }
+
+    suspend fun adminFetchBannedProfiles(): Result<List<PlayerProfile>> =
+        withContext(Dispatchers.IO) {
+            runCatching {
+                val rpc = callRpc("admin_list_banned", JSONObject())
+                val raw = if (rpc.isSuccess) {
+                    rpc.getOrThrow()
+                } else {
+                    getRest(
+                        table = "profiles",
+                        query = mapOf(
+                            "select" to "*",
+                            "banned" to "eq.true",
+                            "order" to "updated_at.desc",
+                            "limit" to "100"
+                        )
+                    ).getOrThrow()
+                }
+                val arr = JSONArray(raw)
+                buildList {
+                    for (i in 0 until arr.length()) {
+                        val o = arr.optJSONObject(i) ?: continue
+                        add(parseProfile(o))
+                    }
+                }
+            }
+        }
+
+    suspend fun adminKickFromLobby(lobbyId: String, targetUid: String): Result<Unit> =
+        withContext(Dispatchers.IO) {
+            runCatching {
+                require(UUID_REGEX.matches(lobbyId) && UUID_REGEX.matches(targetUid)) {
+                    "Некорректные идентификаторы лобби или игрока."
+                }
+                val rpc = callRpc(
+                    fnName = "admin_kick_member",
+                    body = JSONObject().apply {
+                        put("p_lobby_id", lobbyId)
+                        put("p_target_uid", targetUid)
+                    }
+                )
+                if (rpc.isFailure) {
+                    // Fallback if admin is host and SQL migration wasn't run yet
+                    deleteRest(
+                        table = "lobby_members",
+                        query = mapOf("lobby_id" to "eq.$lobbyId", "user_id" to "eq.$targetUid")
+                    ).getOrThrow()
+                }
+                Unit
+            }
+        }
+
     // -------------------------------------------------------------------------
     // 2. Cloud Friends & Requests
     // -------------------------------------------------------------------------
@@ -860,7 +943,9 @@ class SupabaseOnlineRepository(
             .ifBlank { AvatarPresets.DEFAULT_KEY },
         online = o.optBoolean("online", false),
         totalKills = o.optInt("total_kills", 0),
-        totalHeadshots = o.optInt("total_headshots", 0)
+        totalHeadshots = o.optInt("total_headshots", 0),
+        banned = o.optBoolean("banned", false),
+        banReason = o.optString("ban_reason", "")
     )
 
     private fun parseLobby(o: JSONObject, memberUids: List<String>): MultiplayerLobby = MultiplayerLobby(
