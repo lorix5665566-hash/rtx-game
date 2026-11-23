@@ -163,37 +163,49 @@ class ModelAssetRegistry(private val context: Context) {
     }
 
     /**
-     * Reads the active .glb model bytes directly into a native DirectByteBuffer using a small
-     * 64 KB staging chunk to avoid large Java heap spikes on high-detail CS2 maps.
+     * Reads the active .glb model bytes directly into a native DirectByteBuffer, backed by the
+     * centralized FilamentAssetCache so lobby/gameplay transitions and character/weapon pools
+     * reuse native buffers with zero redundant disk reads or heap spikes.
      */
     fun loadGlbBuffer(slot: ModelSlot): ByteBuffer? {
         val customFile = customFileFor(slot)
         if (customFile.exists() && customFile.length() > 32L) {
-            runCatching {
-                val len = customFile.length().toInt()
-                if (len > 20) {
-                    val header = ByteArray(20)
-                    customFile.inputStream().use { input ->
-                        if (input.read(header) == 20 && isValidGlbHeader(header)) {
-                            val direct = ByteBuffer.allocateDirect(len).order(ByteOrder.nativeOrder())
-                            direct.put(header)
-                            val chunk = ByteArray(64 * 1024)
-                            while (true) {
-                                val read = input.read(chunk)
-                                if (read <= 0) break
-                                direct.put(chunk, 0, read)
+            val cacheKey = "slot:${slot.name}:rev${_revision.value}"
+            val cachedCustom = com.example.engine.FilamentAssetCache.getOrLoad(cacheKey) {
+                runCatching {
+                    val len = customFile.length().toInt()
+                    if (len > 20) {
+                        val header = ByteArray(20)
+                        customFile.inputStream().use { input ->
+                            if (input.read(header) == 20 && isValidGlbHeader(header)) {
+                                val direct = ByteBuffer.allocateDirect(len).order(ByteOrder.nativeOrder())
+                                direct.put(header)
+                                val chunk = ByteArray(64 * 1024)
+                                while (true) {
+                                    val read = input.read(chunk)
+                                    if (read <= 0) break
+                                    direct.put(chunk, 0, read)
+                                }
+                                direct.flip()
+                                return@runCatching direct
                             }
-                            direct.flip()
-                            return direct
                         }
                     }
-                }
+                    null
+                }.getOrNull()
             }
+            if (cachedCustom != null) return cachedCustom
         }
         return loadBundledAssetBuffer(slot.bundledAssetPath)
     }
 
     fun loadBundledAssetBuffer(assetPath: String): ByteBuffer? {
+        return com.example.engine.FilamentAssetCache.getOrLoad("bundled:$assetPath") {
+            readBundledAssetDirect(assetPath)
+        }
+    }
+
+    private fun readBundledAssetDirect(assetPath: String): ByteBuffer? {
         // Fast zero-heap-spike path for uncompressed .glb assets via AssetFileDescriptor
         val fromFd = runCatching {
             context.assets.openFd(assetPath).use { afd ->
@@ -254,6 +266,7 @@ class ModelAssetRegistry(private val context: Context) {
 
             val label = (friendlyName ?: "Sketchfab_${slot.name}.glb").take(42)
             prefs.edit().putString("name_${slot.name}", label).apply()
+            com.example.engine.FilamentAssetCache.invalidateSlot(slot)
             refreshState()
             "Модель «$label» (${bytes.size / 1024} КБ) подключена к слоту «${slot.titleRu}»!"
         }
@@ -263,6 +276,7 @@ class ModelAssetRegistry(private val context: Context) {
         val f = customFileFor(slot)
         if (f.exists()) f.delete()
         prefs.edit().remove("name_${slot.name}").apply()
+        com.example.engine.FilamentAssetCache.invalidateSlot(slot)
         refreshState()
     }
 
@@ -272,6 +286,7 @@ class ModelAssetRegistry(private val context: Context) {
             if (f.exists()) f.delete()
             prefs.edit().remove("name_${slot.name}").apply()
         }
+        com.example.engine.FilamentAssetCache.clear()
         refreshState()
     }
 

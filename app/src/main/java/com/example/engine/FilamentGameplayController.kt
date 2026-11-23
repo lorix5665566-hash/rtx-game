@@ -121,8 +121,8 @@ class FilamentGameplayController(
         scene = engine.createScene()
         view = engine.createView()
         camera = engine.createCamera(engine.entityManager.create())
-        // Bright crisp CS2 daylight exposure
-        camera.setExposure(16.0f, 1.0f / 100.0f, 100.0f)
+        // Calibrated CS2 Mirage Sunny-16 daylight exposure (rich contrast, zero white blowout!)
+        camera.setExposure(16.0f, 1.0f / 125.0f, 100.0f)
         view.scene = scene
         view.camera = camera
 
@@ -210,6 +210,11 @@ class FilamentGameplayController(
             assetLoader, resourceLoader,
             registry.loadBundledAssetBuffer("models/fp_hands_ct_knife.glb")
         )
+        listOf(
+            muzzleFlashModel,
+            handsTRifle, handsTPistol, handsTKnife,
+            handsCtRifle, handsCtPistol, handsCtKnife
+        ).forEach { FilamentSceneHelpers.configureViewmodelRenderables(engine, it) }
         reloadDynamicSlots()
     }
 
@@ -242,6 +247,7 @@ class FilamentGameplayController(
         )
         for (slot in weaponSlots) {
             FilamentSceneHelpers.loadGlb(assetLoader, resourceLoader, registry.loadGlbBuffer(slot))?.let {
+                FilamentSceneHelpers.configureViewmodelRenderables(engine, it)
                 fpWeapons[slot] = it
             }
         }
@@ -296,6 +302,7 @@ class FilamentGameplayController(
             FilamentSceneHelpers.destroySkyRig(engine, scene, prevRig)
 
             loadedMapId = targetMap
+            lastGraphics = null // Re-apply map-matched atmospheric fog tint
         }
     }
 
@@ -399,7 +406,7 @@ class FilamentGameplayController(
 
         val gfx = gameEngine.settings.graphics
         if (gfx != lastGraphics) {
-            FilamentSceneHelpers.applyGraphicsSettings(engine, view, gfx)
+            FilamentSceneHelpers.applyGraphicsSettings(engine, view, gfx, gameEngine.world.mapId)
             lastGraphics = gfx
         }
 
@@ -492,7 +499,8 @@ class FilamentGameplayController(
         timeSec: Float,
         isMoving: Boolean,
         deathProgress: Float,
-        isShooting: Boolean
+        isShooting: Boolean,
+        aimPitchDeg: Float = 0f
     ) {
         val wModel = acquireThirdPersonWeapon(weapon) ?: return
         FilamentSceneHelpers.setAssetVisible(scene, wModel, true)
@@ -506,7 +514,8 @@ class FilamentGameplayController(
             timeSec = timeSec,
             isMoving = isMoving,
             deathProgress = deathProgress,
-            isShooting = isShooting
+            isShooting = isShooting,
+            aimPitchDeg = aimPitchDeg
         )
         engine.transformManager.setTransform(engine.transformManager.getInstance(wModel.asset.root), tmpMat)
     }
@@ -518,6 +527,8 @@ class FilamentGameplayController(
         val px = gameEngine.playerX
         val pz = gameEngine.playerZ
         tpWeaponUsedCount.clear()
+
+        val activeTurnKeys = HashSet<String>(12)
 
         // 1. Render remote human players FIRST so friends/opponents always get priority in character pools!
         if (gameEngine.matchConfig.isMultiplayer) {
@@ -531,7 +542,9 @@ class FilamentGameplayController(
                 val isCustomChar = registry.hasCustomFile(charSlot)
                 // Local camera looks along -Z at yaw=0 while rigged character meshes face +Z natively -> +180° aligns eyes directly toward us!
                 val visualYawDeg = rp.yawDeg + 180f
-                val turnState = turnStates.getOrPut("remote_${rp.userId}") { TurnShuffleState() }
+                val turnKey = "remote_${rp.userId}"
+                activeTurnKeys.add(turnKey)
+                val turnState = turnStates.getOrPut(turnKey) { TurnShuffleState() }
                 turnState.update(visualYawDeg, dt, isMoving = rp.isMoving, isDead = rp.isDead)
 
                 FilamentSceneHelpers.setAssetVisible(scene, model, true)
@@ -572,7 +585,8 @@ class FilamentGameplayController(
                             isMoving = rp.isMoving,
                             isDead = rp.isDead,
                             deathProgress = rp.deathProgress,
-                            isShooting = rp.isShooting
+                            isShooting = rp.isShooting,
+                            aimPitchDeg = rp.pitchDeg
                         )
                     }
                     animator.updateBoneMatrices()
@@ -588,12 +602,14 @@ class FilamentGameplayController(
                     timeSec = gameEngine.timeSec + idx * 0.41f,
                     isMoving = rp.isMoving,
                     deathProgress = rp.deathProgress,
-                    isShooting = rp.isShooting
+                    isShooting = rp.isShooting,
+                    aimPitchDeg = rp.pitchDeg
                 )
             }
         }
 
-        // 2. Render AI bots (with bidirectional turn-in-place foot shuffling, 2-handed weapon IK, and skeletal Death!)
+        // 2. Render AI bots (with bidirectional turn-in-place foot shuffling, 2-handed weapon IK, aim pitch & skeletal Death!)
+        val playerEyeY = gameEngine.playerY + gameEngine.eyeHeight
         for (b in gameEngine.bots) {
             val pool = if (b.team == TeamSide.CT) ctPool else tPool
             val slotIdx = if (b.team == TeamSide.CT) ctIdx++ else tIdx++
@@ -602,7 +618,9 @@ class FilamentGameplayController(
 
             val charSlot = if (b.team == TeamSide.CT) ModelSlot.CHARACTER_CT else ModelSlot.CHARACTER_T
             val isCustomChar = registry.hasCustomFile(charSlot)
-            val turnState = turnStates.getOrPut("bot_${b.id}") { TurnShuffleState() }
+            val turnKey = "bot_${b.id}"
+            activeTurnKeys.add(turnKey)
+            val turnState = turnStates.getOrPut(turnKey) { TurnShuffleState() }
             turnState.update(b.visualYawDeg, dt, isMoving = b.isMoving, isDead = b.isDead)
             val botShooting = !b.isDead && b.fireCooldown > b.weapon.fireIntervalSec * 0.55f && b.hasLineOfSight
             val botAnimClock = gameEngine.timeSec + b.id * 0.37f
@@ -624,6 +642,12 @@ class FilamentGameplayController(
             val dx = b.x - px
             val dz = b.z - pz
             val distSq = dx * dx + dz * dz
+            val botAimPitchDeg = if (!b.isDead && b.hasLineOfSight && b.team != gameEngine.matchConfig.playerSide) {
+                val horiz = kotlin.math.sqrt(distSq).coerceAtLeast(0.5f)
+                val dy = playerEyeY - (b.y + 1.48f)
+                Math.toDegrees(kotlin.math.atan2(dy.toDouble(), horiz.toDouble())).toFloat().coerceIn(-38f, 38f)
+            } else 0f
+
             val animator = model.asset.instance.animator
             if (animator.animationCount > 0 && distSq < 54f * 54f) {
                 if (b.isDead) {
@@ -652,7 +676,8 @@ class FilamentGameplayController(
                         isMoving = b.isMoving,
                         isDead = b.isDead,
                         deathProgress = b.deathProgress,
-                        isShooting = botShooting
+                        isShooting = botShooting,
+                        aimPitchDeg = botAimPitchDeg
                     )
                 }
                 animator.updateBoneMatrices()
@@ -669,9 +694,15 @@ class FilamentGameplayController(
                     timeSec = botAnimClock,
                     isMoving = b.isMoving,
                     deathProgress = b.deathProgress,
-                    isShooting = botShooting
+                    isShooting = botShooting,
+                    aimPitchDeg = botAimPitchDeg
                 )
             }
+        }
+
+        // Prune disconnected player/bot turn shuffle states so zero stale entries accumulate
+        if (turnStates.size > activeTurnKeys.size + 4) {
+            turnStates.keys.retainAll(activeTurnKeys)
         }
 
         // Hide unused pool instances (characters & 3rd-person weapons)
@@ -810,8 +841,13 @@ class FilamentGameplayController(
             else -> -0.140f
         }
 
-        val offX = hipX * (1f - ads) + bobX + gameEngine.weaponSwayX - knifeSwing * 0.22f + eqX + reloadDelta.tx + inspectDelta.tx
-        val offY = (hipY * (1f - ads) + adsY * ads) - bobY + gameEngine.weaponSwayY - gameEngine.landingDip + knifeSwing * 0.05f + eqY + reloadDelta.ty + inspectDelta.ty
+        // Subtle realistic idle breathing figure-8 sway (dampened smoothly during ADS)
+        val idleBreathScale = (1f - ads * 0.78f)
+        val breathX = sin(gameEngine.timeSec * 1.15f) * 0.0024f * idleBreathScale
+        val breathY = sin(gameEngine.timeSec * 2.30f) * 0.0028f * idleBreathScale
+
+        val offX = hipX * (1f - ads) + bobX + breathX + gameEngine.weaponSwayX - knifeSwing * 0.22f + eqX + reloadDelta.tx + inspectDelta.tx
+        val offY = (hipY * (1f - ads) + adsY * ads) - bobY + breathY + gameEngine.weaponSwayY - gameEngine.landingDip + knifeSwing * 0.05f + eqY + reloadDelta.ty + inspectDelta.ty
         val offZ = hipZ + recoilZ - knifeSwing * 0.14f + eqZ + reloadDelta.tz + inspectDelta.tz
 
         val yawDeg = eqYaw + gameEngine.weaponSwayX * 145f + knifeSwing * 46f + boltTilt * 6f + reloadDelta.yawDeg + inspectDelta.yawDeg
@@ -823,6 +859,15 @@ class FilamentGameplayController(
         val vmX = offX * VM_SCALE
         val vmY = offY * VM_SCALE
         val vmZ = offZ * VM_SCALE
+
+        // Physical Bolt/Slide recoil blowback + reload bolt pull + magazine detachment!
+        val gunfireBoltZ = when (w) {
+            WeaponType.KNIFE, WeaponType.C4_BOMB -> 0f
+            WeaponType.AWP -> boltTilt * 0.082f
+            WeaponType.USP_S, WeaponType.GLOCK_18, WeaponType.DESERT_EAGLE -> (gameEngine.recoilKick * 0.048f).coerceAtMost(0.046f)
+            else -> (gameEngine.recoilKick * 0.062f).coerceAtMost(0.068f)
+        }
+        val activeBoltZ = maxOf(gunfireBoltZ, reloadDelta.boltOffsetZ)
 
         for ((slot, model) in fpWeapons) {
             val visible = !hideWeapon && slot == activeSlot
@@ -839,6 +884,16 @@ class FilamentGameplayController(
                     pitchDeg = pitchDeg,
                     rollDeg = rollDeg,
                     scale = VM_SCALE
+                )
+                // Animate physical 3D Bolt/Slide and Magazine child nodes inside the weapon GLB!
+                FilamentSceneHelpers.applyWeaponPartOffsets(
+                    engine = engine,
+                    model = model,
+                    boltOffsetZ = activeBoltZ,
+                    magTx = reloadDelta.magTx,
+                    magTy = reloadDelta.magTy,
+                    magTz = reloadDelta.magTz,
+                    magPitchDeg = reloadDelta.magPitchDeg
                 )
             } else {
                 val targetSpan = when (w) {

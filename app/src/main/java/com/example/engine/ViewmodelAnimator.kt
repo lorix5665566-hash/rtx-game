@@ -20,13 +20,21 @@ data class ViewmodelPoseDelta(
     var handTy: Float = 0f,
     var handTz: Float = 0f,
     var handPitchDeg: Float = 0f,
-    var handRollDeg: Float = 0f
+    var handRollDeg: Float = 0f,
+    // Physical animated sub-parts inside the weapon GLB ("Bolt" and "Magazine" child nodes)
+    var boltOffsetZ: Float = 0f,
+    var magTx: Float = 0f,
+    var magTy: Float = 0f,
+    var magTz: Float = 0f,
+    var magPitchDeg: Float = 0f
 ) {
     fun reset() {
         tx = 0f; ty = 0f; tz = 0f
         yawDeg = 0f; pitchDeg = 0f; rollDeg = 0f
         handTx = 0f; handTy = 0f; handTz = 0f
         handPitchDeg = 0f; handRollDeg = 0f
+        boltOffsetZ = 0f
+        magTx = 0f; magTy = 0f; magTz = 0f; magPitchDeg = 0f
     }
 }
 
@@ -35,6 +43,7 @@ data class ViewmodelPoseDelta(
  * - Distinct multi-stage reload animations for EVERY reloadable weapon
  *   (AK-47 rock-and-lock + charging pull, M4A1-S mag drop + bolt slap, AWP heavy mag + 4-step bolt cycle,
  *    P90 top-mag unlatch + downward slap, MP9 fast grip reload, USP-S / Glock-18 / Deagle tactical slide rack)
+ * - Drives physical Magazine detachment/re-insertion & Bolt/Slide rack offsets on the 3D weapon child nodes!
  * - Smooth multi-stage weapon inspection animations for EVERY weapon including Knife 360° flip & C4 inspect.
  */
 object ViewmodelAnimator {
@@ -76,16 +85,13 @@ object ViewmodelAnimator {
 
         when (weapon) {
             WeaponType.AK47 -> {
-                // Phase 1: Cant rifle sharp left & raise barrel to expose rock-and-lock magwell
                 val hold = plateau(p, 0.00f, 0.15f, 0.84f, 0.99f)
-                // Phase 2: Rock out empty banana mag (crisp downward-forward strike)
                 val magOut = pulse(p, 0.18f, 0.38f)
-                // Phase 3: Bring new mag up & lock in with authoritative upward clack
                 val magDip = plateau(p, 0.34f, 0.44f, 0.56f, 0.65f)
                 val magLock = pulse(p, 0.56f, 0.70f)
-                // Phase 4: Tilt right and rack right-side charging handle back & release
                 val boltRack = pulse(p, 0.72f, 0.90f)
                 val boltSnap = pulse(p, 0.83f, 0.92f)
+                val magDetach = plateau(p, 0.20f, 0.34f, 0.52f, 0.64f)
 
                 out.tx = -0.045f * hold + 0.024f * boltRack
                 out.ty = -0.045f * hold - 0.055f * magOut - 0.032f * magDip + 0.036f * magLock - 0.015f * boltRack
@@ -94,22 +100,24 @@ object ViewmodelAnimator {
                 out.pitchDeg = 14f * hold - 12f * magOut + 11f * magLock + 7f * boltRack - 6f * boltSnap
                 out.rollDeg = 34f * hold + 9f * magDip - 48f * boltRack
 
-                // Left hand drops to swap mag, then reaches over receiver to rack charging handle
                 out.handTy = -0.045f * magOut - 0.038f * magDip + 0.025f * magLock
                 out.handTz = 0.028f * boltRack
                 out.handRollDeg = -10f * magOut + 12f * boltRack
+
+                // Physical rock-and-lock banana magazine drop & AK charging handle pull!
+                out.magTy = -0.18f * magDetach
+                out.magTz = -0.045f * magDetach
+                out.magPitchDeg = -28f * magDetach
+                out.boltOffsetZ = 0.068f * boltRack
             }
 
             WeaponType.M4A1_S -> {
-                // Phase 1: Clean tactical inward cant pressing mag release
                 val hold = plateau(p, 0.00f, 0.14f, 0.84f, 0.99f)
-                // Phase 2: Straight STANAG mag drops out
                 val magDrop = pulse(p, 0.16f, 0.34f)
-                // Phase 3: Fresh mag slides up & seats firmly
                 val magSeat = pulse(p, 0.44f, 0.62f)
-                // Phase 4: Crisp left-side bolt-catch SLAP!
                 val boltSlapPrep = pulse(p, 0.64f, 0.78f)
                 val boltSlapHit = pulse(p, 0.74f, 0.86f)
+                val magDetach = plateau(p, 0.18f, 0.32f, 0.48f, 0.60f)
 
                 out.tx = -0.038f * hold + 0.026f * boltSlapHit
                 out.ty = -0.036f * hold - 0.042f * magDrop + 0.044f * magSeat - 0.010f * boltSlapHit
@@ -120,16 +128,19 @@ object ViewmodelAnimator {
 
                 out.handTy = -0.042f * magDrop + 0.026f * magSeat
                 out.handTx = -0.020f * boltSlapPrep + 0.018f * boltSlapHit
+
+                out.magTy = -0.17f * magDetach
+                out.boltOffsetZ = 0.045f * plateau(p, 0.12f, 0.20f, 0.74f, 0.82f)
             }
 
             WeaponType.AWP -> {
-                // Heavy sniper reload: lift & cant -> remove box mag -> seat heavy mag -> full 4-beat bolt cycle
                 val hold = plateau(p, 0.00f, 0.13f, 0.87f, 0.99f)
                 val magOut = pulse(p, 0.15f, 0.33f)
                 val magIn = pulse(p, 0.40f, 0.57f)
                 val boltLift = pulse(p, 0.59f, 0.72f)
                 val boltPull = pulse(p, 0.66f, 0.82f)
                 val boltLock = pulse(p, 0.79f, 0.90f)
+                val magDetach = plateau(p, 0.17f, 0.30f, 0.44f, 0.56f)
 
                 out.tx = -0.052f * hold + 0.022f * boltPull
                 out.ty = -0.035f * hold - 0.058f * magOut + 0.046f * magIn + 0.024f * boltLift - 0.018f * boltLock
@@ -140,15 +151,18 @@ object ViewmodelAnimator {
 
                 out.handTy = -0.048f * magOut + 0.028f * magIn
                 out.handTz = 0.034f * boltPull
+
+                out.magTy = -0.16f * magDetach
+                out.boltOffsetZ = 0.082f * boltPull
             }
 
             WeaponType.P90 -> {
-                // Iconic P90 top-mounted horizontal magazine reload!
                 val hold = plateau(p, 0.00f, 0.15f, 0.85f, 0.99f)
                 val unlatch = pulse(p, 0.17f, 0.40f)
                 val placeNew = plateau(p, 0.40f, 0.50f, 0.60f, 0.68f)
-                val topSlap = pulse(p, 0.60f, 0.74f) // Firm downward slap to seat top mag!
+                val topSlap = pulse(p, 0.60f, 0.74f)
                 val chargePull = pulse(p, 0.75f, 0.90f)
+                val topMagLift = plateau(p, 0.19f, 0.34f, 0.54f, 0.66f)
 
                 out.tx = -0.040f * hold
                 out.ty = -0.048f * hold + 0.028f * unlatch - 0.052f * topSlap
@@ -159,14 +173,20 @@ object ViewmodelAnimator {
 
                 out.handTy = 0.030f * unlatch - 0.036f * topSlap
                 out.handTz = 0.022f * chargePull
+
+                // P90 top translucent magazine lifts straight UP off the top receiver!
+                out.magTy = 0.115f * topMagLift
+                out.magTz = -0.035f * topMagLift
+                out.magPitchDeg = 12f * topMagLift
+                out.boltOffsetZ = 0.048f * chargePull
             }
 
             WeaponType.MP9 -> {
-                // Snappy compact SMG reload (grip mag swap + quick left-side charging pull)
                 val hold = plateau(p, 0.00f, 0.14f, 0.84f, 0.99f)
                 val magDrop = pulse(p, 0.16f, 0.36f)
                 val magSlam = pulse(p, 0.44f, 0.64f)
                 val charge = pulse(p, 0.68f, 0.86f)
+                val magDetach = plateau(p, 0.18f, 0.33f, 0.48f, 0.62f)
 
                 out.tx = -0.036f * hold + 0.018f * charge
                 out.ty = -0.034f * hold - 0.045f * magDrop + 0.042f * magSlam
@@ -177,10 +197,12 @@ object ViewmodelAnimator {
 
                 out.handTy = -0.038f * magDrop + 0.026f * magSlam
                 out.handTz = 0.024f * charge
+
+                out.magTy = -0.16f * magDetach
+                out.boltOffsetZ = 0.052f * charge
             }
 
             WeaponType.USP_S, WeaponType.GLOCK_18, WeaponType.DESERT_EAGLE -> {
-                // Crisp tactical pistol reload: wrist flick -> drop mag -> punch new mag up -> rack slide!
                 val heavy = if (weapon == WeaponType.DESERT_EAGLE) 1.24f else 1.0f
                 val hold = plateau(p, 0.00f, 0.15f, 0.85f, 0.99f)
                 val magEject = pulse(p, 0.14f, 0.34f)
@@ -188,6 +210,7 @@ object ViewmodelAnimator {
                 val magInsert = pulse(p, 0.50f, 0.67f)
                 val slideRack = pulse(p, 0.69f, 0.87f)
                 val slideForward = pulse(p, 0.81f, 0.91f)
+                val magDetach = plateau(p, 0.16f, 0.30f, 0.52f, 0.64f)
 
                 out.tx = (-0.042f * hold + 0.018f * slideRack) * heavy
                 out.ty = (-0.030f * hold + 0.022f * magEject - 0.045f * reachBelt + 0.048f * magInsert - 0.012f * slideRack) * heavy
@@ -199,6 +222,11 @@ object ViewmodelAnimator {
                 out.handTy = (-0.040f * reachBelt + 0.030f * magInsert) * heavy
                 out.handTz = (0.026f * slideRack) * heavy
                 out.handRollDeg = -10f * slideRack
+
+                // Pistol magazine drops downward along grip angle & top slide racks back!
+                out.magTy = -0.14f * magDetach
+                out.magTz = 0.032f * magDetach
+                out.boltOffsetZ = 0.042f * slideRack
             }
 
             WeaponType.KNIFE, WeaponType.C4_BOMB -> Unit

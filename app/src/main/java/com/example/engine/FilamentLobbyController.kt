@@ -95,7 +95,8 @@ class FilamentLobbyController(
         scene = engine.createScene()
         view = engine.createView()
         camera = engine.createCamera(engine.entityManager.create())
-        camera.setExposure(16.0f, 1.0f / 100.0f, 100.0f)
+        // Calibrated CS2 Mirage Sunny-16 daylight exposure (rich contrast, zero white blowout!)
+        camera.setExposure(16.0f, 1.0f / 125.0f, 100.0f)
         view.scene = scene
         view.camera = camera
 
@@ -195,6 +196,7 @@ class FilamentLobbyController(
         FilamentSceneHelpers.destroySkyRig(engine, scene, prevRig)
 
         loadedMap = targetMap
+        lastGraphics = null
         characterYawDeg = activeWorld.lobbyDefaultCharYawDeg
         yawVelocityDegPerSec = 0f
         turnShuffleState.reset()
@@ -296,7 +298,7 @@ class FilamentLobbyController(
 
         val gfx = getGraphics()
         if (gfx != lastGraphics) {
-            FilamentSceneHelpers.applyGraphicsSettings(engine, view, gfx)
+            FilamentSceneHelpers.applyGraphicsSettings(engine, view, gfx, showcaseMap)
             lastGraphics = gfx
         }
 

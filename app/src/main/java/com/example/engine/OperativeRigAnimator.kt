@@ -161,52 +161,54 @@ class OperativeRigAnimator {
 
         fun getHeldWeaponSpec(weapon: WeaponType): HeldWeaponSpec = when (weapon) {
             WeaponType.AWP -> HeldWeaponSpec(
-                weaponX = -0.14f, weaponY = 1.24f, weaponZ = 0.26f,
-                weaponYawDeg = 13f, weaponPitchDeg = -2.5f, weaponRollDeg = 3f, weaponScale = 1.04f,
-                // Right palm directly on AWP pistol grip; Left palm directly under front chassis/forend
-                rightHandX = -0.14f, rightHandY = 1.20f, rightHandZ = 0.26f,
-                leftHandX = -0.07f, leftHandY = 1.21f, leftHandZ = 0.50f,
-                spineTwistYawDeg = -11f
+                weaponX = -0.185f, weaponY = 1.245f, weaponZ = 0.370f,
+                weaponYawDeg = 14f, weaponPitchDeg = -2.0f, weaponRollDeg = 3f, weaponScale = 1.02f,
+                // Stock rests cleanly in right shoulder pocket outside plate carrier; BOTH hands locked on grip & chassis!
+                rightHandX = -0.185f, rightHandY = 1.200f, rightHandZ = 0.355f,
+                leftHandX = -0.088f, leftHandY = 1.215f, leftHandZ = 0.545f,
+                spineTwistYawDeg = -18f
             )
             WeaponType.AK47, WeaponType.M4A1_S -> HeldWeaponSpec(
-                weaponX = -0.14f, weaponY = 1.24f, weaponZ = 0.27f,
-                weaponYawDeg = 14f, weaponPitchDeg = -2.0f, weaponRollDeg = 3f, weaponScale = 1.06f,
-                // Right palm directly on pistol grip; Left palm directly gripping wooden/rail handguard!
-                rightHandX = -0.14f, rightHandY = 1.195f, rightHandZ = 0.265f,
-                leftHandX = -0.07f, leftHandY = 1.215f, leftHandZ = 0.495f,
-                spineTwistYawDeg = -12f
+                weaponX = -0.185f, weaponY = 1.245f, weaponZ = 0.370f,
+                weaponYawDeg = 15f, weaponPitchDeg = -1.8f, weaponRollDeg = 3f, weaponScale = 1.04f,
+                // Stock clears chest/pouches completely; Right palm grips pistol grip, Left palm cups handguard!
+                rightHandX = -0.185f, rightHandY = 1.198f, rightHandZ = 0.355f,
+                leftHandX = -0.085f, leftHandY = 1.215f, leftHandZ = 0.545f,
+                spineTwistYawDeg = -18f
             )
             WeaponType.P90, WeaponType.MP9 -> HeldWeaponSpec(
-                weaponX = -0.12f, weaponY = 1.24f, weaponZ = 0.29f,
-                weaponYawDeg = 12f, weaponPitchDeg = -2.0f, weaponRollDeg = 3f, weaponScale = 1.04f,
-                // Right palm on rear grip; Left palm on front foregrip/shroud
-                rightHandX = -0.12f, rightHandY = 1.20f, rightHandZ = 0.285f,
-                leftHandX = -0.06f, leftHandY = 1.215f, leftHandZ = 0.455f,
-                spineTwistYawDeg = -10f
+                weaponX = -0.165f, weaponY = 1.245f, weaponZ = 0.375f,
+                weaponYawDeg = 13f, weaponPitchDeg = -1.8f, weaponRollDeg = 3f, weaponScale = 1.03f,
+                rightHandX = -0.165f, rightHandY = 1.202f, rightHandZ = 0.365f,
+                leftHandX = -0.085f, leftHandY = 1.218f, leftHandZ = 0.515f,
+                spineTwistYawDeg = -15f
             )
             WeaponType.USP_S, WeaponType.GLOCK_18, WeaponType.DESERT_EAGLE -> HeldWeaponSpec(
-                weaponX = -0.03f, weaponY = 1.29f, weaponZ = 0.43f,
-                weaponYawDeg = 3f, weaponPitchDeg = -1.5f, weaponRollDeg = 0f, weaponScale = 1.08f,
-                // Classic two-handed tactical pistol grip: both palms locked together around grip!
-                rightHandX = -0.045f, rightHandY = 1.25f, rightHandZ = 0.415f,
-                leftHandX = 0.010f, leftHandY = 1.245f, leftHandZ = 0.425f,
-                spineTwistYawDeg = -4f
+                weaponX = -0.035f, weaponY = 1.295f, weaponZ = 0.445f,
+                weaponYawDeg = 3f, weaponPitchDeg = -1.2f, weaponRollDeg = 0f, weaponScale = 1.06f,
+                // Classic two-handed tactical pistol grip well forward of chest plate
+                rightHandX = -0.050f, rightHandY = 1.252f, rightHandZ = 0.425f,
+                leftHandX = 0.008f, leftHandY = 1.248f, leftHandZ = 0.435f,
+                spineTwistYawDeg = -5f
             )
             WeaponType.C4_BOMB -> HeldWeaponSpec(
-                weaponX = 0.0f, weaponY = 1.19f, weaponZ = 0.34f,
-                weaponYawDeg = 0f, weaponPitchDeg = -18f, weaponRollDeg = 0f, weaponScale = 0.92f,
-                rightHandX = -0.085f, rightHandY = 1.18f, rightHandZ = 0.33f,
-                leftHandX = 0.085f, leftHandY = 1.18f, leftHandZ = 0.33f,
+                weaponX = 0.0f, weaponY = 1.195f, weaponZ = 0.375f,
+                weaponYawDeg = 0f, weaponPitchDeg = -18f, weaponRollDeg = 0f, weaponScale = 0.90f,
+                rightHandX = -0.085f, rightHandY = 1.185f, rightHandZ = 0.360f,
+                leftHandX = 0.085f, leftHandY = 1.185f, leftHandZ = 0.360f,
                 spineTwistYawDeg = 0f
             )
             WeaponType.KNIFE -> HeldWeaponSpec(
-                weaponX = -0.15f, weaponY = 1.21f, weaponZ = 0.37f,
-                weaponYawDeg = 8f, weaponPitchDeg = -6f, weaponRollDeg = 12f, weaponScale = 1.06f,
-                rightHandX = -0.15f, rightHandY = 1.20f, rightHandZ = 0.36f,
-                leftHandX = 0.14f, leftHandY = 1.21f, leftHandZ = 0.31f,
-                spineTwistYawDeg = -6f
+                weaponX = -0.165f, weaponY = 1.215f, weaponZ = 0.395f,
+                weaponYawDeg = 8f, weaponPitchDeg = -6f, weaponRollDeg = 12f, weaponScale = 1.05f,
+                rightHandX = -0.165f, rightHandY = 1.205f, rightHandZ = 0.380f,
+                leftHandX = 0.145f, leftHandY = 1.215f, leftHandZ = 0.330f,
+                spineTwistYawDeg = -7f
             )
         }
+
+        private const val AIM_PIVOT_Y = 1.36f
+        private const val AIM_PIVOT_Z = 0.04f
 
         private fun lerpF(a: Float, b: Float, t: Float): Float = a + (b - a) * t
     }
@@ -229,8 +231,8 @@ class OperativeRigAnimator {
     private val qElbow = FloatArray(4)
 
     /**
-     * Applies procedural skeletal overlays (Turn-in-Place foot shuffling + Two-Handed Weapon Arm IK)
-     * AFTER `animator.applyAnimation(...)` and BEFORE `animator.updateBoneMatrices()`.
+     * Applies procedural skeletal overlays (Turn-in-Place foot shuffling + Vertical Aim Pitch +
+     * Two-Handed Weapon Arm IK) AFTER `animator.applyAnimation(...)` and BEFORE `animator.updateBoneMatrices()`.
      */
     fun applyProceduralPose(
         engine: Engine,
@@ -241,12 +243,14 @@ class OperativeRigAnimator {
         isMoving: Boolean,
         isDead: Boolean,
         deathProgress: Float,
-        isShooting: Boolean
+        isShooting: Boolean,
+        aimPitchDeg: Float = 0f
     ) {
         if (!handles.hasFullHumanoidRig) return
         val tm = engine.transformManager
         val armIkWeight = if (isDead) 0f else 1f
         val spec = getHeldWeaponSpec(weapon)
+        val clampedPitch = if (isDead) 0f else aimPitchDeg.coerceIn(-48f, 48f)
 
         // 1. Read current animated Pelvis & Spine transforms
         val pelvisInst = tm.getInstance(handles.pelvis)
@@ -308,34 +312,45 @@ class OperativeRigAnimator {
             )
         }
 
-        // 3. Apply tactical torso combat angle + Exact Two-Handed Arm IK!
+        // 3. Apply tactical torso combat angle + vertical aim pitch + Exact Two-Handed Arm IK!
         if (armIkWeight > 0.02f) {
-            // Subtle tactical stance twist on Spine (angled shoulder for rifles, square for pistols)
             val twistDeg = spec.spineTwistYawDeg * armIkWeight
-            if (abs(twistDeg) > 0.1f) {
+            val spinePitchDeg = -clampedPitch * 0.30f * armIkWeight
+            if (abs(twistDeg) > 0.1f || abs(spinePitchDeg) > 0.1f) {
                 Matrix.setIdentityM(mRot, 0)
-                Matrix.rotateM(mRot, 0, twistDeg, 0f, 1f, 0f)
+                if (abs(twistDeg) > 0.1f) Matrix.rotateM(mRot, 0, twistDeg, 0f, 1f, 0f)
+                if (abs(spinePitchDeg) > 0.1f) Matrix.rotateM(mRot, 0, spinePitchDeg, 1f, 0f, 0f)
                 Matrix.multiplyMM(mTmp, 0, mSpine, 0, mRot, 0)
                 System.arraycopy(mTmp, 0, mSpine, 0, 16)
             }
             tm.setTransform(spineInst, mSpine)
 
-            // Keep Head looking straight forward along character +Z even when torso twists!
-            if (handles.head != 0 && abs(twistDeg) > 0.1f) {
-                applyRelativeRotation(tm, handles.head, pitchDeg = 0f, yawDeg = -twistDeg * 0.85f, rollDeg = 0f)
+            // Keep Head looking straight forward along character +Z and pitched toward aim target!
+            if (handles.head != 0 && (abs(twistDeg) > 0.1f || abs(clampedPitch) > 0.1f)) {
+                applyRelativeRotation(
+                    tm, handles.head,
+                    pitchDeg = -clampedPitch * 0.62f * armIkWeight,
+                    yawDeg = -twistDeg * 0.85f,
+                    rollDeg = 0f
+                )
             }
 
-            // Compute Spine transform in Character space so IK targets stay 100% locked during walk/run/turn!
+            // Compute Spine transform in Character space so IK targets stay 100% locked during walk/run/turn/pitch!
             Matrix.multiplyMM(mPelvisSpine, 0, mPelvis, 0, mSpine, 0)
             val inverted = Matrix.invertM(mInvSpine, 0, mPelvisSpine, 0)
             if (inverted) {
                 val bobY = computeWeaponBobY(timeSec, isMoving)
                 val recoilZ = if (isShooting && !isDead) -0.032f else 0f
+                val pitchRad = Math.toRadians((clampedPitch * 0.82f).toDouble()).toFloat()
+                val cosP = cos(pitchRad)
+                val sinP = sin(pitchRad)
 
-                // Transform Right Hand target into Spine-local space
+                // Rotate Right Hand target around shoulder pitch pivot (AIM_PIVOT_Y, AIM_PIVOT_Z)
+                val rDy = (spec.rightHandY + bobY) - AIM_PIVOT_Y
+                val rDz = (spec.rightHandZ + recoilZ) - AIM_PIVOT_Z
                 vIn[0] = spec.rightHandX
-                vIn[1] = spec.rightHandY + bobY
-                vIn[2] = spec.rightHandZ + recoilZ
+                vIn[1] = AIM_PIVOT_Y + rDy * cosP + rDz * sinP
+                vIn[2] = AIM_PIVOT_Z - rDy * sinP + rDz * cosP
                 vIn[3] = 1f
                 Matrix.multiplyMV(vOut, 0, mInvSpine, 0, vIn, 0)
                 solveAndApplyTwoBoneArmIk(
@@ -345,15 +360,17 @@ class OperativeRigAnimator {
                     sx = R_SHOULDER_X, sy = SHOULDER_Y, sz = 0f,
                     hx = vOut[0], hy = vOut[1], hz = vOut[2],
                     // Right elbow points comfortably outward-right & downward
-                    poleX = -0.68f, poleY = -0.72f, poleZ = -0.14f,
+                    poleX = -0.72f, poleY = -0.68f, poleZ = -0.14f,
                     u0x = R_U0_X, u0y = R_U0_Y, u0z = R_U0_Z,
                     elbowOffsetX = R_UPPER_X, elbowOffsetY = UPPER_Y, elbowOffsetZ = UPPER_Z
                 )
 
-                // Transform Left Hand target into Spine-local space
+                // Rotate Left Hand target around shoulder pitch pivot
+                val lDy = (spec.leftHandY + bobY) - AIM_PIVOT_Y
+                val lDz = (spec.leftHandZ + recoilZ) - AIM_PIVOT_Z
                 vIn[0] = spec.leftHandX
-                vIn[1] = spec.leftHandY + bobY
-                vIn[2] = spec.leftHandZ + recoilZ
+                vIn[1] = AIM_PIVOT_Y + lDy * cosP + lDz * sinP
+                vIn[2] = AIM_PIVOT_Z - lDy * sinP + lDz * cosP
                 vIn[3] = 1f
                 Matrix.multiplyMV(vOut, 0, mInvSpine, 0, vIn, 0)
                 solveAndApplyTwoBoneArmIk(
@@ -373,7 +390,8 @@ class OperativeRigAnimator {
 
     /**
      * Computes exact synchronized world transform for the third-person weapon so it sits
-     * directly inside BOTH hands of the operative (and drops smoothly to the ground on death).
+     * directly inside BOTH hands of the operative, tracks vertical aim pitch, and drops
+     * smoothly to the ground on death.
      */
     fun buildHeldWeaponMatrix(
         out: FloatArray,
@@ -385,7 +403,8 @@ class OperativeRigAnimator {
         timeSec: Float,
         isMoving: Boolean,
         deathProgress: Float,
-        isShooting: Boolean
+        isShooting: Boolean,
+        aimPitchDeg: Float = 0f
     ) {
         val spec = getHeldWeaponSpec(weapon)
         val dp = deathProgress.coerceIn(0f, 1f)
@@ -393,10 +412,19 @@ class OperativeRigAnimator {
 
         val bobY = if (dp < 0.05f) computeWeaponBobY(timeSec, isMoving) else 0f
         val recoilZ = if (isShooting && dp < 0.05f) -0.032f else 0f
+        val clampedPitch = if (dp < 0.05f) aimPitchDeg.coerceIn(-48f, 48f) else 0f
+        val pitchRad = Math.toRadians((clampedPitch * 0.82f).toDouble()).toFloat()
+        val cosP = cos(pitchRad)
+        val sinP = sin(pitchRad)
+
+        val wDy = (spec.weaponY + bobY) - AIM_PIVOT_Y
+        val wDz = (spec.weaponZ + recoilZ) - AIM_PIVOT_Z
+        val pitchedY = AIM_PIVOT_Y + wDy * cosP + wDz * sinP
+        val pitchedZ = AIM_PIVOT_Z - wDy * sinP + wDz * cosP
 
         val localX = lerpF(spec.weaponX, -0.44f, drop)
-        val localY = lerpF(spec.weaponY + bobY, 0.06f, drop)
-        val localZ = lerpF(spec.weaponZ + recoilZ, 0.14f, drop)
+        val localY = lerpF(pitchedY, 0.06f, drop)
+        val localZ = lerpF(pitchedZ, 0.14f, drop)
 
         Matrix.setIdentityM(out, 0)
         Matrix.translateM(out, 0, charX, charY, charZ)
@@ -405,7 +433,8 @@ class OperativeRigAnimator {
         // Bundled weapons have barrel along -Z; rotate 180° around Y to point straight along character +Z!
         Matrix.rotateM(out, 0, 180f + lerpF(spec.weaponYawDeg, 36f, drop), 0f, 1f, 0f)
         val pitchKick = if (isShooting && dp < 0.05f) 4.2f else 0f
-        Matrix.rotateM(out, 0, lerpF(spec.weaponPitchDeg + pitchKick, 0f, drop), 1f, 0f, 0f)
+        // After 180° Y rotation, +X rotation pitches the -Z barrel upward (+Y)
+        Matrix.rotateM(out, 0, lerpF(spec.weaponPitchDeg + pitchKick + clampedPitch * 0.82f, 0f, drop), 1f, 0f, 0f)
         Matrix.rotateM(out, 0, lerpF(spec.weaponRollDeg, 88f, drop), 0f, 0f, 1f)
         Matrix.scaleM(out, 0, spec.weaponScale, spec.weaponScale, spec.weaponScale)
     }

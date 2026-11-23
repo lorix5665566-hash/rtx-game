@@ -64,6 +64,8 @@ class LoadedGlbModel(
 ) {
     val maxExtent: Float = maxOf(sizeX, maxOf(sizeY, sizeZ)).coerceAtLeast(0.001f)
     val rigHandles: OperativeRigHandles = OperativeRigHandles(asset)
+    val boltEntity: Int = asset.getFirstEntityByName("Bolt")
+    val magEntity: Int = asset.getFirstEntityByName("Magazine")
     var inScene: Boolean = false
 }
 
@@ -126,6 +128,8 @@ object FilamentSceneHelpers {
         }
     }
 
+    private val partScratchMat = FloatArray(16)
+
     fun setAssetVisible(scene: Scene, model: LoadedGlbModel?, visible: Boolean) {
         if (model == null) return
         if (visible && !model.inScene) {
@@ -134,6 +138,61 @@ object FilamentSceneHelpers {
         } else if (!visible && model.inScene) {
             scene.removeEntities(model.asset.entities)
             model.inScene = false
+        }
+    }
+
+    /**
+     * Configures first-person viewmodel weapons, hands, and muzzle flash renderables so they never
+     * cast miniature wall shadows or get washed out by atmospheric distance fog.
+     */
+    fun configureViewmodelRenderables(engine: Engine, model: LoadedGlbModel?) {
+        if (model == null) return
+        val rm = engine.renderableManager
+        for (entity in model.asset.renderableEntities) {
+            val inst = rm.getInstance(entity)
+            if (inst != 0) {
+                rm.setCastShadows(inst, false)
+                rm.setFogEnabled(inst, false)
+            }
+        }
+    }
+
+    /**
+     * Drives the physical 3D `"Bolt"` (recoil blowback + charging handle / slide rack) and
+     * `"Magazine"` (reload detachment & re-insertion) child nodes inside bundled weapon GLBs.
+     */
+    fun applyWeaponPartOffsets(
+        engine: Engine,
+        model: LoadedGlbModel,
+        boltOffsetZ: Float,
+        magTx: Float,
+        magTy: Float,
+        magTz: Float,
+        magPitchDeg: Float
+    ) {
+        val tm = engine.transformManager
+        if (model.boltEntity != 0) {
+            val inst = tm.getInstance(model.boltEntity)
+            if (inst != 0) {
+                Matrix.setIdentityM(partScratchMat, 0)
+                if (boltOffsetZ != 0f) {
+                    Matrix.translateM(partScratchMat, 0, 0f, 0f, boltOffsetZ)
+                }
+                tm.setTransform(inst, partScratchMat)
+            }
+        }
+        if (model.magEntity != 0) {
+            val inst = tm.getInstance(model.magEntity)
+            if (inst != 0) {
+                Matrix.setIdentityM(partScratchMat, 0)
+                if (magTx != 0f || magTy != 0f || magTz != 0f) {
+                    Matrix.translateM(partScratchMat, 0, magTx, magTy, magTz)
+                }
+                if (magPitchDeg != 0f) {
+                    Matrix.rotateM(partScratchMat, 0, magPitchDeg, 1f, 0f, 0f)
+                }
+                tm.setTransform(inst, partScratchMat)
+            }
         }
     }
 
@@ -301,7 +360,7 @@ object FilamentSceneHelpers {
 
             val skybox = Skybox.Builder()
                 .environment(tex)
-                .intensity(34_000f)
+                .intensity(26_000f)
                 .build(engine)
             SkyboxRig(skybox, tex)
         }.getOrElse {
@@ -360,8 +419,11 @@ object FilamentSceneHelpers {
     }
 
     /**
-     * Creates warm sunlit procedural skybox + 3-band Spherical Harmonics IndirectLight (IBL)
-     * + shadow-casting directional sun + dynamic point light for muzzle flash / C4 explosion.
+     * Creates CS2 Mirage / Dust 2 cinematic lighting:
+     * - Procedural Rayleigh + cumulus skybox
+     * - Contrasting Hemisphere 3-band SH IBL (cool Mediterranean azure sky above, warm sandstone bounce below)
+     * - Warm shadow-casting Directional Sun with soft 2K 2-cascade shadow maps (zero overexposure!)
+     * - Dynamic PointLight for gunfire muzzle flash & C4 detonation
      */
     fun setupPbrLighting(
         engine: Engine,
@@ -371,34 +433,41 @@ object FilamentSceneHelpers {
         val skyRig = createProceduralSkyRig(engine, mapId)
         scene.skybox = skyRig.skybox
 
-        // Bright balanced 3-band Spherical Harmonics IBL so operatives & maps look crisp & vivid
+        // Contrasting CS2 Mirage Hemisphere SH IBL: cool azure sky from +Y, warm sandstone bounce from -Y
+        val isDust = mapId == ArenaMapId.DUST2
         val shBands = floatArrayOf(
-            1.28f, 1.24f, 1.18f,
-            0.28f, 0.34f, 0.42f,
-            0.24f, 0.21f, 0.17f,
-            -0.10f, -0.09f, -0.07f,
-            0.09f, 0.08f, 0.07f,
-            -0.04f, -0.03f, -0.02f,
-            0.10f, 0.09f, 0.08f,
+            // L0 ambient base (calibrated below 1.0 so characters & pale sandstone NEVER blow out white)
+            if (isDust) 0.88f else 0.84f, if (isDust) 0.84f else 0.83f, if (isDust) 0.76f else 0.82f,
+            // L1_y vertical hemisphere dipole: cool blue sky top (+Y) vs warm desert sand bounce bottom (-Y)
+            -0.14f, 0.04f, 0.24f,
+            // L1_z directional sun scatter
+            0.20f, 0.16f, 0.11f,
+            // L1_x cross fill
+            -0.09f, -0.08f, -0.06f,
+            // L2 subtle directional rim & warm bounce harmonics
+            0.07f, 0.06f, 0.05f,
             -0.03f, -0.02f, -0.02f,
-            0.07f, 0.07f, 0.06f
+            0.09f, 0.07f, 0.04f,
+            -0.03f, -0.02f, -0.01f,
+            0.06f, 0.05f, 0.04f
         )
         val ibl = IndirectLight.Builder()
             .irradiance(3, shBands)
-            .intensity(60_000f)
+            .intensity(32_000f)
             .build(engine)
         scene.indirectLight = ibl
 
-        // Primary Sun DirectionalLight with real-time 2K 2-cascade shadow maps
+        // Warm CS2 Mirage Directional Sun with crisp 2K 2-cascade shadows
         val sunEntity = EntityManager.get().create()
         val shadowOpts = LightManager.ShadowOptions().apply {
             mapSize = 2048
             shadowCascades = 2
             stable = true
+            normalBias = 1.2f
         }
         LightManager.Builder(LightManager.Type.DIRECTIONAL)
-            .color(1.0f, 0.96f, 0.89f)
-            .intensity(142_000f)
+            .color(1.0f, if (isDust) 0.91f else 0.93f, if (isDust) 0.76f else 0.80f)
+            .intensity(96_000f)
             .direction(-0.46f, -0.82f, -0.34f)
             .castShadows(true)
             .shadowOptions(shadowOpts)
@@ -418,7 +487,12 @@ object FilamentSceneHelpers {
         return Triple(sunEntity, fxLightEntity, skyRig)
     }
 
-    fun applyGraphicsSettings(engine: Engine, view: View, gfx: GraphicsSettings) {
+    fun applyGraphicsSettings(
+        engine: Engine,
+        view: View,
+        gfx: GraphicsSettings,
+        mapId: ArenaMapId = ArenaMapId.MIRAGE
+    ) {
         view.antiAliasing = if (gfx.preset == GraphicsPreset.LOW) {
             View.AntiAliasing.NONE
         } else {
@@ -427,23 +501,51 @@ object FilamentSceneHelpers {
 
         val bloom = View.BloomOptions().apply {
             enabled = gfx.bloomAndAces && gfx.preset != GraphicsPreset.LOW
-            strength = if (gfx.preset == GraphicsPreset.ULTRA_RTX) 0.12f else 0.07f
+            strength = if (gfx.preset == GraphicsPreset.ULTRA_RTX) 0.10f else 0.06f
             threshold = true
         }
         view.bloomOptions = bloom
 
-        // Disable heavy screen-space AO for maximum FPS on mobile GPUs (2K shadows remain active!)
+        // Mobile-fast half-resolution SSAO for crisp CS2 corner & crate contact darkening!
+        val enableAo = gfx.preset == GraphicsPreset.HIGH || gfx.preset == GraphicsPreset.ULTRA_RTX
         val ao = View.AmbientOcclusionOptions().apply {
-            enabled = false
+            enabled = enableAo
+            resolution = 0.5f
+            radius = 0.38f
+            intensity = if (gfx.preset == GraphicsPreset.ULTRA_RTX) 0.95f else 0.78f
+            power = 1.15f
+            bias = 0.01f
+            bilateralThreshold = 0.06f
+            quality = View.QualityLevel.LOW
         }
         view.ambientOcclusionOptions = ao
 
-        // Preserve full 2048px 2-cascade dynamic sun shadows unchanged
+        // Atmospheric exponential distance haze (FogExp2-style depth cue tailored to Mirage / Dust 2)
+        val isDust = mapId == ArenaMapId.DUST2
+        val fog = View.FogOptions().apply {
+            enabled = gfx.preset != GraphicsPreset.LOW
+            distance = 22.0f
+            density = 0.015f
+            maximumOpacity = 0.25f
+            height = 14.0f
+            heightFalloff = 0.40f
+            inScatteringStart = 18.0f
+            inScatteringSize = 0.55f
+            fogColorFromIbl = false
+            color = if (isDust) {
+                floatArrayOf(0.88f, 0.79f, 0.64f)
+            } else {
+                floatArrayOf(0.84f, 0.78f, 0.70f)
+            }
+        }
+        view.fogOptions = fog
+
+        // Preserve full 2048px 2-cascade dynamic sun shadows
         view.setShadowingEnabled(gfx.dynamicLighting && gfx.preset != GraphicsPreset.LOW)
 
         // Adaptive dynamic resolution scaling keeps FPS smooth on all phones during combat
         val targetMax = gfx.resolutionScale.coerceIn(0.60f, 1.0f)
-        val targetMin = (targetMax * 0.72f).coerceIn(0.55f, targetMax)
+        val targetMin = (targetMax * 0.74f).coerceIn(0.55f, targetMax)
         val dynRes = View.DynamicResolutionOptions().apply {
             enabled = true
             minScale = targetMin
@@ -458,8 +560,8 @@ object FilamentSceneHelpers {
                 if (gfx.bloomAndAces) ColorGrading.ToneMapping.ACES
                 else ColorGrading.ToneMapping.LINEAR
             )
-            .contrast(if (gfx.bloomAndAces) 1.06f else 1.0f)
-            .saturation(if (gfx.bloomAndAces) 1.08f else 1.0f)
+            .contrast(if (gfx.bloomAndAces) 1.09f else 1.0f)
+            .saturation(if (gfx.bloomAndAces) 1.07f else 1.0f)
             .build(engine)
         view.colorGrading = grading
         if (prevGrading != null && prevGrading != grading) {

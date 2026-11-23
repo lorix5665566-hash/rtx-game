@@ -296,12 +296,14 @@ class GameEngine(
         if (st.userId.isBlank() || st.userId == localUid) return
         val nowMs = SystemClock.elapsedRealtime()
         synchronized(remoteLock) {
-            upsertRemotePlayerLocked(localUid, st, nowMs)
+            upsertRemotePlayerLocked(localUid, st, nowMs, fromWebSocket = true)
         }
     }
 
     /**
      * Called from Supabase PostgREST snapshot sync when full lobby member list arrives.
+     * Protects fresh 30Hz WebSocket transforms from stale 1.6s DB polls and applies a 4.5s
+     * reconnect grace window so players never flicker or vanish on brief network hiccups.
      */
     fun applyRemoteStates(
         localUid: String,
@@ -313,22 +315,33 @@ class GameEngine(
             for (st in remoteStates) {
                 if (st.userId.isBlank() || st.userId == localUid) continue
                 activeUids.add(st.userId)
-                upsertRemotePlayerLocked(localUid, st, nowMs)
+                upsertRemotePlayerLocked(localUid, st, nowMs, fromWebSocket = false)
             }
-            remotePlayersMap.keys.retainAll(activeUids)
+            // Keep players seen via WebSocket or DB within the 4.5s reconnect grace window;
+            // prune genuinely disconnected players so zero ghost models ever linger!
+            val it = remotePlayersMap.entries.iterator()
+            while (it.hasNext()) {
+                val (uid, rp) = it.next()
+                if (uid !in activeUids && (nowMs - rp.lastSeenMs) > 4_500L) {
+                    it.remove()
+                    lastProcessedHitSeq.remove(uid)
+                }
+            }
         }
     }
 
     private fun upsertRemotePlayerLocked(
         localUid: String,
         st: com.example.online.PlayerMatchState,
-        nowMs: Long
+        nowMs: Long,
+        fromWebSocket: Boolean
     ) {
         val side = if (st.team == "CT") TeamSide.CT else TeamSide.T
         val wep = WeaponType.entries.firstOrNull { it.name == st.weapon } ?: WeaponType.AK47
         val newX = st.x.toFloat()
         val newY = st.y.toFloat()
         val newZ = st.z.toFloat()
+        val newPitch = st.pitchDeg.toFloat().coerceIn(-55f, 55f)
         val existing = remotePlayersMap[st.userId]
         if (existing == null) {
             remotePlayersMap[st.userId] = RemoteHumanPlayer(
@@ -343,8 +356,12 @@ class GameEngine(
                 targetY = newY,
                 targetZ = newZ,
                 lastSyncMs = nowMs,
+                lastWsSyncMs = if (fromWebSocket) nowMs else 0L,
+                lastSeenMs = nowMs,
                 yawDeg = st.yawDeg.toFloat(),
                 targetYawDeg = st.yawDeg.toFloat(),
+                pitchDeg = newPitch,
+                targetPitchDeg = newPitch,
                 hp = st.hp,
                 isDead = st.dead,
                 deathProgress = if (st.dead) 1f else 0f,
@@ -357,40 +374,52 @@ class GameEngine(
             // Baseline hitSeq on first observe so old hits aren't replayed on join
             lastProcessedHitSeq[st.userId] = st.hitSeq
         } else {
-            val dtSync = ((nowMs - existing.lastSyncMs) / 1000f).coerceIn(0.020f, 0.45f)
-            val dx = newX - existing.targetX
-            val dy = newY - existing.targetY
-            val dz = newZ - existing.targetZ
-            val jumpDistSq = dx * dx + dz * dz
-            if (jumpDistSq > 36f) {
-                existing.x = newX
-                existing.y = newY
-                existing.z = newZ
-                existing.vx = 0f
-                existing.vy = 0f
-                existing.vz = 0f
-            } else if (st.moving && !st.dead) {
-                existing.vx = (dx / dtSync).coerceIn(-7.8f, 7.8f)
-                existing.vy = (dy / dtSync).coerceIn(-8.0f, 8.0f)
-                existing.vz = (dz / dtSync).coerceIn(-7.8f, 7.8f)
-            } else {
-                existing.vx = 0f
-                existing.vy = 0f
-                existing.vz = 0f
-            }
-            existing.targetX = newX
-            existing.targetY = newY
-            existing.targetZ = newZ
-            existing.lastSyncMs = nowMs
-            existing.targetYawDeg = st.yawDeg.toFloat()
-            existing.hp = st.hp
-            existing.isDead = st.dead
-            if (!st.dead) existing.deathProgress = 0f
-            existing.isMoving = st.moving
-            existing.isShooting = st.shooting
-            existing.weapon = wep
+            existing.lastSeenMs = nowMs
+            existing.team = side
             existing.kills = st.kills
             existing.deaths = st.deaths
+
+            // Guard: never let a 1.6s delayed PostgREST DB snapshot snap a player backwards over a fresh 30Hz WS packet!
+            val ignoreStaleTransform = !fromWebSocket &&
+                existing.lastWsSyncMs > 0L &&
+                (nowMs - existing.lastWsSyncMs) < 1_800L
+
+            if (!ignoreStaleTransform) {
+                val dtSync = ((nowMs - existing.lastSyncMs) / 1000f).coerceIn(0.020f, 0.45f)
+                val dx = newX - existing.targetX
+                val dy = newY - existing.targetY
+                val dz = newZ - existing.targetZ
+                val jumpDistSq = dx * dx + dz * dz
+                if (jumpDistSq > 36f) {
+                    existing.x = newX
+                    existing.y = newY
+                    existing.z = newZ
+                    existing.vx = 0f
+                    existing.vy = 0f
+                    existing.vz = 0f
+                } else if (st.moving && !st.dead) {
+                    existing.vx = (dx / dtSync).coerceIn(-7.8f, 7.8f)
+                    existing.vy = (dy / dtSync).coerceIn(-8.0f, 8.0f)
+                    existing.vz = (dz / dtSync).coerceIn(-7.8f, 7.8f)
+                } else {
+                    existing.vx = 0f
+                    existing.vy = 0f
+                    existing.vz = 0f
+                }
+                existing.targetX = newX
+                existing.targetY = newY
+                existing.targetZ = newZ
+                existing.lastSyncMs = nowMs
+                if (fromWebSocket) existing.lastWsSyncMs = nowMs
+                existing.targetYawDeg = st.yawDeg.toFloat()
+                existing.targetPitchDeg = newPitch
+                existing.hp = st.hp
+                existing.isDead = st.dead
+                if (!st.dead) existing.deathProgress = 0f
+                existing.isMoving = st.moving
+                existing.isShooting = st.shooting
+                existing.weapon = wep
+            }
 
             val prevSeq = lastProcessedHitSeq[st.userId] ?: 0
             if (st.hitSeq > prevSeq) {
@@ -536,6 +565,7 @@ class GameEngine(
                 if (diff > 180f) diff -= 360f
                 if (diff < -180f) diff += 360f
                 rp.yawDeg += diff * rotAlpha
+                rp.pitchDeg += (rp.targetPitchDeg - rp.pitchDeg) * rotAlpha
                 if (rp.isDead) {
                     rp.deathProgress = (rp.deathProgress + dt * 1.45f).coerceAtMost(1f)
                 } else {
@@ -765,6 +795,18 @@ class GameEngine(
         bots.clear()
         lastTStrategy = -1
         lastCtStrategy = -1
+        synchronized(remoteLock) {
+            if (!matchConfig.isMultiplayer) {
+                remotePlayersMap.clear()
+            } else {
+                for (rp in remotePlayersMap.values) {
+                    rp.isDead = false
+                    rp.deathProgress = 0f
+                    rp.vx = 0f; rp.vy = 0f; rp.vz = 0f
+                }
+            }
+            pendingIncomingPvpHits.clear()
+        }
         synchronized(remoteBombLock) {
             pendingRemoteBombEvents.clear()
             lastAppliedBombSeqBySender.clear()
