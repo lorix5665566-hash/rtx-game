@@ -186,7 +186,7 @@ fun GameplayScreen(
         }
     }
 
-    // Ultra-responsive ~30Hz (33ms) Realtime WebSocket publish loop with immediate flush on hits, C4 bomb events, weapon swaps, or death!
+    // Ultra-responsive 50Hz (20ms) TCP_NODELAY Realtime WebSocket publish loop with instant flush on shots, hits, C4 bomb, weapon swaps, or death!
     LaunchedEffect(activeLobbyId, engine.matchConfig.isMultiplayer) {
         val lobbyId = activeLobbyId
         if (!engine.matchConfig.isMultiplayer || lobbyId.isNullOrBlank()) return@LaunchedEffect
@@ -194,30 +194,34 @@ fun GameplayScreen(
         var lastSentBombSeq = 0
         var lastSentWeapon = ""
         var lastSentDead = false
+        var lastSentShooting = false
         var lastSendTimeMs = 0L
         while (true) {
             val nowMs = android.os.SystemClock.elapsedRealtime()
             val snap = engine.latestHud
             val hit = engine.lastOutgoingHit
             val bombEv = engine.latestBombSync
+            val shootingNow = engine.muzzleFlashTimer > 0.05f
             val hasNewHit = hit != null && hit.seq > lastSentHitSeq
             val hasNewBomb = bombEv != null && bombEv.seq > lastSentBombSeq
             val weaponChanged = snap.activeWeapon.name != lastSentWeapon
             val deadChanged = snap.isPlayerDead != lastSentDead
-            val timeElapsed = (nowMs - lastSendTimeMs) >= 33L
+            val shotStarted = shootingNow && !lastSentShooting
+            val timeElapsed = (nowMs - lastSendTimeMs) >= 20L
 
             if (hasNewBomb && bombEv != null) {
                 lastSentBombSeq = bombEv.seq
                 onPublishBombSync(lobbyId, bombEv)
             }
 
-            if (hasNewHit || hasNewBomb || weaponChanged || deadChanged || timeElapsed) {
+            if (hasNewHit || hasNewBomb || weaponChanged || deadChanged || shotStarted || timeElapsed) {
                 val hitToSend = if (hasNewHit && hit != null) {
                     lastSentHitSeq = hit.seq
                     hit
                 } else null
                 lastSentWeapon = snap.activeWeapon.name
                 lastSentDead = snap.isPlayerDead
+                lastSentShooting = shootingNow
                 lastSendTimeMs = nowMs
                 onPublishLiveState(
                     lobbyId,
@@ -230,7 +234,7 @@ fun GameplayScreen(
                     snap.hp,
                     snap.isPlayerDead,
                     engine.moveSpeedRatio > 0.1f,
-                    engine.muzzleFlashTimer > 0.05f,
+                    shootingNow,
                     snap.activeWeapon.name,
                     snap.kills,
                     snap.deaths,
@@ -238,7 +242,7 @@ fun GameplayScreen(
                     engine.latestBombSync
                 )
             }
-            delay(16L)
+            delay(8L)
         }
     }
 
@@ -693,91 +697,98 @@ fun GameplayScreen(
             }
         }
 
-        // 8. Bottom-Left Compact Vitals Strip (Smooth animated HP + Armor + Defuse Kit)
+        // 8. Bottom-Center Compact Vitals Strip (Smooth animated HP + Armor + Defuse Kit)
         val smoothHp by animateIntAsState(targetValue = hud.hp, animationSpec = tween(180), label = "hp_anim")
         val smoothArmor by animateIntAsState(targetValue = hud.armor, animationSpec = tween(180), label = "armor_anim")
-        Row(
+        AnimatedVisibility(
+            visible = !hud.isPlayerDead && !hud.isMatchFinished,
+            enter = fadeIn(tween(180)),
+            exit = fadeOut(tween(150)),
             modifier = Modifier
-                .align(Alignment.BottomStart)
+                .align(Alignment.BottomCenter)
                 .safeDrawingPadding()
-                .padding(start = m.s(12f), bottom = m.s(8f)),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(m.s(7f))
+                .padding(bottom = m.s(8f))
         ) {
-            Surface(
-                color = Color(0xB80B111A),
-                shape = RoundedCornerShape(m.s(8f)),
-                border = BorderStroke(1.dp, BorderSteel.copy(alpha = 0.75f))
-            ) {
-                Row(
-                    modifier = Modifier.padding(horizontal = m.s(10f), vertical = m.s(5f)),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(m.s(9f))
-                ) {
-                    val hpColor = when {
-                        smoothHp > 50 -> RtxEmerald
-                        smoothHp > 25 -> TacticalAmber
-                        else -> ThreatCrimson
-                    }
-                    Text(
-                        text = "+ $smoothHp",
-                        fontSize = m.sp(13f),
-                        fontWeight = FontWeight.Black,
-                        color = hpColor
-                    )
-                    Text(
-                        text = "БР $smoothArmor",
-                        fontSize = m.sp(11f),
-                        fontWeight = FontWeight.Bold,
-                        color = IceCyan
-                    )
-                    if (hud.hasDefuseKit) {
-                        Text(
-                            text = "САПЁР",
-                            fontSize = m.sp(9.5f),
-                            fontWeight = FontWeight.Bold,
-                            color = RtxEmerald
-                        )
-                    }
-                }
-            }
-
-            AnimatedVisibility(
-                visible = hud.isReloading,
-                enter = fadeIn(tween(150)) + scaleIn(initialScale = 0.92f, animationSpec = tween(150)),
-                exit = fadeOut(tween(150)) + scaleOut(targetScale = 0.92f, animationSpec = tween(150))
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(m.s(7f))
             ) {
                 Surface(
-                    color = Color(0xCC0D1420),
-                    shape = RoundedCornerShape(m.s(6f)),
-                    border = BorderStroke(1.dp, TacticalAmber.copy(alpha = 0.65f))
+                    color = Color(0xC20B111A),
+                    shape = RoundedCornerShape(m.s(8f)),
+                    border = BorderStroke(1.dp, BorderSteel.copy(alpha = 0.78f)),
+                    modifier = Modifier.testTag("hud_vitals_center")
                 ) {
-                    Column(
-                        modifier = Modifier
-                            .width(m.s(114f))
-                            .padding(horizontal = m.s(8f), vertical = m.s(4f))
+                    Row(
+                        modifier = Modifier.padding(horizontal = m.s(12f), vertical = m.s(5f)),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(m.s(10f))
                     ) {
+                        val hpColor = when {
+                            smoothHp > 50 -> RtxEmerald
+                            smoothHp > 25 -> TacticalAmber
+                            else -> ThreatCrimson
+                        }
                         Text(
-                            text = "ПЕРЕЗАРЯДКА",
-                            fontSize = m.sp(8.5f),
+                            text = "+ $smoothHp",
+                            fontSize = m.sp(13.5f),
+                            fontWeight = FontWeight.Black,
+                            color = hpColor
+                        )
+                        Text(
+                            text = "БР $smoothArmor",
+                            fontSize = m.sp(11.5f),
                             fontWeight = FontWeight.Bold,
-                            color = TacticalAmber
+                            color = IceCyan
                         )
-                        LinearProgressIndicator(
-                            progress = { hud.reloadProgress },
+                        if (hud.hasDefuseKit) {
+                            Text(
+                                text = "САПЁР",
+                                fontSize = m.sp(9.5f),
+                                fontWeight = FontWeight.Bold,
+                                color = RtxEmerald
+                            )
+                        }
+                    }
+                }
+
+                AnimatedVisibility(
+                    visible = hud.isReloading,
+                    enter = fadeIn(tween(150)) + scaleIn(initialScale = 0.92f, animationSpec = tween(150)),
+                    exit = fadeOut(tween(150)) + scaleOut(targetScale = 0.92f, animationSpec = tween(150))
+                ) {
+                    Surface(
+                        color = Color(0xCC0D1420),
+                        shape = RoundedCornerShape(m.s(6f)),
+                        border = BorderStroke(1.dp, TacticalAmber.copy(alpha = 0.65f))
+                    ) {
+                        Column(
                             modifier = Modifier
-                                .fillMaxWidth()
-                                .height(m.s(4f))
-                                .clip(RoundedCornerShape(2.dp)),
-                            color = TacticalAmber,
-                            trackColor = ElevatedGunmetal
-                        )
+                                .width(m.s(114f))
+                                .padding(horizontal = m.s(8f), vertical = m.s(4f))
+                        ) {
+                            Text(
+                                text = "ПЕРЕЗАРЯДКА",
+                                fontSize = m.sp(8.5f),
+                                fontWeight = FontWeight.Bold,
+                                color = TacticalAmber
+                            )
+                            LinearProgressIndicator(
+                                progress = { hud.reloadProgress },
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .height(m.s(4f))
+                                    .clip(RoundedCornerShape(2.dp)),
+                                color = TacticalAmber,
+                                trackColor = ElevatedGunmetal
+                            )
+                        }
                     }
                 }
             }
         }
 
-        // 9. Contextual C4 Plant / Defuse Hold Button
+        // 9. Contextual C4 Plant / Defuse Hold Button (floats cleanly above bottom-center HP/Armor bar)
         AnimatedVisibility(
             visible = !isPaused && !isShopOpen && !hud.isPlayerDead && (hud.canPlantBomb || hud.canDefuseBomb),
             enter = fadeIn(tween(180)) + scaleIn(initialScale = 0.92f, animationSpec = tween(180)),
@@ -785,7 +796,7 @@ fun GameplayScreen(
             modifier = Modifier
                 .align(Alignment.BottomCenter)
                 .safeDrawingPadding()
-                .padding(bottom = m.s(16f))
+                .padding(bottom = m.s(54f))
         ) {
             BombActionHoldButton(
                 isPlant = hud.canPlantBomb,

@@ -450,7 +450,16 @@ class OnlineViewModel(
     ) {
         if (lobbyId.isBlank()) return
         val displayName = currentProfileOrNull()?.displayName ?: initialLoginName
-        // 1. Primary path: instant ~30Hz WebSocket broadcast (zero DB write latency!)
+        // 0. Ultra-low-latency dedicated PvP hit packet first when shooting hits an enemy!
+        if (outgoingHit != null) {
+            realtimeClient.sendHitEvent(
+                userId = currentUserId,
+                displayName = displayName,
+                team = team,
+                hit = outgoingHit
+            )
+        }
+        // 1. Primary path: instant 50Hz TCP_NODELAY WebSocket broadcast (zero DB write latency!)
         val sentViaWs = realtimeClient.sendPlayerState(
             userId = currentUserId,
             displayName = displayName,
@@ -471,14 +480,14 @@ class OnlineViewModel(
             bombSync = bombSync
         )
 
-        // 2. Database mirror: always immediate when WS is disconnected or when carrying a hit;
-        //    otherwise lightweight ~1.4s mirror to keep PostgREST rows synced for late observers.
+        // 2. Database mirror: immediate ONLY if WebSocket failed; otherwise lightweight 2.2s mirror
+        //    so HTTP overhead never competes with live WebSocket combat sockets!
         val nowMs = android.os.SystemClock.elapsedRealtime()
-        val needsDbSync = !sentViaWs || outgoingHit != null || (nowMs - lastDbMirrorMs >= 1_400L)
+        val needsDbSync = !sentViaWs || (nowMs - lastDbMirrorMs >= 2_200L)
         if (!needsDbSync) return
-        if (outgoingHit == null && !tickInFlight.compareAndSet(false, true)) return
+        if (!tickInFlight.compareAndSet(false, true)) return
         lastDbMirrorMs = nowMs
-        viewModelScope.launch {
+        viewModelScope.launch(kotlinx.coroutines.Dispatchers.IO) {
             try {
                 val rtt = repository.publishMatchTick(
                     lobbyId = lobbyId,
@@ -496,13 +505,13 @@ class OnlineViewModel(
                     weaponName = weaponName,
                     kills = kills,
                     deaths = deaths,
-                    outgoingHit = outgoingHit
+                    outgoingHit = if (!sentViaWs) outgoingHit else null
                 )
                 if (rtt != null && (!sentViaWs || _pingMs.value == 0)) {
                     recordRtt(rtt)
                 }
             } finally {
-                if (outgoingHit == null) tickInFlight.set(false)
+                tickInFlight.set(false)
             }
         }
     }

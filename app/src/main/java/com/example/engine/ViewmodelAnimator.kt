@@ -254,23 +254,24 @@ object ViewmodelAnimator {
 
         when (weapon) {
             WeaponType.KNIFE -> {
-                // Iconic CS2 knife inspect: ONLY the knife performs the brisk 360° blade spin
-                // around its handle while the wrist & hand stay steady and gently tilted!
-                val spinT = smoothstep(0.06f, 0.38f, p)
-                val leftShowcase = plateau(p, 0.36f, 0.50f, 0.64f, 0.76f)
-                val rightShowcase = plateau(p, 0.66f, 0.76f, 0.84f, 0.94f)
-                val spinKick = pulse(p, 0.06f, 0.38f)
+                // Natural CS2 tactical hand+knife inspection:
+                // 1) Smoothly lift hand holding the knife up into view
+                // 2) Turn wrist gently left to admire outer blade edge & finish
+                // 3) Roll wrist smoothly right to admire inner bevel & handle
+                // 4) Return cleanly to ready stance (ZERO palm spinning!)
+                val leftShowcase = plateau(p, 0.08f, 0.24f, 0.48f, 0.60f)
+                val rightShowcase = plateau(p, 0.54f, 0.68f, 0.84f, 0.96f)
 
-                out.tx = -0.058f * lift + 0.022f * rightShowcase
-                out.ty = 0.050f * lift + 0.014f * spinKick + microFloat
-                out.tz = 0.048f * lift - 0.016f * leftShowcase
-                // Natural wrist presentation angles shared by hand + knife
-                out.yawDeg = 32f * leftShowcase - 18f * rightShowcase + 8f * spinKick
-                out.pitchDeg = 14f * lift + 10f * leftShowcase - 8f * rightShowcase
-                out.rollDeg = -22f * leftShowcase + 26f * rightShowcase - 10f * spinKick
-                // Pure weapon-only 360° spin around knife grip axis (hand NEVER spins around its axis!)
-                out.weaponOnlyPitchDeg = 360f * spinT
-                out.weaponOnlyRollDeg = -22f * spinKick
+                out.tx = -0.068f * lift + 0.026f * rightShowcase
+                out.ty = 0.056f * lift + 0.010f * leftShowcase + microFloat
+                out.tz = 0.062f * lift - 0.014f * leftShowcase
+                // Natural wrist & forearm angles shared 1:1 by hand + knife
+                out.yawDeg = 42f * leftShowcase - 28f * rightShowcase
+                out.pitchDeg = 16f * lift + 12f * leftShowcase - 8f * rightShowcase
+                out.rollDeg = -30f * leftShowcase + 38f * rightShowcase
+                out.weaponOnlyYawDeg = 0f
+                out.weaponOnlyPitchDeg = 0f
+                out.weaponOnlyRollDeg = 0f
             }
 
             WeaponType.USP_S, WeaponType.GLOCK_18, WeaponType.DESERT_EAGLE -> {

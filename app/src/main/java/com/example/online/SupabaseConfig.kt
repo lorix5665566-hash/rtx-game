@@ -2,9 +2,33 @@ package com.example.online
 
 import com.example.BuildConfig
 import okhttp3.ConnectionPool
+import okhttp3.Dispatcher
 import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import okhttp3.OkHttpClient
+import java.net.InetAddress
+import java.net.Socket
 import java.util.concurrent.TimeUnit
+import javax.net.SocketFactory
+
+/**
+ * SocketFactory wrapper that enables TCP_NODELAY on every socket so small 50Hz
+ * Realtime WebSocket frames and PvP hit packets are flushed immediately without Nagle delay.
+ */
+private class LowLatencySocketFactory(
+    private val delegate: SocketFactory = SocketFactory.getDefault()
+) : SocketFactory() {
+    private fun tune(socket: Socket): Socket = socket.apply {
+        runCatching { tcpNoDelay = true }
+    }
+
+    override fun createSocket(): Socket = tune(delegate.createSocket())
+    override fun createSocket(host: String, port: Int): Socket = tune(delegate.createSocket(host, port))
+    override fun createSocket(host: String, port: Int, localHost: InetAddress, localPort: Int): Socket =
+        tune(delegate.createSocket(host, port, localHost, localPort))
+    override fun createSocket(host: InetAddress, port: Int): Socket = tune(delegate.createSocket(host, port))
+    override fun createSocket(address: InetAddress, port: Int, localAddress: InetAddress, localPort: Int): Socket =
+        tune(delegate.createSocket(address, port, localAddress, localPort))
+}
 
 /**
  * Central Supabase configuration sourced strictly from BuildConfig (.env / AI Studio Secrets).
@@ -73,12 +97,19 @@ object SupabaseConfig {
         "Облачный сервер Supabase ещё не подключён. Добавьте SUPABASE_URL и SUPABASE_ANON_KEY в панель Secrets (или в секреты GitHub Actions) и пересоберите приложение."
 
     val httpClient: OkHttpClient by lazy {
+        val dispatcher = Dispatcher().apply {
+            maxRequests = 64
+            maxRequestsPerHost = 16
+        }
         OkHttpClient.Builder()
-            .connectionPool(ConnectionPool(8, 5, TimeUnit.MINUTES))
+            .dispatcher(dispatcher)
+            .socketFactory(LowLatencySocketFactory())
+            .connectionPool(ConnectionPool(10, 5, TimeUnit.MINUTES))
+            .pingInterval(15, TimeUnit.SECONDS)
             .retryOnConnectionFailure(true)
-            .connectTimeout(8, TimeUnit.SECONDS)
-            .readTimeout(10, TimeUnit.SECONDS)
-            .writeTimeout(10, TimeUnit.SECONDS)
+            .connectTimeout(5, TimeUnit.SECONDS)
+            .readTimeout(8, TimeUnit.SECONDS)
+            .writeTimeout(8, TimeUnit.SECONDS)
             .build()
     }
 }

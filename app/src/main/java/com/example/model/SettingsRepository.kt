@@ -15,15 +15,20 @@ class SettingsRepository(context: Context) {
                 ?: GraphicsPreset.ULTRA_RTX.name
             val preset = GraphicsPreset.entries.firstOrNull { it.name == presetName }
                 ?: GraphicsPreset.ULTRA_RTX
+            val aspectName = gfxObj?.optString("aspectRatio", AspectRatioMode.RATIO_16_9.name)
+                ?: AspectRatioMode.RATIO_16_9.name
+            val aspectRatio = AspectRatioMode.entries.firstOrNull { it.name == aspectName }
+                ?: AspectRatioMode.RATIO_16_9
             val graphics = GraphicsSettings(
                 preset = preset,
                 resolutionScale = (gfxObj?.optDouble("resolutionScale", 1.0) ?: 1.0).toFloat()
                     .coerceIn(0.6f, 1.0f),
+                aspectRatio = aspectRatio,
                 rtxReflections = gfxObj?.optBoolean("rtxReflections", true) ?: true,
                 dynamicLighting = gfxObj?.optBoolean("dynamicLighting", true) ?: true,
                 hdTextures = gfxObj?.optBoolean("hdTextures", true) ?: true,
                 bloomAndAces = gfxObj?.optBoolean("bloomAndAces", true) ?: true,
-                fov = (gfxObj?.optDouble("fov", 80.0) ?: 80.0).toFloat().coerceIn(65f, 105f),
+                fov = GraphicsSettings.FIXED_FOV,
                 showFps = gfxObj?.optBoolean("showFps", true) ?: true
             )
 
@@ -83,11 +88,12 @@ class SettingsRepository(context: Context) {
             put("graphics", JSONObject().apply {
                 put("preset", settings.graphics.preset.name)
                 put("resolutionScale", settings.graphics.resolutionScale.toDouble())
+                put("aspectRatio", settings.graphics.aspectRatio.name)
                 put("rtxReflections", settings.graphics.rtxReflections)
                 put("dynamicLighting", settings.graphics.dynamicLighting)
                 put("hdTextures", settings.graphics.hdTextures)
                 put("bloomAndAces", settings.graphics.bloomAndAces)
-                put("fov", settings.graphics.fov.toDouble())
+                put("fov", GraphicsSettings.FIXED_FOV.toDouble())
                 put("showFps", settings.graphics.showFps)
             })
             put("sensitivity", JSONObject().apply {

@@ -6,6 +6,7 @@ import android.view.Choreographer
 import android.view.Surface
 import android.view.SurfaceView
 import com.example.model.ArenaMapId
+import com.example.model.AspectRatioMode
 import com.example.model.BombState
 import com.example.model.GraphicsSettings
 import com.example.model.ModelAssetRegistry
@@ -89,6 +90,10 @@ class FilamentGameplayController(
     private var explosionFireball: LoadedGlbModel? = null
     private var explosionSmoke: LoadedGlbModel? = null
     private var explosionShockwave: LoadedGlbModel? = null
+
+    // GPU-instanced bullet hole decals (48) & brief yellow laser bullet tracers (12)
+    private val bulletHolePool = ArrayList<LoadedGlbModel>(48)
+    private val bulletTracerPool = ArrayList<LoadedGlbModel>(12)
 
     private var lastGraphics: GraphicsSettings? = null
     private var surfaceWidth: Int = 1
@@ -224,6 +229,26 @@ class FilamentGameplayController(
         FilamentSceneHelpers.configureViewmodelRenderables(engine, muzzleFlashModel)
         for (h in allHandsSlots) {
             FilamentSceneHelpers.configureViewmodelRenderables(engine, h)
+        }
+
+        // Load GPU-instanced bullet impact marks (48) & brief yellow laser tracers (12)
+        val holeInstances = FilamentSceneHelpers.loadInstancedGlb(
+            assetLoader, resourceLoader,
+            registry.loadBundledAssetBuffer("models/vfx_bullet_hole.glb"),
+            count = 48
+        )
+        for (hole in holeInstances) {
+            FilamentSceneHelpers.disableShadowCasting(engine, hole)
+            bulletHolePool.add(hole)
+        }
+        val tracerInstances = FilamentSceneHelpers.loadInstancedGlb(
+            assetLoader, resourceLoader,
+            registry.loadBundledAssetBuffer("models/vfx_bullet_tracer.glb"),
+            count = 12
+        )
+        for (tr in tracerInstances) {
+            FilamentSceneHelpers.configureViewmodelRenderables(engine, tr)
+            bulletTracerPool.add(tr)
         }
         reloadDynamicSlots()
     }
@@ -366,6 +391,8 @@ class FilamentGameplayController(
         fpWeapons.values.forEach { destroyModel(it) }; fpWeapons.clear()
         ctPool.asReversed().forEach { destroyModel(it) }; ctPool.clear()
         tPool.asReversed().forEach { destroyModel(it) }; tPool.clear()
+        bulletHolePool.asReversed().forEach { destroyModel(it) }; bulletHolePool.clear()
+        bulletTracerPool.asReversed().forEach { destroyModel(it) }; bulletTracerPool.clear()
 
         runCatching { resourceLoader.destroy() }
         runCatching { assetLoader.destroy() }
@@ -429,6 +456,7 @@ class FilamentGameplayController(
         updateCamera()
         updateBots(dt)
         updateFirstPersonWeaponAndMuzzle()
+        updateBulletVfx()
         updatePlantedBombAndExplosion()
 
         val sc = swapChain ?: return
@@ -440,8 +468,11 @@ class FilamentGameplayController(
 
     private fun updateCamera() {
         val gfx = gameEngine.settings.graphics
-        val aspect = surfaceWidth.toDouble() / surfaceHeight.toDouble().coerceAtLeast(1.0)
-        val baseFov = gfx.fov.coerceIn(65f, 105f)
+        val nativeAspect = surfaceWidth.toDouble() / surfaceHeight.toDouble().coerceAtLeast(1.0)
+        // CS2 4:3 Stretched mode renders a 4:3 frustum stretched cleanly across the full screen!
+        val aspect = if (gfx.aspectRatio == AspectRatioMode.RATIO_4_3) 4.0 / 3.0 else nativeAspect
+        // Locked default 65° vertical FOV
+        val baseFov = GraphicsSettings.FIXED_FOV
         val zoomTarget = gameEngine.activeWeapon.adsZoomFactor
         val liveFov = if (gameEngine.isSpectatingAlly) {
             baseFov.toDouble()
@@ -768,8 +799,7 @@ class FilamentGameplayController(
                     eqYaw = -18f * ease
                     eqPitch = -32f * ease
                     eqRoll = -14f * ease
-                    // Only the knife flips into the palm on draw — the arm stays natural!
-                    eqWeaponOnlyRoll = 210f * ease
+                    eqWeaponOnlyRoll = 0f
                 }
                 WeaponType.USP_S, WeaponType.GLOCK_18, WeaponType.DESERT_EAGLE -> {
                     val rackBump = if (ep in 0.42f..0.78f) {
@@ -1009,6 +1039,102 @@ class FilamentGameplayController(
             )
             Matrix.multiplyMM(finalMat, 0, camMat, 0, localMat, 0)
             tm.setTransform(tm.getInstance(muzzleFlashModel!!.asset.root), finalMat)
+        }
+    }
+
+    /**
+     * Renders persistent 3D bullet impact holes flush on struck walls/floors and
+     * micro-flash bright yellow laser bullet tracers shooting out of weapon muzzles.
+     */
+    private fun updateBulletVfx() {
+        val tm = engine.transformManager
+
+        // 1. Bullet Impact Decals (local +Z faces along outward surface normal)
+        val impacts = gameEngine.bulletImpacts
+        val holeCount = minOf(impacts.size, bulletHolePool.size)
+        for (i in 0 until bulletHolePool.size) {
+            val model = bulletHolePool[i]
+            val vis = i < holeCount
+            FilamentSceneHelpers.setAssetVisible(scene, model, vis)
+            if (!vis) continue
+            val imp = impacts[i]
+            // Construct orthonormal basis (Right, Up, Forward=Normal)
+            val nzX = imp.nx; val nzY = imp.ny; val nzZ = imp.nz
+            val refX: Float; val refY: Float; val refZ: Float
+            if (kotlin.math.abs(nzY) > 0.92f) {
+                refX = 1f; refY = 0f; refZ = 0f
+            } else {
+                refX = 0f; refY = 1f; refZ = 0f
+            }
+            // Right = normalize(ref × normal)
+            var rx = refY * nzZ - refZ * nzY
+            var ry = refZ * nzX - refX * nzZ
+            var rz = refX * nzY - refY * nzX
+            val rLen = kotlin.math.sqrt(rx * rx + ry * ry + rz * rz).coerceAtLeast(0.0001f)
+            rx /= rLen; ry /= rLen; rz /= rLen
+            // Up = normal × Right
+            val ux = nzY * rz - nzZ * ry
+            val uy = nzZ * rx - nzX * rz
+            val uz = nzX * ry - nzY * rx
+            // Apply random roll in tangent plane so every bullet hole looks distinct
+            val rad = Math.toRadians(imp.rollDeg.toDouble())
+            val c = cos(rad).toFloat()
+            val s = sin(rad).toFloat()
+            val bx = rx * c + ux * s; val by = ry * c + uy * s; val bz = rz * c + uz * s
+            val tx = -rx * s + ux * c; val ty = -ry * s + uy * c; val tz = -rz * s + uz * c
+
+            // Offset +0.015m along outward surface normal to eliminate z-fighting cleanly
+            tmpMat[0] = bx; tmpMat[1] = by; tmpMat[2] = bz; tmpMat[3] = 0f
+            tmpMat[4] = tx; tmpMat[5] = ty; tmpMat[6] = tz; tmpMat[7] = 0f
+            tmpMat[8] = nzX; tmpMat[9] = nzY; tmpMat[10] = nzZ; tmpMat[11] = 0f
+            tmpMat[12] = imp.x + nzX * 0.015f
+            tmpMat[13] = imp.y + nzY * 0.015f
+            tmpMat[14] = imp.z + nzZ * 0.015f
+            tmpMat[15] = 1f
+            tm.setTransform(tm.getInstance(model.rootEntity), tmpMat)
+        }
+
+        // 2. Micro-Flash Yellow Laser Bullet Tracers (local -Z spans 0..-1.0m from muzzle to impact!)
+        val tracers = gameEngine.bulletTracers
+        val tracerCount = minOf(tracers.size, bulletTracerPool.size)
+        for (i in 0 until bulletTracerPool.size) {
+            val model = bulletTracerPool[i]
+            val vis = i < tracerCount
+            FilamentSceneHelpers.setAssetVisible(scene, model, vis)
+            if (!vis) continue
+            val tr = tracers[i]
+            val dx = tr.endX - tr.startX
+            val dy = tr.endY - tr.startY
+            val dz = tr.endZ - tr.startZ
+            val len = kotlin.math.sqrt(dx * dx + dy * dy + dz * dz).coerceAtLeast(0.05f)
+            // Mesh extends along -Z, so local +Z points BACKWARD (-dir)
+            val fX = dx / len; val fY = dy / len; val fZ = dz / len
+            val zX = -fX; val zY = -fY; val zZ = -fZ
+            val refX: Float; val refY: Float; val refZ: Float
+            if (kotlin.math.abs(zY) > 0.92f) {
+                refX = 1f; refY = 0f; refZ = 0f
+            } else {
+                refX = 0f; refY = 1f; refZ = 0f
+            }
+            var rx = refY * zZ - refZ * zY
+            var ry = refZ * zX - refX * zZ
+            var rz = refX * zY - refY * zX
+            val rLen = kotlin.math.sqrt(rx * rx + ry * ry + rz * rz).coerceAtLeast(0.0001f)
+            rx /= rLen; ry /= rLen; rz /= rLen
+            val ux = zY * rz - zZ * ry
+            val uy = zZ * rx - zX * rz
+            val uz = zX * ry - zY * rx
+
+            val lifeFrac = (tr.lifeSec / tr.maxLifeSec.coerceAtLeast(0.001f)).coerceIn(0.25f, 1.0f)
+            val widthScale = 0.75f + 0.55f * lifeFrac
+            tmpMat[0] = rx * widthScale; tmpMat[1] = ry * widthScale; tmpMat[2] = rz * widthScale; tmpMat[3] = 0f
+            tmpMat[4] = ux * widthScale; tmpMat[5] = uy * widthScale; tmpMat[6] = uz * widthScale; tmpMat[7] = 0f
+            tmpMat[8] = zX * len; tmpMat[9] = zY * len; tmpMat[10] = zZ * len; tmpMat[11] = 0f
+            tmpMat[12] = tr.startX
+            tmpMat[13] = tr.startY
+            tmpMat[14] = tr.startZ
+            tmpMat[15] = 1f
+            tm.setTransform(tm.getInstance(model.rootEntity), tmpMat)
         }
     }
 

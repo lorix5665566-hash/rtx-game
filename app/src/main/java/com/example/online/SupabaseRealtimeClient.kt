@@ -48,7 +48,7 @@ class SupabaseRealtimeClient(
 
     private var heartbeatJob: Job? = null
     private var reconnectJob: Job? = null
-    private var reconnectDelayMs: Long = 1_000L
+    private var reconnectDelayMs: Long = 350L
 
     fun connect(lobbyId: String, userId: String) {
         if (lobbyId.isBlank() || !SupabaseConfig.isConfigured) return
@@ -59,7 +59,7 @@ class SupabaseRealtimeClient(
         currentLobbyId = lobbyId
         currentUserId = userId
         currentTopic = "realtime:match:$lobbyId"
-        reconnectDelayMs = 1_000L
+        reconnectDelayMs = 350L
         openSocket()
     }
 
@@ -98,7 +98,7 @@ class SupabaseRealtimeClient(
                         ws.close(1000, "Stale")
                         return
                     }
-                    reconnectDelayMs = 1_000L
+                    reconnectDelayMs = 350L
                     sendJoin(ws, currentTopic, token)
                     startHeartbeatLoop(ws)
                 }
@@ -137,7 +137,7 @@ class SupabaseRealtimeClient(
             reconnectJob?.cancel()
             reconnectJob = scope.launch {
                 delay(reconnectDelayMs)
-                reconnectDelayMs = (reconnectDelayMs * 2L).coerceAtMost(5_000L)
+                reconnectDelayMs = (reconnectDelayMs * 2L).coerceAtMost(2_500L)
                 if (!closedManually.get() && currentLobbyId != null) {
                     openSocket()
                 }
@@ -174,8 +174,8 @@ class SupabaseRealtimeClient(
         heartbeatJob?.cancel()
         heartbeatJob = scope.launch {
             while (isActive && !closedManually.get() && webSocket === ws) {
-                // Fast 3.2s Phoenix heartbeat doubles as accurate live WebSocket RTT ping meter!
-                delay(3_200L)
+                // Fast 2.0s Phoenix heartbeat doubles as crisp live WebSocket RTT ping meter
+                delay(2_000L)
                 if (webSocket !== ws || closedManually.get()) break
                 val ref = refGen.getAndIncrement().toString()
                 heartbeatSentTimes[ref] = SystemClock.elapsedRealtime()
@@ -255,6 +255,41 @@ class SupabaseRealtimeClient(
         val outerPayload = JSONObject().apply {
             put("type", "broadcast")
             put("event", "state")
+            put("payload", data)
+        }
+        val frame = JSONObject().apply {
+            put("topic", currentTopic)
+            put("event", "broadcast")
+            put("payload", outerPayload)
+            put("ref", JSONObject.NULL)
+        }
+        return ws.send(frame.toString())
+    }
+
+    /**
+     * Immediately sends a tiny, minimal-overhead PvP hit packet so hit registration arrives with minimum RTT.
+     */
+    fun sendHitEvent(
+        userId: String,
+        displayName: String,
+        team: TeamSide,
+        hit: OutgoingHitEvent
+    ): Boolean {
+        val ws = webSocket ?: return false
+        if (!isJoined) return false
+        val data = JSONObject().apply {
+            put("u", userId)
+            put("n", displayName.take(24))
+            put("t", team.name)
+            put("ht", hit.targetUid)
+            put("hd", hit.damage)
+            put("hh", hit.headshot)
+            put("hw", hit.weaponName)
+            put("hs", hit.seq)
+        }
+        val outerPayload = JSONObject().apply {
+            put("type", "broadcast")
+            put("event", "hit")
             put("payload", data)
         }
         val frame = JSONObject().apply {
@@ -359,6 +394,25 @@ class SupabaseRealtimeClient(
                 if (bq > 0) {
                     parseBombSync(data, uid)?.let(onBombSyncReceived)
                 }
+            }
+            "hit" -> {
+                val uid = data.optString("u")
+                if (uid.isBlank() || uid == currentUserId) return
+                val st = PlayerMatchState(
+                    id = uid,
+                    userId = uid,
+                    displayName = data.optString("n", "Игрок"),
+                    team = if (data.optString("t") == TeamSide.CT.name) TeamSide.CT.name else TeamSide.T.name,
+                    x = Double.NaN,
+                    y = Double.NaN,
+                    z = Double.NaN,
+                    hitTargetUid = data.optString("ht", ""),
+                    hitDamage = data.optInt("hd", 0),
+                    hitHeadshot = data.optBoolean("hh", false),
+                    hitWeapon = data.optString("hw", ""),
+                    hitSeq = data.optInt("hs", 0)
+                )
+                onRemoteStateReceived(st)
             }
             "bomb" -> {
                 val uid = data.optString("u")

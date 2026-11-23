@@ -393,17 +393,28 @@ enum class WeaponType(
     )
 }
 
+enum class AspectRatioMode(
+    val labelRu: String,
+    val subtitleRu: String
+) {
+    RATIO_16_9("16:9", "Стандартный широкоэкранный"),
+    RATIO_4_3("4:3", "Растянутый 4:3 (как в CS2)")
+}
+
 data class GraphicsSettings(
     val preset: GraphicsPreset = GraphicsPreset.ULTRA_RTX,
     val resolutionScale: Float = 1.0f,
+    val aspectRatio: AspectRatioMode = AspectRatioMode.RATIO_16_9,
     val rtxReflections: Boolean = true,
     val dynamicLighting: Boolean = true,
     val hdTextures: Boolean = true,
     val bloomAndAces: Boolean = true,
-    val fov: Float = 80f,
+    val fov: Float = 65f,
     val showFps: Boolean = true
 ) {
     companion object {
+        const val FIXED_FOV: Float = 65f
+
         fun forPreset(preset: GraphicsPreset): GraphicsSettings = when (preset) {
             GraphicsPreset.LOW -> GraphicsSettings(
                 preset = preset,
@@ -412,7 +423,7 @@ data class GraphicsSettings(
                 dynamicLighting = false,
                 hdTextures = false,
                 bloomAndAces = false,
-                fov = 76f,
+                fov = FIXED_FOV,
                 showFps = true
             )
             GraphicsPreset.MEDIUM -> GraphicsSettings(
@@ -422,7 +433,7 @@ data class GraphicsSettings(
                 dynamicLighting = true,
                 hdTextures = true,
                 bloomAndAces = false,
-                fov = 78f,
+                fov = FIXED_FOV,
                 showFps = true
             )
             GraphicsPreset.HIGH -> GraphicsSettings(
@@ -432,7 +443,7 @@ data class GraphicsSettings(
                 dynamicLighting = true,
                 hdTextures = true,
                 bloomAndAces = true,
-                fov = 80f,
+                fov = FIXED_FOV,
                 showFps = true
             )
             GraphicsPreset.ULTRA_RTX -> GraphicsSettings(
@@ -442,7 +453,7 @@ data class GraphicsSettings(
                 dynamicLighting = true,
                 hdTextures = true,
                 bloomAndAces = true,
-                fov = 80f,
+                fov = FIXED_FOV,
                 showFps = true
             )
         }

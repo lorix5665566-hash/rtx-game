@@ -18,6 +18,7 @@ import com.example.model.ScoreboardRow
 import com.example.model.TeamSide
 import com.example.model.WeaponSlot
 import com.example.model.WeaponType
+import java.util.concurrent.ConcurrentHashMap
 import kotlin.math.abs
 import kotlin.math.atan2
 import kotlin.math.cos
@@ -25,6 +26,27 @@ import kotlin.math.exp
 import kotlin.math.sin
 import kotlin.math.sqrt
 import kotlin.random.Random
+
+data class BulletImpactMark(
+    val x: Float,
+    val y: Float,
+    val z: Float,
+    val nx: Float,
+    val ny: Float,
+    val nz: Float,
+    val rollDeg: Float
+)
+
+data class BulletTracer(
+    val startX: Float,
+    val startY: Float,
+    val startZ: Float,
+    val endX: Float,
+    val endY: Float,
+    val endZ: Float,
+    var lifeSec: Float,
+    val maxLifeSec: Float
+)
 
 data class ExplosionState(
     var active: Boolean = false,
@@ -151,13 +173,14 @@ class GameEngine(
     // Match, Warmup (60s), Freeze Time (8s), Round, Economy & C4 Bomb state
     private var isWarmup: Boolean = true
     private var warmupTimer: Float = 60f
-    private var freezeTimeSec: Float = 0f
+    @Volatile private var freezeTimeSec: Float = 0f
+    @Volatile private var spawnProtectionTimer: Float = 0f
     @Volatile private var pendingSkipWarmup: Boolean = false
     private var hp: Float = 100f
     private var armor: Float = 0f
     private var hasDefuseKit: Boolean = false
     private var money: Int = 800
-    private var isPlayerDead: Boolean = false
+    @Volatile private var isPlayerDead: Boolean = false
     private var tdmRespawnTimer: Float = 0f
 
     private var ctScore: Int = 0
@@ -166,8 +189,8 @@ class GameEngine(
     private var roundTimeSec: Float = 105f
     private var buyTimeRemaining: Float = 28f
     private var roundOverTimer: Float = 0f
-    private var isRoundOver: Boolean = false
-    private var isMatchFinished: Boolean = false
+    @Volatile private var isRoundOver: Boolean = false
+    @Volatile private var isMatchFinished: Boolean = false
     private var isPlayerTeamWinner: Boolean = false
     private var matchRecorded: Boolean = false
 
@@ -206,8 +229,12 @@ class GameEngine(
     private var deathBloodTimer: Float = 0f
     private var deathRecapTimer: Float = 0f
     private var activeDeathRecap: DeathRecapInfo? = null
-    private val damageDealtByTarget = HashMap<String, Pair<Int, Int>>()
-    private val damageTakenByAttacker = HashMap<String, Pair<Int, Int>>()
+    private val damageDealtByTarget = ConcurrentHashMap<String, Pair<Int, Int>>()
+    private val damageTakenByAttacker = ConcurrentHashMap<String, Pair<Int, Int>>()
+
+    // Persistent 3D wall/floor bullet impact decals (max 48 per round) & brief yellow laser bullet tracers
+    val bulletImpacts = ArrayList<BulletImpactMark>(48)
+    val bulletTracers = ArrayList<BulletTracer>(16)
 
     // Smooth Ally Spectator camera state (read by FilamentGameplayController)
     private var deathCamDelayTimer: Float = 0f
@@ -347,93 +374,106 @@ class GameEngine(
     ) {
         val side = if (st.team == "CT") TeamSide.CT else TeamSide.T
         val wep = WeaponType.entries.firstOrNull { it.name == st.weapon } ?: WeaponType.AK47
-        val newX = st.x.toFloat()
-        val newY = st.y.toFloat()
-        val newZ = st.z.toFloat()
+        val hasTransform = !st.x.isNaN() && !st.y.isNaN() && !st.z.isNaN()
+        val newX = if (hasTransform) st.x.toFloat() else 0f
+        val newY = if (hasTransform) st.y.toFloat() else 0f
+        val newZ = if (hasTransform) st.z.toFloat() else 0f
         val newPitch = st.pitchDeg.toFloat().coerceIn(-55f, 55f)
         val existing = remotePlayersMap[st.userId]
         if (existing == null) {
-            remotePlayersMap[st.userId] = RemoteHumanPlayer(
-                userId = st.userId,
-                shortId = st.shortId,
-                displayName = st.displayName,
-                team = side,
-                x = newX,
-                y = newY,
-                z = newZ,
-                targetX = newX,
-                targetY = newY,
-                targetZ = newZ,
-                lastSyncMs = nowMs,
-                lastWsSyncMs = if (fromWebSocket) nowMs else 0L,
-                lastSeenMs = nowMs,
-                yawDeg = st.yawDeg.toFloat(),
-                targetYawDeg = st.yawDeg.toFloat(),
-                pitchDeg = newPitch,
-                targetPitchDeg = newPitch,
-                hp = st.hp,
-                isDead = st.dead,
-                deathProgress = if (st.dead) 1f else 0f,
-                isMoving = st.moving,
-                isShooting = st.shooting,
-                weapon = wep,
-                kills = st.kills,
-                deaths = st.deaths
-            )
+            if (hasTransform) {
+                remotePlayersMap[st.userId] = RemoteHumanPlayer(
+                    userId = st.userId,
+                    shortId = st.shortId,
+                    displayName = st.displayName,
+                    team = side,
+                    x = newX,
+                    y = newY,
+                    z = newZ,
+                    targetX = newX,
+                    targetY = newY,
+                    targetZ = newZ,
+                    lastSyncMs = nowMs,
+                    lastWsSyncMs = if (fromWebSocket) nowMs else 0L,
+                    lastSeenMs = nowMs,
+                    yawDeg = st.yawDeg.toFloat(),
+                    targetYawDeg = st.yawDeg.toFloat(),
+                    pitchDeg = newPitch,
+                    targetPitchDeg = newPitch,
+                    hp = st.hp,
+                    isDead = st.dead,
+                    deathProgress = if (st.dead) 1f else 0f,
+                    isMoving = st.moving,
+                    isShooting = st.shooting,
+                    weapon = wep,
+                    kills = st.kills,
+                    deaths = st.deaths
+                )
+            }
             // Baseline hitSeq on first observe so old hits aren't replayed on join
             lastProcessedHitSeq[st.userId] = st.hitSeq
         } else {
             existing.lastSeenMs = nowMs
             existing.team = side
-            existing.kills = st.kills
-            existing.deaths = st.deaths
+            if (hasTransform) {
+                existing.kills = st.kills
+                existing.deaths = st.deaths
 
-            // Guard: never let a 1.6s delayed PostgREST DB snapshot snap a player backwards over a fresh 30Hz WS packet!
-            val ignoreStaleTransform = !fromWebSocket &&
-                existing.lastWsSyncMs > 0L &&
-                (nowMs - existing.lastWsSyncMs) < 1_800L
+                // Guard: never let a 2.2s delayed PostgREST DB snapshot snap a player backwards over a fresh 50Hz WS packet!
+                val ignoreStaleTransform = !fromWebSocket &&
+                    existing.lastWsSyncMs > 0L &&
+                    (nowMs - existing.lastWsSyncMs) < 2_200L
 
-            if (!ignoreStaleTransform) {
-                val dtSync = ((nowMs - existing.lastSyncMs) / 1000f).coerceIn(0.020f, 0.45f)
-                val dx = newX - existing.targetX
-                val dy = newY - existing.targetY
-                val dz = newZ - existing.targetZ
-                val jumpDistSq = dx * dx + dz * dz
-                if (jumpDistSq > 36f) {
-                    existing.x = newX
-                    existing.y = newY
-                    existing.z = newZ
-                    existing.vx = 0f
-                    existing.vy = 0f
-                    existing.vz = 0f
-                } else if (st.moving && !st.dead) {
-                    existing.vx = (dx / dtSync).coerceIn(-7.8f, 7.8f)
-                    existing.vy = (dy / dtSync).coerceIn(-8.0f, 8.0f)
-                    existing.vz = (dz / dtSync).coerceIn(-7.8f, 7.8f)
-                } else {
-                    existing.vx = 0f
-                    existing.vy = 0f
-                    existing.vz = 0f
+                if (!ignoreStaleTransform) {
+                    val dtSync = ((nowMs - existing.lastSyncMs) / 1000f).coerceIn(0.016f, 0.40f)
+                    val dx = newX - existing.targetX
+                    val dy = newY - existing.targetY
+                    val dz = newZ - existing.targetZ
+                    val jumpDistSq = dx * dx + dz * dz
+                    if (jumpDistSq > 36f) {
+                        existing.x = newX
+                        existing.y = newY
+                        existing.z = newZ
+                        existing.vx = 0f
+                        existing.vy = 0f
+                        existing.vz = 0f
+                    } else if (st.moving && !st.dead) {
+                        existing.vx = (dx / dtSync).coerceIn(-7.8f, 7.8f)
+                        existing.vy = (dy / dtSync).coerceIn(-8.0f, 8.0f)
+                        existing.vz = (dz / dtSync).coerceIn(-7.8f, 7.8f)
+                    } else {
+                        existing.vx = 0f
+                        existing.vy = 0f
+                        existing.vz = 0f
+                    }
+                    existing.targetX = newX
+                    existing.targetY = newY
+                    existing.targetZ = newZ
+                    existing.lastSyncMs = nowMs
+                    if (fromWebSocket) existing.lastWsSyncMs = nowMs
+                    existing.targetYawDeg = st.yawDeg.toFloat()
+                    existing.targetPitchDeg = newPitch
+                    existing.hp = st.hp
+                    if (existing.isDead != st.dead) {
+                        // Reset accumulated exchange damage immediately on opponent death or respawn!
+                        damageDealtByTarget.remove(st.userId)
+                        damageTakenByAttacker.remove(st.userId)
+                    }
+                    existing.isDead = st.dead
+                    if (!st.dead) existing.deathProgress = 0f
+                    existing.isMoving = st.moving
+                    existing.isShooting = st.shooting
+                    existing.weapon = wep
                 }
-                existing.targetX = newX
-                existing.targetY = newY
-                existing.targetZ = newZ
-                existing.lastSyncMs = nowMs
-                if (fromWebSocket) existing.lastWsSyncMs = nowMs
-                existing.targetYawDeg = st.yawDeg.toFloat()
-                existing.targetPitchDeg = newPitch
-                existing.hp = st.hp
-                existing.isDead = st.dead
-                if (!st.dead) existing.deathProgress = 0f
-                existing.isMoving = st.moving
-                existing.isShooting = st.shooting
-                existing.weapon = wep
             }
 
             val prevSeq = lastProcessedHitSeq[st.userId] ?: 0
             if (st.hitSeq > prevSeq) {
                 lastProcessedHitSeq[st.userId] = st.hitSeq
-                if (st.hitTargetUid == localUid && st.hitDamage > 0 && side != matchConfig.playerSide) {
+                // Strictly drop stale hits during round-end, freeze time, death, or post-spawn grace!
+                val canReceiveHitNow = !isRoundOver && !isMatchFinished && !isPlayerDead &&
+                    freezeTimeSec <= 0f && spawnProtectionTimer <= 0f
+                if (canReceiveHitNow && st.hitTargetUid == localUid && st.hitDamage > 0 && side != matchConfig.playerSide) {
                     pendingIncomingPvpHits.addLast(
                         IncomingPvpHit(
                             attackerId = st.userId,
@@ -457,7 +497,7 @@ class GameEngine(
             }
         }
         for (hit in batch) {
-            if (!isPlayerDead && !isRoundOver && !isMatchFinished) {
+            if (!isPlayerDead && !isRoundOver && !isMatchFinished && freezeTimeSec <= 0f && spawnProtectionTimer <= 0f) {
                 applyPlayerDamage(
                     amount = hit.damage,
                     attackerSide = hit.attackerSide,
@@ -555,13 +595,13 @@ class GameEngine(
 
     private fun updateRemotePlayersInterpolation(dt: Float) {
         val nowMs = SystemClock.elapsedRealtime()
-        val posAlpha = (dt * 24f).coerceAtMost(1f)
-        val rotAlpha = (dt * 26f).coerceAtMost(1f)
+        val posAlpha = (dt * 32f).coerceAtMost(1f)
+        val rotAlpha = (dt * 34f).coerceAtMost(1f)
         synchronized(remoteLock) {
             for (rp in remotePlayersMap.values) {
-                // Tight 90ms dead-reckoning tuned for 30Hz Realtime WebSocket broadcasts
+                // Tight 65ms dead-reckoning tuned for 50Hz TCP_NODELAY Realtime WebSocket broadcasts
                 val leadSec = if (rp.isMoving && !rp.isDead) {
-                    ((nowMs - rp.lastSyncMs) / 1000f).coerceIn(0f, 0.09f)
+                    ((nowMs - rp.lastSyncMs) / 1000f).coerceIn(0f, 0.065f)
                 } else 0f
                 val predX = rp.targetX + rp.vx * leadSec
                 val predY = rp.targetY + rp.vy * leadSec * 0.35f
@@ -702,6 +742,21 @@ class GameEngine(
             }
             publishHud()
             return
+        }
+
+        // Tick active yellow bullet tracers (micro-flash ~55ms)
+        var ti = bulletTracers.size - 1
+        while (ti >= 0) {
+            val tr = bulletTracers[ti]
+            tr.lifeSec -= dt
+            if (tr.lifeSec <= 0f) {
+                bulletTracers.removeAt(ti)
+            }
+            ti--
+        }
+
+        if (spawnProtectionTimer > 0f) {
+            spawnProtectionTimer = (spawnProtectionTimer - dt).coerceAtLeast(0f)
         }
 
         if (matchConfig.isMultiplayer) {
@@ -863,10 +918,13 @@ class GameEngine(
         if (isPlayerDead) {
             tdmRespawnTimer -= dt
             if (tdmRespawnTimer <= 0f) {
+                synchronized(remoteLock) { pendingIncomingPvpHits.clear() }
                 hp = 100f
                 armor = 100f
                 money = 16000
                 isPlayerDead = false
+                damageFlashAlpha = 0f
+                spawnProtectionTimer = 1.25f
                 deathBloodTimer = 0f
                 deathRecapTimer = 0f
                 activeDeathRecap = null
@@ -901,8 +959,17 @@ class GameEngine(
         bombPlantProgress = 0f
         isBombActionHeld = false
 
+        // Flush any stale incoming PvP hits from the previous round BEFORE restoring full 100 HP!
+        synchronized(remoteLock) {
+            pendingIncomingPvpHits.clear()
+        }
+        bulletImpacts.clear()
+        bulletTracers.clear()
+
         hp = 100f
         isPlayerDead = false
+        damageFlashAlpha = 0f
+        spawnProtectionTimer = 1.25f
         tdmRespawnTimer = 0f
         deathBloodTimer = 0f
         deathRecapTimer = 0f
@@ -1817,7 +1884,8 @@ class GameEngine(
         val inv = 1f / sqrt(dirX * dirX + dirY * dirY + dirZ * dirZ).coerceAtLeast(0.0001f)
         dirX *= inv; dirY *= inv; dirZ *= inv
 
-        val wallDist = world.raycastWalls(camX, camY, camZ, dirX, dirY, dirZ, 110f)
+        val wallHit = world.raycastWallsWithNormal(camX, camY, camZ, dirX, dirY, dirZ, 110f)
+        val wallDist = wallHit.dist
 
         var hitBot: BotOperative? = null
         var hitRemote: RemoteHumanPlayer? = null
@@ -1861,6 +1929,25 @@ class GameEngine(
             }
         }
 
+        // Emit crisp micro-flash yellow bullet tracer straight from the gun muzzle tip to impact point!
+        val rightX = cos(playerYawRad)
+        val rightZ = -sin(playerYawRad)
+        val sinP = sin(playerPitchRad)
+        val upX = sin(playerYawRad) * sinP
+        val upY = cosP
+        val upZ = cos(playerYawRad) * sinP
+        val muzzleRight = (if (isAdsToggle) 0.015f else 0.145f) * (1f - adsBlend * 0.85f)
+        val muzzleDown = if (isAdsToggle) -0.055f else -0.095f
+        val muzzleFwd = (-w.muzzleOffsetZ + 0.32f).coerceIn(0.45f, 1.15f)
+        val trStartX = camX + dirX * muzzleFwd + rightX * muzzleRight + upX * muzzleDown
+        val trStartY = camY + dirY * muzzleFwd + upY * muzzleDown
+        val trStartZ = camZ + dirZ * muzzleFwd + rightZ * muzzleRight + upZ * muzzleDown
+        val tracerDist = hitDist.coerceIn(1.1f, 68f)
+        val trEndX = camX + dirX * tracerDist
+        val trEndY = camY + dirY * tracerDist
+        val trEndZ = camZ + dirZ * tracerDist
+        addBulletTracer(trStartX, trStartY, trStartZ, trEndX, trEndY, trEndZ, 0.055f)
+
         if (hitBot != null) {
             shotsHit++
             hitMarkerAlpha = 1.0f
@@ -1883,32 +1970,58 @@ class GameEngine(
                 headshot = headshot,
                 weaponName = w.shortLabel
             )
-            if (dmg >= hitRemote.hp && !isWarmup) {
-                kills++
-                if (headshot) headshots++
-                money = (money + w.killReward).coerceAtMost(16000)
-                score += if (headshot) 250 else 150
-                val hsTag = if (headshot) " [ГОЛОВА]" else ""
-                killFeedText = "ВЫ [${w.shortLabel}]$hsTag → ${hitRemote.displayName}"
-                killFeedTimer = 3.2f
+            if (dmg >= hitRemote.hp) {
+                // Opponent eliminated -> reset accumulated damage against them back to 0!
+                damageDealtByTarget.remove(hitRemote.userId)
+                damageTakenByAttacker.remove(hitRemote.userId)
+                if (!isWarmup) {
+                    kills++
+                    if (headshot) headshots++
+                    money = (money + w.killReward).coerceAtMost(16000)
+                    score += if (headshot) 250 else 150
+                    val hsTag = if (headshot) " [ГОЛОВА]" else ""
+                    killFeedText = "ВЫ [${w.shortLabel}]$hsTag → ${hitRemote.displayName}"
+                    killFeedTimer = 3.2f
+                }
             }
             if (headshot) soundEngine.playHeadshot() else soundEngine.playHitMarker()
             if (headshot && settings.audio.hapticsEnabled) onHapticPulse(true)
+        } else if (wallHit.hit) {
+            // Leave a crisp 3D bullet impact mark flush on the struck wall/crate/floor!
+            addBulletImpact(wallHit.x, wallHit.y, wallHit.z, wallHit.nx, wallHit.ny, wallHit.nz)
         }
 
         if (nextMag == 0 && (reserveAmmoMap[w] ?: 0) > 0) beginReload()
     }
 
+    private fun addBulletImpact(x: Float, y: Float, z: Float, nx: Float, ny: Float, nz: Float) {
+        if (bulletImpacts.size >= 48) {
+            bulletImpacts.removeAt(0)
+        }
+        bulletImpacts.add(BulletImpactMark(x, y, z, nx, ny, nz, rng.nextFloat() * 360f))
+    }
+
+    private fun addBulletTracer(
+        sx: Float, sy: Float, sz: Float,
+        ex: Float, ey: Float, ez: Float,
+        durationSec: Float = 0.055f
+    ) {
+        if (bulletTracers.size >= 16) {
+            bulletTracers.removeAt(0)
+        }
+        bulletTracers.add(BulletTracer(sx, sy, sz, ex, ey, ez, durationSec, durationSec))
+    }
+
     private fun recordDamageDealt(targetId: String, amount: Int) {
         if (amount <= 0) return
         val prev = damageDealtByTarget[targetId] ?: (0 to 0)
-        damageDealtByTarget[targetId] = (prev.first + amount) to (prev.second + 1)
+        damageDealtByTarget[targetId] = ((prev.first + amount).coerceAtMost(100)) to (prev.second + 1)
     }
 
     private fun recordDamageTaken(attackerId: String, amount: Int) {
         if (amount <= 0) return
         val prev = damageTakenByAttacker[attackerId] ?: (0 to 0)
-        damageTakenByAttacker[attackerId] = (prev.first + amount) to (prev.second + 1)
+        damageTakenByAttacker[attackerId] = ((prev.first + amount).coerceAtMost(100)) to (prev.second + 1)
     }
 
     private fun applyBotDamage(
@@ -1949,6 +2062,9 @@ class GameEngine(
             target.plantProgress = 0f
             target.defuseProgress = 0f
             if (!isWarmup) target.deaths++
+            // Bot eliminated -> immediately reset accumulated exchange damage for this bot to 0!
+            damageDealtByTarget.remove("bot_${target.id}")
+            damageTakenByAttacker.remove("bot_${target.id}")
             if (killerIsPlayer) {
                 if (!isWarmup) {
                     kills++
@@ -2251,7 +2367,14 @@ class GameEngine(
                     val aimAlignMult = (1f - (aimErrorDeg / 22f)).coerceIn(0.55f, 1.0f)
                     val hitChance = (distBaseAcc * targetMoveMult * botStrafeMult * aimAlignMult).coerceIn(0.12f, 0.58f)
 
-                    if (rng.nextFloat() < hitChance) {
+                    // Emit brief yellow bullet tracer from bot's gun muzzle toward target!
+                    val muzzleX = b.x + faceX * 0.55f + rightX * 0.16f
+                    val muzzleY = b.y + 1.38f
+                    val muzzleZ = b.z + faceZ * 0.55f + rightZ * 0.16f
+                    val shotHit = rng.nextFloat() < hitChance
+
+                    if (shotHit) {
+                        addBulletTracer(muzzleX, muzzleY, muzzleZ, targetX, targetY - 0.12f, targetZ, 0.055f)
                         val isHs = rng.nextFloat() < 0.12f
                         val baseDmg = when (b.weapon) {
                             WeaponType.AWP -> 58f
@@ -2279,6 +2402,17 @@ class GameEngine(
                             }
                         } else if (targetBot != null) {
                             applyBotDamage(targetBot, finalDmg * 1.35f, isHeadshot = isHs, killerIsPlayer = false, weaponUsed = b.weapon, killerBot = b)
+                        }
+                    } else {
+                        // Missed shot flies slightly wide and leaves a tracer + wall impact mark!
+                        val mdx = (targetX - muzzleX) + (rng.nextFloat() * 2f - 1f) * 0.9f
+                        val mdy = (targetY - 0.15f - muzzleY) + (rng.nextFloat() * 2f - 1f) * 0.55f
+                        val mdz = (targetZ - muzzleZ) + (rng.nextFloat() * 2f - 1f) * 0.9f
+                        val mLen = sqrt(mdx * mdx + mdy * mdy + mdz * mdz).coerceAtLeast(0.1f)
+                        val bWall = world.raycastWallsWithNormal(muzzleX, muzzleY, muzzleZ, mdx / mLen, mdy / mLen, mdz / mLen, 55f)
+                        addBulletTracer(muzzleX, muzzleY, muzzleZ, bWall.x, bWall.y, bWall.z, 0.055f)
+                        if (bWall.hit) {
+                            addBulletImpact(bWall.x, bWall.y, bWall.z, bWall.nx, bWall.ny, bWall.nz)
                         }
                     }
                 }
@@ -2484,6 +2618,9 @@ class GameEngine(
         attackerWeapon: String = "",
         isHeadshot: Boolean = false
     ) {
+        if (isPlayerDead || isRoundOver || isMatchFinished || freezeTimeSec > 0f || (!killedByBomb && spawnProtectionTimer > 0f)) {
+            return
+        }
         damageFlashAlpha = if (killedByBomb) 1.0f else 0.88f
         if (!killedByBomb) soundEngine.playDamage()
         if (settings.audio.hapticsEnabled) onHapticPulse(true)
@@ -2515,24 +2652,27 @@ class GameEngine(
             }
             killFeedTimer = 4.0f
 
-            // Bloodied death screen for ~3.8s + Killer & Damage Exchange Recap Card for ~6.0s!
+            // Bloodied death screen for ~3.8s + Killer & Damage Exchange Recap Card for ~6.0s (strictly capped at 100!)
             deathBloodTimer = 3.8f
             deathRecapTimer = 6.0f
             deathCamDelayTimer = 1.65f
             spectateCamInitialized = false
             val dealt = damageDealtByTarget[key] ?: (0 to 0)
-            val taken = damageTakenByAttacker[key] ?: (actualLoss.toInt().coerceAtLeast(1) to 1)
+            val taken = damageTakenByAttacker[key] ?: (actualLoss.toInt().coerceIn(1, 100) to 1)
             activeDeathRecap = DeathRecapInfo(
                 killerName = displayKiller,
                 killerWeapon = attackerWeapon,
                 killerTeam = attackerSide,
                 wasHeadshot = isHeadshot,
                 killedByBomb = killedByBomb,
-                damageGiven = dealt.first,
+                damageGiven = dealt.first.coerceIn(0, 100),
                 hitsGiven = dealt.second,
-                damageTaken = taken.first,
+                damageTaken = taken.first.coerceIn(0, 100),
                 hitsTaken = taken.second
             )
+            // Immediately reset all damage accumulators to 0 upon death so future fights never carry over old numbers!
+            damageDealtByTarget.clear()
+            damageTakenByAttacker.clear()
 
             if (!isWarmup && playerHasBomb && bombState == BombState.CARRIED) {
                 playerHasBomb = false
@@ -2700,9 +2840,12 @@ class GameEngine(
         if (isPlayerDead) {
             tdmRespawnTimer -= dt
             if (tdmRespawnTimer <= 0f) {
+                synchronized(remoteLock) { pendingIncomingPvpHits.clear() }
                 hp = 100f
                 armor = 100f
                 isPlayerDead = false
+                damageFlashAlpha = 0f
+                spawnProtectionTimer = 1.25f
                 deathBloodTimer = 0f
                 deathRecapTimer = 0f
                 activeDeathRecap = null
@@ -2739,6 +2882,8 @@ class GameEngine(
         b.losLostGraceTimer = 0f
         b.lastTargetKey = -1
         b.alertTimer = 0f
+        damageDealtByTarget.remove("bot_${b.id}")
+        damageTakenByAttacker.remove("bot_${b.id}")
     }
 
     private fun finishMatch() {
@@ -2807,14 +2952,49 @@ class GameEngine(
 
         val remotes = if (matchConfig.isMultiplayer) getRemotePlayersSnapshot() else emptyList()
         val blips = ArrayList<RadarBlip>(bots.size + remotes.size + 1)
+        val eyeX = playerX
+        val eyeY = playerY + eyeHeight
+        val eyeZ = playerZ
+        val cosP = cos(playerPitchRad)
+        val camFwdX = -sin(playerYawRad) * cosP
+        val camFwdY = sin(playerPitchRad)
+        val camFwdZ = -cos(playerYawRad) * cosP
+
+        // Fair CS2 Radar (NO wallhack!): allies & planted C4 are always shown; enemies appear ONLY when directly seen!
+        fun isEnemyInDirectSight(ex: Float, ey: Float, ez: Float): Boolean {
+            if (isPlayerDead) return false
+            val dx = ex - eyeX
+            val dyChest = (ey + 1.24f) - eyeY
+            val dz = ez - eyeZ
+            val dist = sqrt(dx * dx + dyChest * dyChest + dz * dz)
+            if (dist < 0.05f || dist > 56f) return false
+            val inv = 1f / dist
+            val dot = (dx * camFwdX + dyChest * camFwdY + dz * camFwdZ) * inv
+            // Strictly inside forward camera view cone (~56° half-angle) so enemies behind walls/back never appear
+            if (dot < 0.56f) return false
+            val wtChest = world.raycastWalls(eyeX, eyeY, eyeZ, dx * inv, dyChest * inv, dz * inv, dist)
+            if (wtChest >= dist - 0.65f) return true
+            // Also check peeking head height over low cover/crates
+            val dyHead = (ey + 1.58f) - eyeY
+            val distH = sqrt(dx * dx + dyHead * dyHead + dz * dz).coerceAtLeast(0.05f)
+            val wtHead = world.raycastWalls(eyeX, eyeY, eyeZ, dx / distH, dyHead / distH, dz / distH, distH)
+            return wtHead >= distH - 0.65f
+        }
+
         for (b in bots) {
             if (!b.isDead) {
-                blips.add(RadarBlip(b.x - playerX, b.z - playerZ, isAlly = b.team == matchConfig.playerSide))
+                val ally = b.team == matchConfig.playerSide
+                if (ally || isEnemyInDirectSight(b.x, b.y, b.z)) {
+                    blips.add(RadarBlip(b.x - playerX, b.z - playerZ, isAlly = ally))
+                }
             }
         }
         for (rp in remotes) {
             if (!rp.isDead) {
-                blips.add(RadarBlip(rp.x - playerX, rp.z - playerZ, isAlly = rp.team == matchConfig.playerSide))
+                val ally = rp.team == matchConfig.playerSide
+                if (ally || isEnemyInDirectSight(rp.x, rp.y, rp.z)) {
+                    blips.add(RadarBlip(rp.x - playerX, rp.z - playerZ, isAlly = ally))
+                }
             }
         }
         if (bombState == BombState.PLANTED) {

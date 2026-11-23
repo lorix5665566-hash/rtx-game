@@ -61,6 +61,7 @@ import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import com.example.model.AspectRatioMode
 import com.example.model.AudioSettings
 import com.example.model.GameSettings
 import com.example.model.GraphicsPreset
@@ -273,7 +274,8 @@ private fun GraphicsSettingsSection(
     SettingsCard(title = "ТОНКАЯ НАСТРОЙКА ГРАФИКИ & PBR") {
         Row(
             modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.spacedBy(18.dp)
+            horizontalArrangement = Arrangement.spacedBy(18.dp),
+            verticalAlignment = Alignment.CenterVertically
         ) {
             Box(modifier = Modifier.weight(1f)) {
                 SettingsSliderRow(
@@ -284,13 +286,64 @@ private fun GraphicsSettingsSection(
                     onValueChange = { onUpdate(graphics.copy(resolutionScale = it)) }
                 )
             }
-            Box(modifier = Modifier.weight(1f)) {
-                SettingsSliderRow(
-                    label = "Угол обзора (FOV)",
-                    valueText = "${graphics.fov.roundToInt()}°",
-                    value = graphics.fov,
-                    valueRange = 65f..105f,
-                    onValueChange = { onUpdate(graphics.copy(fov = it)) }
+            Column(
+                modifier = Modifier.weight(1f),
+                verticalArrangement = Arrangement.spacedBy(6.dp)
+            ) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        text = "Формат экрана",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = TextPrimary
+                    )
+                    Text(
+                        text = graphics.aspectRatio.labelRu,
+                        style = MaterialTheme.typography.labelLarge,
+                        color = RtxEmerald
+                    )
+                }
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    AspectRatioMode.entries.forEach { mode ->
+                        val selected = graphics.aspectRatio == mode
+                        val accent = if (mode == AspectRatioMode.RATIO_4_3) TacticalAmber else RtxEmerald
+                        val shape = CutCornerShape(topStart = 8.dp, bottomEnd = 8.dp)
+                        Box(
+                            modifier = Modifier
+                                .weight(1f)
+                                .clip(shape)
+                                .background(if (selected) accent.copy(alpha = 0.22f) else ElevatedGunmetal)
+                                .border(
+                                    width = if (selected) 1.5.dp else 1.dp,
+                                    color = if (selected) accent else BorderSteel,
+                                    shape = shape
+                                )
+                                .clickable { onUpdate(graphics.copy(aspectRatio = mode)) }
+                                .padding(vertical = 10.dp, horizontal = 8.dp)
+                                .testTag("aspect_${mode.name.lowercase()}"),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Text(
+                                text = mode.labelRu,
+                                style = MaterialTheme.typography.labelLarge,
+                                color = if (selected) accent else TextPrimary,
+                                maxLines = 1
+                            )
+                        }
+                    }
+                }
+                Text(
+                    text = graphics.aspectRatio.subtitleRu,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = TextSecondary,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
                 )
             }
         }

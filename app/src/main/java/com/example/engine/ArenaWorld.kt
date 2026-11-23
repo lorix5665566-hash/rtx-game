@@ -1007,6 +1007,97 @@ class ArenaWorld(
         return maxDist
     }
 
+    data class WallHitResult(
+        val hit: Boolean,
+        val dist: Float,
+        val x: Float,
+        val y: Float,
+        val z: Float,
+        val nx: Float,
+        val ny: Float,
+        val nz: Float
+    )
+
+    /**
+     * Precise bullet-impact raycast returning exact hit position + outward surface normal
+     * (refined via binary search so bullet hole decals sit flush on walls, crates, and floors).
+     */
+    fun raycastWallsWithNormal(
+        ox: Float, oy: Float, oz: Float,
+        dx: Float, dy: Float, dz: Float,
+        maxDist: Float
+    ): WallHitResult {
+        if (floorLayers.isEmpty()) {
+            return WallHitResult(false, maxDist, ox + dx * maxDist, oy + dy * maxDist, oz + dz * maxDist, -dx, -dy, -dz)
+        }
+        var dist = 0.30f
+        var prevDist = 0.25f
+        val step = 0.20f
+        val maxBound = gridMin + gridSpan
+        while (dist < maxDist) {
+            val px = ox + dx * dist
+            val py = oy + dy * dist
+            val pz = oz + dz * dist
+            if (px < gridMin || px > maxBound || pz < gridMin || pz > maxBound) {
+                return WallHitResult(false, dist, px, py, pz, -dx, -dy, -dz)
+            }
+            val hitWall = hasWallAt(px, pz, py, py)
+            val floorH = if (!hitWall) sampleNearestFloorHeight(px, pz, py, maxStepUp = 0.45f, maxDrop = 0.65f) else null
+            val hitFloor = !hitWall && floorH != null && py < floorH - 0.02f
+            if (hitWall || hitFloor) {
+                // Binary search 5 iterations to pinpoint exact surface contact
+                var lo = prevDist
+                var hi = dist
+                for (iter in 0 until 5) {
+                    val mid = (lo + hi) * 0.5f
+                    val mx = ox + dx * mid
+                    val my = oy + dy * mid
+                    val mz = oz + dz * mid
+                    val solid = if (hitWall) {
+                        hasWallAt(mx, mz, my, my)
+                    } else {
+                        val fh = sampleNearestFloorHeight(mx, mz, my, maxStepUp = 0.45f, maxDrop = 0.65f)
+                        fh != null && my < fh - 0.02f
+                    }
+                    if (solid) hi = mid else lo = mid
+                }
+                val hitDist = lo
+                val hx = ox + dx * hitDist
+                val hy = oy + dy * hitDist
+                val hz = oz + dz * hitDist
+                if (hitFloor) {
+                    val surfaceY = sampleNearestFloorHeight(hx, hz, hy, maxStepUp = 0.55f, maxDrop = 0.55f) ?: hy
+                    return WallHitResult(true, hitDist, hx, surfaceY, hz, 0f, 1f, 0f)
+                }
+                // Estimate outward horizontal wall normal by probing adjacent wall-bitmask cells
+                val probe = 0.24f
+                val solidPosX = hasWallAt(hx + probe, hz, hy, hy)
+                val solidNegX = hasWallAt(hx - probe, hz, hy, hy)
+                val solidPosZ = hasWallAt(hx, hz + probe, hy, hy)
+                val solidNegZ = hasWallAt(hx, hz - probe, hy, hy)
+                var nx = (if (solidNegX) 1f else 0f) - (if (solidPosX) 1f else 0f)
+                var nz = (if (solidNegZ) 1f else 0f) - (if (solidPosZ) 1f else 0f)
+                // If probing was symmetric (e.g. thin wall or corner), align with dominant incoming ray axis
+                if (nx == 0f && nz == 0f) {
+                    if (abs(dx) >= abs(dz)) {
+                        nx = if (dx > 0f) -1f else 1f
+                    } else {
+                        nz = if (dz > 0f) -1f else 1f
+                    }
+                }
+                // Guarantee normal points back toward the shooter
+                if (nx * dx + nz * dz > 0f) {
+                    nx = -nx; nz = -nz
+                }
+                val nLen = sqrt(nx * nx + nz * nz).coerceAtLeast(0.001f)
+                return WallHitResult(true, hitDist, hx, hy, hz, nx / nLen, 0f, nz / nLen)
+            }
+            prevDist = dist
+            dist += step
+        }
+        return WallHitResult(false, maxDist, ox + dx * maxDist, oy + dy * maxDist, oz + dz * maxDist, -dx, -dy, -dz)
+    }
+
     fun getCalloutName(x: Float, z: Float): String {
         return when (mapId) {
             ArenaMapId.MIRAGE -> when {

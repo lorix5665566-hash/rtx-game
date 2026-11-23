@@ -13,8 +13,8 @@ android {
     applicationId = "com.aistudio.vanguardrtx.kxmpzq"
     minSdk = 24
     targetSdk = 36
-    versionCode = 3
-    versionName = "0.03beta"
+    versionCode = 4
+    versionName = "0.04beta"
 
     testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
   }

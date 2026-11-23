@@ -135,14 +135,15 @@ class GameViewModel(application: Application) : AndroidViewModel(application) {
     fun applyGraphicsPreset(preset: GraphicsPreset) {
         val current = _settings.value.graphics
         val next = GraphicsSettings.forPreset(preset).copy(
-            fov = current.fov,
+            aspectRatio = current.aspectRatio,
+            fov = GraphicsSettings.FIXED_FOV,
             showFps = current.showFps
         )
         updateGraphics(next)
     }
 
     fun updateGraphics(graphics: GraphicsSettings) {
-        updateSettings { it.copy(graphics = graphics) }
+        updateSettings { it.copy(graphics = graphics.copy(fov = GraphicsSettings.FIXED_FOV)) }
     }
 
     fun updateSensitivity(sensitivity: SensitivitySettings) {
