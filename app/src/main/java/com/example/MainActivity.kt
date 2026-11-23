@@ -151,10 +151,21 @@ fun VanguardRtxApp(
                 if (vm.engine.matchConfig.isMultiplayer) {
                     vm.engine.enqueueRemoteBombSync(ev)
                 }
+            },
+            onMatchSync = { ev ->
+                if (vm.engine.matchConfig.isMultiplayer) {
+                    vm.engine.enqueueRemoteMatchSync(ev)
+                }
             }
         )
+        vm.engine.onTeamChanged = { side ->
+            if (vm.engine.matchConfig.isMultiplayer) {
+                onlineVm.switchMyTeam(side)
+            }
+        }
         onDispose {
-            onlineVm.attachDirectMatchSinks(null, null)
+            onlineVm.attachDirectMatchSinks(null, null, null)
+            vm.engine.onTeamChanged = null
         }
     }
 
@@ -201,6 +212,7 @@ fun VanguardRtxApp(
                 isMultiplayer = true,
                 lobbyId = lobby.id,
                 allowBots = lobby.allowBots,
+                isMatchHost = lobby.hostUid == currentUserId,
                 localUserId = currentUserId,
                 localDisplayName = playerProfile?.displayName ?: session.loginName,
                 localShortId = playerProfile?.shortId ?: ""
@@ -289,7 +301,6 @@ fun VanguardRtxApp(
                         memberStates = lobbyMemberStates,
                         friends = friendsList,
                         statusBanner = statusBanner,
-                        onSwitchTeam = onlineVm::switchMyTeam,
                         onUpdateConfig = onlineVm::updateActiveLobbyConfig,
                         onInviteFriend = onlineVm::inviteFriendToActiveLobby,
                         onStartMatch = onlineVm::startActiveLobbyMatch,
@@ -317,6 +328,7 @@ fun VanguardRtxApp(
                 pingMs = pingMs,
                 onPublishLiveState = onlineVm::publishMatchTick,
                 onPublishBombSync = onlineVm::publishBombSync,
+                onPublishMatchSync = onlineVm::publishMatchSync,
                 onSetPaused = vm::setPaused,
                 onRestart = vm::restartMatch,
                 onOpenSettings = { vm.openSettings(fromGame = true) },

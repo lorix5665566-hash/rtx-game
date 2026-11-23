@@ -6,6 +6,7 @@ import androidx.lifecycle.viewModelScope
 import com.example.model.ArenaMapId
 import com.example.model.BombSyncEvent
 import com.example.model.GameMode
+import com.example.model.MatchSyncEvent
 import com.example.model.OutgoingHitEvent
 import com.example.model.TeamSide
 import com.example.online.FriendEntry
@@ -89,6 +90,7 @@ class OnlineViewModel(
     // Direct zero-latency listeners invoked straight from the WebSocket thread into GameEngine!
     @Volatile private var directRemoteStateSink: ((PlayerMatchState) -> Unit)? = null
     @Volatile private var directBombSyncSink: ((BombSyncEvent) -> Unit)? = null
+    @Volatile private var directMatchSyncSink: ((MatchSyncEvent) -> Unit)? = null
     @Volatile private var lastDbMirrorMs: Long = 0L
 
     private val realtimeClient = SupabaseRealtimeClient(
@@ -98,6 +100,9 @@ class OnlineViewModel(
         },
         onBombSyncReceived = { bombEvent ->
             directBombSyncSink?.invoke(bombEvent)
+        },
+        onMatchSyncReceived = { matchEvent ->
+            directMatchSyncSink?.invoke(matchEvent)
         },
         onPingMeasured = { rttMs ->
             recordRtt(rttMs)
@@ -112,10 +117,12 @@ class OnlineViewModel(
 
     fun attachDirectMatchSinks(
         onRemoteState: ((PlayerMatchState) -> Unit)?,
-        onBombSync: ((BombSyncEvent) -> Unit)?
+        onBombSync: ((BombSyncEvent) -> Unit)?,
+        onMatchSync: ((MatchSyncEvent) -> Unit)? = null
     ) {
         directRemoteStateSink = onRemoteState
         directBombSyncSink = onBombSync
+        directMatchSyncSink = onMatchSync
     }
 
     init {
@@ -430,6 +437,11 @@ class OnlineViewModel(
         realtimeClient.sendBombEvent(event)
     }
 
+    fun publishMatchSync(lobbyId: String, event: MatchSyncEvent) {
+        if (lobbyId.isBlank()) return
+        realtimeClient.sendMatchEvent(event)
+    }
+
     fun publishMatchTick(
         lobbyId: String,
         team: TeamSide,
@@ -446,7 +458,8 @@ class OnlineViewModel(
         kills: Int,
         deaths: Int,
         outgoingHit: OutgoingHitEvent?,
-        bombSync: BombSyncEvent? = null
+        bombSync: BombSyncEvent? = null,
+        matchSync: MatchSyncEvent? = null
     ) {
         if (lobbyId.isBlank()) return
         val displayName = currentProfileOrNull()?.displayName ?: initialLoginName
@@ -477,7 +490,8 @@ class OnlineViewModel(
             kills = kills,
             deaths = deaths,
             outgoingHit = outgoingHit,
-            bombSync = bombSync
+            bombSync = bombSync,
+            matchSync = matchSync
         )
 
         // 2. Database mirror: immediate ONLY if WebSocket failed; otherwise lightweight 2.2s mirror

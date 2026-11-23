@@ -75,7 +75,6 @@ fun MultiplayerLobbyScreen(
     memberStates: List<PlayerMatchState>,
     friends: List<FriendEntry>,
     statusBanner: String?,
-    onSwitchTeam: (TeamSide) -> Unit,
     onUpdateConfig: (ArenaMapId, GameMode, Int, Boolean) -> Unit,
     onInviteFriend: (FriendEntry) -> Unit,
     onStartMatch: () -> Unit,
@@ -87,9 +86,6 @@ fun MultiplayerLobbyScreen(
     val isHost = lobby.hostUid == currentUserId
     val map = ArenaMapId.entries.firstOrNull { it.name == lobby.mapId } ?: ArenaMapId.MIRAGE
     val mode = GameMode.entries.firstOrNull { it.name == lobby.mode } ?: GameMode.BOMB_DEFUSAL
-    val tPlayers = memberStates.filter { it.team == TeamSide.T.name }
-    val ctPlayers = memberStates.filter { it.team == TeamSide.CT.name }
-    val myTeam = memberStates.firstOrNull { it.userId == currentUserId }?.team ?: TeamSide.T.name
 
     var showInvitePanel by remember { mutableStateOf(false) }
 
@@ -218,37 +214,19 @@ fun MultiplayerLobbyScreen(
                 )
             }
 
-            // Main Row: Team T | Team CT | Friends Quick-Invite Panel OR Host Settings
+            // Main Row: Unified Lobby Roster | Friends Quick-Invite Panel OR Host Settings
             Row(
                 modifier = Modifier
                     .weight(1f)
                     .fillMaxWidth(),
                 horizontalArrangement = Arrangement.spacedBy(m.s(10f))
             ) {
-                TeamRosterPanel(
-                    title = "ТЕРРОРИСТЫ (T)",
-                    accent = TacticalAmber,
-                    players = tPlayers,
+                UnifiedLobbyRosterPanel(
+                    players = memberStates,
                     hostUid = lobby.hostUid,
                     currentUserId = currentUserId,
                     allowBots = lobby.allowBots,
-                    isMyTeam = myTeam == TeamSide.T.name,
-                    onJoinTeam = { onSwitchTeam(TeamSide.T) },
-                    modifier = Modifier.weight(1f).fillMaxHeight(),
-                    tag = "lobby_join_team_t"
-                )
-
-                TeamRosterPanel(
-                    title = "СПЕЦНАЗ (CT)",
-                    accent = IceCyan,
-                    players = ctPlayers,
-                    hostUid = lobby.hostUid,
-                    currentUserId = currentUserId,
-                    allowBots = lobby.allowBots,
-                    isMyTeam = myTeam == TeamSide.CT.name,
-                    onJoinTeam = { onSwitchTeam(TeamSide.CT) },
-                    modifier = Modifier.weight(1f).fillMaxHeight(),
-                    tag = "lobby_join_team_ct"
+                    modifier = Modifier.weight(1.35f).fillMaxHeight()
                 )
 
                 // Right Column: Friends Quick-Invite OR Host Match Settings
@@ -435,23 +413,18 @@ fun MultiplayerLobbyScreen(
 }
 
 @Composable
-private fun TeamRosterPanel(
-    title: String,
-    accent: Color,
+private fun UnifiedLobbyRosterPanel(
     players: List<PlayerMatchState>,
     hostUid: String,
     currentUserId: String,
     allowBots: Boolean,
-    isMyTeam: Boolean,
-    onJoinTeam: () -> Unit,
-    modifier: Modifier = Modifier,
-    tag: String
+    modifier: Modifier = Modifier
 ) {
     val m = LocalUiMetrics.current
     Surface(
         color = Color(0xD90E1522),
         shape = RoundedCornerShape(m.s(10f)),
-        border = BorderStroke(if (isMyTeam) 1.5.dp else 1.dp, if (isMyTeam) accent else BorderSteel),
+        border = BorderStroke(1.2.dp, RtxEmerald.copy(alpha = 0.55f)),
         modifier = modifier
     ) {
         Column(
@@ -467,13 +440,13 @@ private fun TeamRosterPanel(
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     Text(
-                        text = title,
+                        text = "УЧАСТНИКИ ЛОББИ",
                         fontSize = m.sp(11.5f),
                         fontWeight = FontWeight.Black,
-                        color = accent
+                        color = RtxEmerald
                     )
                     Text(
-                        text = "${players.size}/5",
+                        text = "${players.size}/10",
                         fontSize = m.sp(10.5f),
                         fontWeight = FontWeight.Bold,
                         color = TextSecondary
@@ -487,13 +460,14 @@ private fun TeamRosterPanel(
                     items(players, key = { it.userId }) { p ->
                         val isMe = p.userId == currentUserId
                         val isHostMember = p.userId == hostUid
+                        val accent = if (isMe) RtxEmerald else IceCyan
                         Row(
                             modifier = Modifier
                                 .fillMaxWidth()
                                 .clip(RoundedCornerShape(m.s(7f)))
-                                .background(if (isMe) accent.copy(alpha = 0.20f) else ElevatedGunmetal.copy(alpha = 0.72f))
-                                .border(1.dp, if (isMe) accent else BorderSteel, RoundedCornerShape(m.s(7f)))
-                                .padding(horizontal = m.s(8f), vertical = m.s(6f)),
+                                .background(if (isMe) RtxEmerald.copy(alpha = 0.16f) else ElevatedGunmetal.copy(alpha = 0.72f))
+                                .border(1.dp, if (isMe) RtxEmerald else BorderSteel, RoundedCornerShape(m.s(7f)))
+                                .padding(horizontal = m.s(9f), vertical = m.s(6f)),
                             verticalAlignment = Alignment.CenterVertically,
                             horizontalArrangement = Arrangement.SpaceBetween
                         ) {
@@ -516,11 +490,10 @@ private fun TeamRosterPanel(
                                         maxLines = 1,
                                         overflow = TextOverflow.Ellipsis
                                     )
-                                    // Unique 6-digit Player ID shown strictly for real human players
                                     Text(
                                         text = "ID: ${p.shortId}",
                                         fontSize = m.sp(9.5f),
-                                        color = accent,
+                                        color = TacticalAmber,
                                         fontWeight = FontWeight.SemiBold
                                     )
                                 }
@@ -534,9 +507,8 @@ private fun TeamRosterPanel(
                         }
                     }
 
-                    // Bot slots shown ONLY when host enabled bots (bots NEVER have a Player ID)
-                    if (allowBots && players.size < 5) {
-                        val botsCount = (5 - players.size).coerceAtLeast(0)
+                    if (allowBots && players.size < 10) {
+                        val botsCount = (10 - players.size).coerceAtLeast(0)
                         items(botsCount) { idx ->
                             Row(
                                 modifier = Modifier
@@ -560,23 +532,20 @@ private fun TeamRosterPanel(
                 }
             }
 
-            Button(
-                onClick = onJoinTeam,
-                enabled = !isMyTeam && players.size < 5,
-                shape = RoundedCornerShape(m.s(7f)),
-                colors = ButtonDefaults.buttonColors(
-                    containerColor = if (isMyTeam) accent.copy(alpha = 0.25f) else accent,
-                    contentColor = if (isMyTeam) accent else ObsidianVoid
-                ),
+            Box(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .height(m.s(38f).coerceAtLeast(48.dp))
-                    .testTag(tag)
+                    .clip(RoundedCornerShape(m.s(7f)))
+                    .background(IceCyan.copy(alpha = 0.12f))
+                    .border(1.dp, IceCyan.copy(alpha = 0.40f), RoundedCornerShape(m.s(7f)))
+                    .padding(horizontal = m.s(10f), vertical = m.s(7f)),
+                contentAlignment = Alignment.Center
             ) {
                 Text(
-                    text = if (isMyTeam) "ВАША КОМАНДА" else "ПЕРЕЙТИ ЗА ${if (accent == TacticalAmber) "T" else "CT"}",
-                    fontSize = m.sp(10.5f),
-                    fontWeight = FontWeight.Black
+                    text = "ВЫБОР КОМАНДЫ (CT / T) ОТКРОЕТСЯ В НАЧАЛЕ МАТЧА",
+                    fontSize = m.sp(9.6f),
+                    fontWeight = FontWeight.Bold,
+                    color = IceCyan
                 )
             }
         }

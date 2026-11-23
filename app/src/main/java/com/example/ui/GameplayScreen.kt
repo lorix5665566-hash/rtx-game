@@ -99,11 +99,14 @@ import com.example.model.ControlWidgetId
 import com.example.model.GameMode
 import com.example.model.GameSettings
 import com.example.model.HudSnapshot
+import com.example.model.KillFeedEntry
+import com.example.model.MatchSyncEvent
 import com.example.model.ModelAssetRegistry
 import com.example.model.TeamSide
 import com.example.model.WeaponCategory
 import com.example.model.WeaponSlot
 import com.example.model.WeaponType
+import androidx.compose.ui.text.style.TextOverflow
 import com.example.ui.theme.BorderSteel
 import com.example.ui.theme.ElevatedGunmetal
 import com.example.ui.theme.IceCyan
@@ -148,9 +151,11 @@ fun GameplayScreen(
         kills: Int,
         deaths: Int,
         outgoingHit: com.example.model.OutgoingHitEvent?,
-        bombSync: com.example.model.BombSyncEvent?
+        bombSync: com.example.model.BombSyncEvent?,
+        matchSync: MatchSyncEvent?
     ) -> Unit,
     onPublishBombSync: (lobbyId: String, event: com.example.model.BombSyncEvent) -> Unit = { _, _ -> },
+    onPublishMatchSync: (lobbyId: String, event: MatchSyncEvent) -> Unit = { _, _ -> },
     onSetPaused: (Boolean) -> Unit,
     onRestart: () -> Unit,
     onOpenSettings: () -> Unit,
@@ -192,6 +197,7 @@ fun GameplayScreen(
         if (!engine.matchConfig.isMultiplayer || lobbyId.isNullOrBlank()) return@LaunchedEffect
         var lastSentHitSeq = 0
         var lastSentBombSeq = 0
+        var lastSentMatchSeq = 0
         var lastSentWeapon = ""
         var lastSentDead = false
         var lastSentShooting = false
@@ -201,9 +207,11 @@ fun GameplayScreen(
             val snap = engine.latestHud
             val hit = engine.lastOutgoingHit
             val bombEv = engine.latestBombSync
+            val matchEv = engine.latestMatchSync
             val shootingNow = engine.muzzleFlashTimer > 0.05f
             val hasNewHit = hit != null && hit.seq > lastSentHitSeq
             val hasNewBomb = bombEv != null && bombEv.seq > lastSentBombSeq
+            val hasNewMatch = matchEv != null && matchEv.seq > lastSentMatchSeq
             val weaponChanged = snap.activeWeapon.name != lastSentWeapon
             val deadChanged = snap.isPlayerDead != lastSentDead
             val shotStarted = shootingNow && !lastSentShooting
@@ -213,8 +221,12 @@ fun GameplayScreen(
                 lastSentBombSeq = bombEv.seq
                 onPublishBombSync(lobbyId, bombEv)
             }
+            if (hasNewMatch && matchEv != null) {
+                lastSentMatchSeq = matchEv.seq
+                onPublishMatchSync(lobbyId, matchEv)
+            }
 
-            if (hasNewHit || hasNewBomb || weaponChanged || deadChanged || shotStarted || timeElapsed) {
+            if (hasNewHit || hasNewBomb || hasNewMatch || weaponChanged || deadChanged || shotStarted || timeElapsed) {
                 val hitToSend = if (hasNewHit && hit != null) {
                     lastSentHitSeq = hit.seq
                     hit
@@ -239,7 +251,8 @@ fun GameplayScreen(
                     snap.kills,
                     snap.deaths,
                     hitToSend,
-                    engine.latestBombSync
+                    engine.latestBombSync,
+                    engine.latestMatchSync
                 )
             }
             delay(8L)
@@ -320,7 +333,7 @@ fun GameplayScreen(
         )
 
         // 2. Full-screen Aim Touch Layer (Raw Manual Aim — NO Aim Assist)
-        if (!isPaused && !hud.isMatchFinished && !isShopOpen && !isScoreboardOpen) {
+        if (!isPaused && !hud.isMatchFinished && !isShopOpen && !isScoreboardOpen && !hud.awaitingTeamSelection) {
             Box(
                 modifier = Modifier
                     .fillMaxSize()
@@ -371,19 +384,19 @@ fun GameplayScreen(
         }
 
         // 5. AWP 4x Optical Scope Overlay OR Dynamic Precision Crosshair
-        val showSniperScope = hud.activeWeapon.hasSniperScope && hud.adsBlend > 0.55f && !hud.isPlayerDead
+        val showSniperScope = hud.activeWeapon.hasSniperScope && hud.adsBlend > 0.55f && !hud.isPlayerDead && !hud.awaitingTeamSelection
         if (showSniperScope) {
             SniperScopeOverlay(
                 hitMarkerAlpha = hud.hitMarkerAlpha,
-                isHeadshot = hud.isHeadshotHit
+                isKill = hud.isKillHit
             )
-        } else if (!hud.isPlayerDead && !hud.isMatchFinished) {
+        } else if (!hud.isPlayerDead && !hud.isMatchFinished && !hud.awaitingTeamSelection) {
             TacticalCrosshair(
                 spread = hud.crosshairSpread,
                 isAds = hud.isAds,
                 isKnifeOrBomb = hud.activeWeapon == WeaponType.KNIFE || hud.activeWeapon == WeaponType.C4_BOMB,
                 hitMarkerAlpha = hud.hitMarkerAlpha,
-                isHeadshot = hud.isHeadshotHit
+                isKill = hud.isKillHit
             )
         }
 
@@ -677,31 +690,35 @@ fun GameplayScreen(
                 }
             }
 
-            AnimatedVisibility(
-                visible = hud.killFeedText.isNotEmpty(),
-                enter = fadeIn(tween(180)) + expandVertically(),
-                exit = fadeOut(tween(220)) + shrinkVertically()
-            ) {
-                Surface(
-                    color = Color(0xAD14090C),
-                    shape = RoundedCornerShape(m.s(5f)),
-                    border = BorderStroke(1.dp, ThreatCrimson.copy(alpha = 0.50f))
-                ) {
-                    Text(
-                        text = hud.killFeedText,
-                        fontSize = m.sp(9.5f),
-                        color = TextPrimary,
-                        modifier = Modifier.padding(horizontal = m.s(9f), vertical = m.s(2f))
-                    )
-                }
-            }
+        }
+
+        // 7b. Non-Clickable (Touch-Transparent) Movable Killfeed Table Widget
+        val kfCfg = settings.controlLayout.get(ControlWidgetId.KILLFEED)
+        if (kfCfg.visible && hud.killFeedEntries.isNotEmpty() && !hud.awaitingTeamSelection && !hud.isMatchFinished) {
+            val kfWidthDp = widgetBaseWidthDp(ControlWidgetId.KILLFEED) * kfCfg.scale * m.scale
+            val kfHeightDp = widgetBaseHeightDp(ControlWidgetId.KILLFEED) * kfCfg.scale * m.scale
+            val kfWidthPx = with(density) { kfWidthDp.toPx() }
+            val kfHeightPx = with(density) { kfHeightDp.toPx() }
+            KillFeedTableWidget(
+                entries = hud.killFeedEntries,
+                widthDp = kfWidthDp,
+                opacity = kfCfg.opacity,
+                modifier = Modifier
+                    .offset {
+                        IntOffset(
+                            (kfCfg.xFraction * screenWidthPx - kfWidthPx * 0.5f).roundToInt(),
+                            (kfCfg.yFraction * screenHeightPx - kfHeightPx * 0.5f).roundToInt()
+                        )
+                    }
+                    .testTag("hud_killfeed")
+            )
         }
 
         // 8. Bottom-Center Compact Vitals Strip (Smooth animated HP + Armor + Defuse Kit)
         val smoothHp by animateIntAsState(targetValue = hud.hp, animationSpec = tween(180), label = "hp_anim")
         val smoothArmor by animateIntAsState(targetValue = hud.armor, animationSpec = tween(180), label = "armor_anim")
         AnimatedVisibility(
-            visible = !hud.isPlayerDead && !hud.isMatchFinished,
+            visible = !hud.isPlayerDead && !hud.isMatchFinished && !hud.awaitingTeamSelection,
             enter = fadeIn(tween(180)),
             exit = fadeOut(tween(150)),
             modifier = Modifier
@@ -790,7 +807,7 @@ fun GameplayScreen(
 
         // 9. Contextual C4 Plant / Defuse Hold Button (floats cleanly above bottom-center HP/Armor bar)
         AnimatedVisibility(
-            visible = !isPaused && !isShopOpen && !hud.isPlayerDead && (hud.canPlantBomb || hud.canDefuseBomb),
+            visible = !isPaused && !isShopOpen && !hud.isPlayerDead && !hud.awaitingTeamSelection && (hud.canPlantBomb || hud.canDefuseBomb),
             enter = fadeIn(tween(180)) + scaleIn(initialScale = 0.92f, animationSpec = tween(180)),
             exit = fadeOut(tween(150)) + scaleOut(targetScale = 0.92f, animationSpec = tween(150)),
             modifier = Modifier
@@ -881,7 +898,7 @@ fun GameplayScreen(
         }
 
         // 11. Adaptive Customizable Landscape Controls + Single Wide Swipe Weapon Button + Shop Button
-        if (!isPaused && !hud.isMatchFinished && !isShopOpen && !isScoreboardOpen) {
+        if (!isPaused && !hud.isMatchFinished && !isShopOpen && !isScoreboardOpen && !hud.awaitingTeamSelection) {
             val layout = settings.controlLayout
 
             val joyCfg = layout.get(ControlWidgetId.JOYSTICK)
@@ -1047,6 +1064,19 @@ fun GameplayScreen(
                 hud = hud,
                 isMultiplayer = engine.matchConfig.isMultiplayer,
                 onClose = { isScoreboardOpen = false }
+            )
+        }
+
+        // 12c. CS2-Style In-Match Team Selection Overlay (CT vs T at Match Start)
+        AnimatedVisibility(
+            visible = hud.awaitingTeamSelection && !hud.isMatchFinished && !isPaused,
+            enter = fadeIn(tween(220)) + scaleIn(initialScale = 0.95f, animationSpec = tween(220)),
+            exit = fadeOut(tween(180))
+        ) {
+            TeamSelectionOverlay(
+                hud = hud,
+                onSelectTeam = { side -> engine.selectInitialTeam(side) },
+                onOpenPause = { onSetPaused(true) }
             )
         }
 
@@ -1803,7 +1833,7 @@ private fun TacticalRadar(hud: HudSnapshot) {
 @Composable
 private fun SniperScopeOverlay(
     hitMarkerAlpha: Float,
-    isHeadshot: Boolean
+    isKill: Boolean
 ) {
     Canvas(modifier = Modifier.fillMaxSize()) {
         val c = Offset(size.width * 0.5f, size.height * 0.5f)
@@ -1837,7 +1867,7 @@ private fun SniperScopeOverlay(
         drawCircle(ThreatCrimson, 3.2f, c)
 
         if (hitMarkerAlpha > 0.02f) {
-            val hmColor = if (isHeadshot) ThreatCrimson else Color.White
+            val hmColor = if (isKill) ThreatCrimson else Color.White
             val inner = 12f
             val outer = 26f
             drawLine(hmColor.copy(alpha = hitMarkerAlpha), Offset(c.x - outer, c.y - outer), Offset(c.x - inner, c.y - inner), 3.4f, StrokeCap.Round)
@@ -1854,7 +1884,7 @@ private fun TacticalCrosshair(
     isAds: Boolean,
     isKnifeOrBomb: Boolean,
     hitMarkerAlpha: Float,
-    isHeadshot: Boolean
+    isKill: Boolean
 ) {
     Canvas(modifier = Modifier.fillMaxSize()) {
         val cx = size.width * 0.5f
@@ -1875,7 +1905,7 @@ private fun TacticalCrosshair(
         }
 
         if (hitMarkerAlpha > 0.02f) {
-            val hmColor = if (isHeadshot) ThreatCrimson else Color.White
+            val hmColor = if (isKill) ThreatCrimson else Color.White
             val inner = 8f
             val outer = 20f
             drawLine(hmColor.copy(alpha = hitMarkerAlpha), Offset(cx - outer, cy - outer), Offset(cx - inner, cy - inner), 3.2f, StrokeCap.Round)
@@ -2212,5 +2242,267 @@ private fun EndStat(label: String, value: String, color: Color) {
     Column(horizontalAlignment = Alignment.CenterHorizontally) {
         Text(value, fontSize = m.sp(15f), fontWeight = FontWeight.Black, color = color)
         Text(label, fontSize = m.sp(9.5f), color = TextSecondary)
+    }
+}
+
+/**
+ * Purely visual, strictly non-clickable (touch-transparent) Killfeed table widget.
+ * Position, size, opacity, and visibility are configured in ControlEditorScreen.
+ */
+@Composable
+private fun KillFeedTableWidget(
+    entries: List<KillFeedEntry>,
+    widthDp: Dp,
+    opacity: Float,
+    modifier: Modifier = Modifier
+) {
+    val m = LocalUiMetrics.current
+    Column(
+        modifier = modifier
+            .width(widthDp)
+            .alpha(opacity.coerceIn(0.2f, 1f)),
+        verticalArrangement = Arrangement.spacedBy(m.s(3f)),
+        horizontalAlignment = Alignment.End
+    ) {
+        entries.take(5).forEach { entry ->
+            val killerColor = if (entry.killerTeam == TeamSide.CT) IceCyan else TacticalAmber
+            val victimColor = if (entry.victimTeam == TeamSide.CT) IceCyan else TacticalAmber
+            val isLocalInvolved = entry.killerIsLocal || entry.victimIsLocal
+            val highlightBorder = if (isLocalInvolved) {
+                ThreatCrimson.copy(alpha = 0.82f)
+            } else {
+                BorderSteel.copy(alpha = 0.55f)
+            }
+            val rowBg = if (isLocalInvolved) {
+                Color(0xC91A0C12)
+            } else {
+                Color(0xB309101A)
+            }
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(m.s(5f)))
+                    .background(rowBg)
+                    .border(1.dp, highlightBorder, RoundedCornerShape(m.s(5f)))
+                    .padding(horizontal = m.s(7f), vertical = m.s(3f)),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween
+            ) {
+                Text(
+                    text = entry.killerName,
+                    fontSize = m.sp(9.2f),
+                    fontWeight = if (entry.killerIsLocal) FontWeight.Black else FontWeight.Bold,
+                    color = killerColor,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f)
+                )
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(m.s(3f)),
+                    modifier = Modifier
+                        .padding(horizontal = m.s(4f))
+                        .clip(RoundedCornerShape(m.s(4f)))
+                        .background(Color(0x99162030))
+                        .padding(horizontal = m.s(5f), vertical = m.s(1f))
+                ) {
+                    Text(
+                        text = entry.weaponLabel,
+                        fontSize = m.sp(8.2f),
+                        fontWeight = FontWeight.ExtraBold,
+                        color = TextPrimary,
+                        maxLines = 1
+                    )
+                    if (entry.isHeadshot) {
+                        Text(
+                            text = "HS",
+                            fontSize = m.sp(7.8f),
+                            fontWeight = FontWeight.Black,
+                            color = ThreatCrimson
+                        )
+                    }
+                }
+                Text(
+                    text = entry.victimName,
+                    fontSize = m.sp(9.2f),
+                    fontWeight = if (entry.victimIsLocal) FontWeight.Black else FontWeight.SemiBold,
+                    color = victimColor,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f)
+                )
+            }
+        }
+    }
+}
+
+/**
+ * CS2-style match-start team selection overlay rendered over the live 3D arena camera.
+ */
+@Composable
+private fun TeamSelectionOverlay(
+    hud: HudSnapshot,
+    onSelectTeam: (TeamSide) -> Unit,
+    onOpenPause: () -> Unit
+) {
+    val m = LocalUiMetrics.current
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(
+                Brush.verticalGradient(
+                    listOf(Color(0xA6060A11), Color(0x8C09101C), Color(0xB8060A11))
+                )
+            )
+            .safeDrawingPadding()
+            .padding(horizontal = m.s(20f), vertical = m.s(14f))
+    ) {
+        // Quick menu/pause escape in top-right corner
+        IconButton(
+            onClick = onOpenPause,
+            modifier = Modifier
+                .align(Alignment.TopEnd)
+                .size(48.dp)
+                .testTag("team_select_pause_button")
+        ) {
+            Icon(Icons.Default.Settings, contentDescription = "Меню паузы", tint = TextPrimary)
+        }
+
+        Column(
+            modifier = Modifier
+                .align(Alignment.Center)
+                .widthIn(max = m.s(640f))
+                .fillMaxWidth(),
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.spacedBy(m.s(14f))
+        ) {
+            Column(
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.spacedBy(m.s(3f))
+            ) {
+                Text(
+                    text = "ВЫБЕРИТЕ КОМАНДУ",
+                    fontSize = m.sp(20f),
+                    fontWeight = FontWeight.Black,
+                    color = TextPrimary,
+                    letterSpacing = m.sp(1.5f)
+                )
+                Text(
+                    text = "${hud.mapId.titleRu.uppercase()}  •  ${hud.mode.titleRu.uppercase()}  •  ДО ${hud.roundsToWin} РАУНДОВ",
+                    fontSize = m.sp(10.5f),
+                    fontWeight = FontWeight.Bold,
+                    color = TextSecondary
+                )
+            }
+
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(m.s(14f))
+            ) {
+                TeamChoiceCard(
+                    title = "СПЕЦНАЗ",
+                    shortCode = "CT",
+                    subtitle = "Оборона точек A/B • Разминирование C4",
+                    loadoutHint = "USP-S • M4A1-S • Набор сапёра",
+                    playerCount = hud.ctTeamCount,
+                    accent = IceCyan,
+                    onClick = { onSelectTeam(TeamSide.CT) },
+                    modifier = Modifier.weight(1f),
+                    tag = "match_select_team_ct"
+                )
+                TeamChoiceCard(
+                    title = "ТЕРРОРИСТЫ",
+                    shortCode = "T",
+                    subtitle = "Атака точек A/B • Закладка C4",
+                    loadoutHint = "Glock-18 • AK-47 • Бомба C4",
+                    playerCount = hud.tTeamCount,
+                    accent = TacticalAmber,
+                    onClick = { onSelectTeam(TeamSide.T) },
+                    modifier = Modifier.weight(1f),
+                    tag = "match_select_team_t"
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun TeamChoiceCard(
+    title: String,
+    shortCode: String,
+    subtitle: String,
+    loadoutHint: String,
+    playerCount: Int,
+    accent: Color,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+    tag: String
+) {
+    val m = LocalUiMetrics.current
+    Surface(
+        onClick = onClick,
+        color = Color(0xDC0C1422),
+        shape = CutCornerShape(topStart = m.s(14f), bottomEnd = m.s(14f)),
+        border = BorderStroke(1.6.dp, accent.copy(alpha = 0.85f)),
+        modifier = modifier.testTag(tag)
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = m.s(16f), vertical = m.s(14f)),
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.spacedBy(m.s(7f))
+        ) {
+            Box(
+                modifier = Modifier
+                    .size(m.s(46f))
+                    .clip(CircleShape)
+                    .background(accent.copy(alpha = 0.18f))
+                    .border(1.5.dp, accent, CircleShape),
+                contentAlignment = Alignment.Center
+            ) {
+                Text(
+                    text = shortCode,
+                    fontSize = m.sp(17f),
+                    fontWeight = FontWeight.Black,
+                    color = accent
+                )
+            }
+            Text(
+                text = title,
+                fontSize = m.sp(15f),
+                fontWeight = FontWeight.Black,
+                color = TextPrimary
+            )
+            Text(
+                text = subtitle,
+                fontSize = m.sp(9.5f),
+                color = TextSecondary,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
+            )
+            Text(
+                text = loadoutHint,
+                fontSize = m.sp(9f),
+                fontWeight = FontWeight.Bold,
+                color = accent.copy(alpha = 0.92f),
+                maxLines = 1
+            )
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(m.s(7f)))
+                    .background(accent)
+                    .padding(vertical = m.s(8f)),
+                contentAlignment = Alignment.Center
+            ) {
+                Text(
+                    text = "ИГРАТЬ ЗА $shortCode ($playerCount)",
+                    fontSize = m.sp(11f),
+                    fontWeight = FontWeight.Black,
+                    color = ObsidianVoid
+                )
+            }
+        }
     }
 }

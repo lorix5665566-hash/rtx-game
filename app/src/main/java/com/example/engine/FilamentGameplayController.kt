@@ -487,6 +487,23 @@ class FilamentGameplayController(
         val shakeX = if (shake > 0.01f) sin(gameEngine.timeSec * 58f) * 0.24f * shake else 0f
         val shakeY = if (shake > 0.01f) cos(gameEngine.timeSec * 49f) * 0.20f * shake else 0f
 
+        if (gameEngine.awaitingTeamSelection) {
+            val sway = sin(gameEngine.timeSec * 0.28f) * 3.2f
+            val isDust = gameEngine.world.mapId == ArenaMapId.DUST2
+            val eyeX = (if (isDust) -12f else -14f) + sway
+            val eyeY = if (isDust) 12.5f else 11.8f
+            val eyeZ = if (isDust) 16f else 15f
+            val lookX = if (isDust) 4f else 2f
+            val lookY = if (isDust) 1.8f else 2.0f
+            val lookZ = if (isDust) -4f else -2f
+            camera.lookAt(
+                eyeX.toDouble(), eyeY.toDouble(), eyeZ.toDouble(),
+                lookX.toDouble(), lookY.toDouble(), lookZ.toDouble(),
+                0.0, 1.0, 0.0
+            )
+            return
+        }
+
         if (gameEngine.isSpectatingAlly) {
             camera.lookAt(
                 (gameEngine.spectateCamX + shakeX).toDouble(),
@@ -772,7 +789,7 @@ class FilamentGameplayController(
         val tm = engine.transformManager
         val hud = gameEngine.latestHud
         val w = gameEngine.activeWeapon
-        val hideWeapon = hud.isPlayerDead || (w.hasSniperScope && gameEngine.adsBlend > 0.52f)
+        val hideWeapon = gameEngine.awaitingTeamSelection || hud.isPlayerDead || (w.hasSniperScope && gameEngine.adsBlend > 0.52f)
         val activeSlot = ModelSlot.forWeapon(w)
         val isCustomWeapon = registry.hasCustomFile(activeSlot)
 

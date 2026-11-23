@@ -226,7 +226,7 @@ fun MainMenuScreen(
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.SpaceBetween
         ) {
-            // Top-Left: Sleek Settings Button (48dp touch area) + Faction Switcher (T / CT)
+            // Top-Left: Sleek Settings Button (48dp touch area)
             Row(
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(m.s(6f))
@@ -257,30 +257,6 @@ fun MainMenuScreen(
                             modifier = Modifier.size(m.s(18f))
                         )
                     }
-                }
-
-                Row(
-                    modifier = Modifier
-                        .clip(RoundedCornerShape(m.s(6f)))
-                        .background(Color(0xA60B1018))
-                        .border(1.dp, Color.White.copy(alpha = 0.15f), RoundedCornerShape(m.s(6f)))
-                        .padding(m.s(2f)),
-                    horizontalArrangement = Arrangement.spacedBy(m.s(2f))
-                ) {
-                    FactionMiniChip(
-                        label = "T",
-                        selected = matchConfig.playerSide == TeamSide.T,
-                        accent = TacticalAmber,
-                        onClick = { onUpdateMatchConfig { it.copy(playerSide = TeamSide.T) } },
-                        tag = "menu_side_t"
-                    )
-                    FactionMiniChip(
-                        label = "CT",
-                        selected = matchConfig.playerSide == TeamSide.CT,
-                        accent = IceCyan,
-                        onClick = { onUpdateMatchConfig { it.copy(playerSide = TeamSide.CT) } },
-                        tag = "menu_side_ct"
-                    )
                 }
             }
 
@@ -465,18 +441,14 @@ fun MainMenuScreen(
                 // Bottom-Left Operative Plate
                 Column(verticalArrangement = Arrangement.spacedBy(m.s(2f))) {
                     Text(
-                        text = if (matchConfig.playerSide == TeamSide.T) {
-                            "ТЕРРОРИСТ • ${matchConfig.map.titleRu.uppercase()}"
-                        } else {
-                            "СПЕЦНАЗ • ${matchConfig.map.titleRu.uppercase()}"
-                        },
+                        text = "ОПЕРАТИВНИК • ${matchConfig.map.titleRu.uppercase()}",
                         fontSize = m.sp(12.5f),
                         fontWeight = FontWeight.Black,
-                        color = if (matchConfig.playerSide == TeamSide.T) TacticalAmber else IceCyan,
+                        color = RtxEmerald,
                         letterSpacing = m.sp(1.1f)
                     )
                     Text(
-                        text = "Vanguard v${com.example.BuildConfig.VERSION_NAME} • Потяните бойца для обзора 360°",
+                        text = "Vanguard v${com.example.BuildConfig.VERSION_NAME} • Выбор команды (CT / T) в начале матча",
                         fontSize = m.sp(9.5f),
                         color = Color.White.copy(alpha = 0.78f)
                     )
@@ -669,26 +641,19 @@ private fun MatchSetupDrawer(
                     }
                 }
 
-                DrawerSectionLabel("СТОРОНА (МОДЕЛЬ БОЙЦА)")
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(m.s(6f))
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(m.s(6f)))
+                        .background(IceCyan.copy(alpha = 0.12f))
+                        .border(1.dp, IceCyan.copy(alpha = 0.35f), RoundedCornerShape(m.s(6f)))
+                        .padding(horizontal = m.s(8f), vertical = m.s(6f))
                 ) {
-                    DrawerChip(
-                        title = "ТЕРРОРИСТЫ (T)",
-                        selected = config.playerSide == TeamSide.T,
-                        accent = TacticalAmber,
-                        onClick = { onUpdate { it.copy(playerSide = TeamSide.T) } },
-                        modifier = Modifier.weight(1f),
-                        tag = "drawer_side_t"
-                    )
-                    DrawerChip(
-                        title = "СПЕЦНАЗ (CT)",
-                        selected = config.playerSide == TeamSide.CT,
-                        accent = IceCyan,
-                        onClick = { onUpdate { it.copy(playerSide = TeamSide.CT) } },
-                        modifier = Modifier.weight(1f),
-                        tag = "drawer_side_ct"
+                    Text(
+                        text = "Сторона (CT или T) выбирается сразу после входа в матч.",
+                        fontSize = m.sp(9.3f),
+                        fontWeight = FontWeight.SemiBold,
+                        color = IceCyan
                     )
                 }
 
@@ -848,43 +813,6 @@ private fun Cs2NavTab(
             letterSpacing = m.sp(0.9f),
             color = textColor,
             maxLines = 1
-        )
-    }
-}
-
-@Composable
-private fun FactionMiniChip(
-    label: String,
-    selected: Boolean,
-    accent: Color,
-    onClick: () -> Unit,
-    tag: String
-) {
-    val m = LocalUiMetrics.current
-    val bgColor by animateColorAsState(
-        targetValue = if (selected) accent.copy(alpha = 0.28f) else Color.Transparent,
-        animationSpec = tween(200),
-        label = "faction_bg"
-    )
-    val txtColor by animateColorAsState(
-        targetValue = if (selected) accent else TextSecondary,
-        animationSpec = tween(200),
-        label = "faction_txt"
-    )
-    Box(
-        modifier = Modifier
-            .clip(RoundedCornerShape(m.s(4f)))
-            .background(bgColor)
-            .clickable(onClick = onClick)
-            .padding(horizontal = m.s(9f), vertical = m.s(4f))
-            .testTag(tag),
-        contentAlignment = Alignment.Center
-    ) {
-        Text(
-            text = label,
-            fontSize = m.sp(10.5f),
-            fontWeight = FontWeight.ExtraBold,
-            color = txtColor
         )
     }
 }

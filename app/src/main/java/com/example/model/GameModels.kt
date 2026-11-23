@@ -59,7 +59,8 @@ data class MatchConfig(
     val allowBots: Boolean = true,
     val localUserId: String = "",
     val localDisplayName: String = "",
-    val localShortId: String = ""
+    val localShortId: String = "",
+    val isMatchHost: Boolean = true
 )
 
 data class RemoteHumanPlayer(
@@ -484,7 +485,8 @@ enum class ControlWidgetId(val labelRu: String, val canHide: Boolean, val isWide
     JUMP("Прыжок", true),
     WEAPON_SWIPE("Оружие (свайп)", false, isWide = true),
     SHOP("Магазин", false),
-    PAUSE("Пауза", false)
+    PAUSE("Пауза", false),
+    KILLFEED("Килфид", true, isWide = true)
 }
 
 data class ControlWidgetConfig(
@@ -516,7 +518,8 @@ data class ControlLayout(
             ControlWidgetId.JUMP to ControlWidgetConfig(ControlWidgetId.JUMP, 0.84f, 0.42f, 0.90f, 0.84f, true),
             ControlWidgetId.WEAPON_SWIPE to ControlWidgetConfig(ControlWidgetId.WEAPON_SWIPE, 0.86f, 0.88f, 1.0f, 0.92f, true),
             ControlWidgetId.SHOP to ControlWidgetConfig(ControlWidgetId.SHOP, 0.90f, 0.14f, 0.95f, 0.92f, true),
-            ControlWidgetId.PAUSE to ControlWidgetConfig(ControlWidgetId.PAUSE, 0.96f, 0.09f, 0.86f, 0.86f, true)
+            ControlWidgetId.PAUSE to ControlWidgetConfig(ControlWidgetId.PAUSE, 0.96f, 0.09f, 0.86f, 0.86f, true),
+            ControlWidgetId.KILLFEED to ControlWidgetConfig(ControlWidgetId.KILLFEED, 0.82f, 0.24f, 1.0f, 0.92f, true)
         )
 
         fun fourFingerClawMap(): Map<ControlWidgetId, ControlWidgetConfig> = mapOf(
@@ -529,7 +532,8 @@ data class ControlLayout(
             ControlWidgetId.JUMP to ControlWidgetConfig(ControlWidgetId.JUMP, 0.88f, 0.44f, 0.94f, 0.84f, true),
             ControlWidgetId.WEAPON_SWIPE to ControlWidgetConfig(ControlWidgetId.WEAPON_SWIPE, 0.86f, 0.88f, 1.0f, 0.92f, true),
             ControlWidgetId.SHOP to ControlWidgetConfig(ControlWidgetId.SHOP, 0.74f, 0.12f, 0.92f, 0.90f, true),
-            ControlWidgetId.PAUSE to ControlWidgetConfig(ControlWidgetId.PAUSE, 0.96f, 0.09f, 0.86f, 0.85f, true)
+            ControlWidgetId.PAUSE to ControlWidgetConfig(ControlWidgetId.PAUSE, 0.96f, 0.09f, 0.86f, 0.85f, true),
+            ControlWidgetId.KILLFEED to ControlWidgetConfig(ControlWidgetId.KILLFEED, 0.82f, 0.26f, 1.0f, 0.92f, true)
         )
 
         fun defaultTwoFinger(): ControlLayout = ControlLayout(defaultTwoFingerMap())
@@ -576,6 +580,33 @@ data class BombSyncEvent(
     val roundNumber: Int = 1,
     val isWarmup: Boolean = false,
     val senderUid: String = ""
+)
+
+data class MatchSyncEvent(
+    val seq: Int = 0,
+    val roundNumber: Int = 1,
+    val ctScore: Int = 0,
+    val tScore: Int = 0,
+    val isWarmup: Boolean = false,
+    val isRoundOver: Boolean = false,
+    val sidesSwapped: Boolean = false,
+    val winnerSide: String = "",
+    val reason: String = "",
+    val roundTimeSec: Float = 105f,
+    val freezeTimeSec: Float = 0f,
+    val senderUid: String = ""
+)
+
+data class KillFeedEntry(
+    val id: Long,
+    val killerName: String,
+    val killerTeam: TeamSide,
+    val victimName: String,
+    val victimTeam: TeamSide,
+    val weaponLabel: String,
+    val isHeadshot: Boolean = false,
+    val killerIsLocal: Boolean = false,
+    val victimIsLocal: Boolean = false
 )
 
 data class DeathRecapInfo(
@@ -646,6 +677,7 @@ data class HudSnapshot(
     val fps: Int = 60,
     val hitMarkerAlpha: Float = 0f,
     val isHeadshotHit: Boolean = false,
+    val isKillHit: Boolean = false,
     val damageFlashAlpha: Float = 0f,
     val deathBloodAlpha: Float = 0f,
     val deathRecap: DeathRecapInfo? = null,
@@ -661,6 +693,11 @@ data class HudSnapshot(
     val isPlayerTeamWinner: Boolean = false,
     val bannerText: String = "",
     val killFeedText: String = "",
+    val killFeedEntries: List<KillFeedEntry> = emptyList(),
+    val awaitingTeamSelection: Boolean = false,
+    val ctTeamCount: Int = 0,
+    val tTeamCount: Int = 0,
+    val sidesSwapped: Boolean = false,
     val radarBlips: List<RadarBlip> = emptyList(),
     val playerYawDeg: Float = 0f,
     val isMultiplayer: Boolean = false,

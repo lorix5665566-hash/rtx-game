@@ -36,6 +36,7 @@ import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.ExpandLess
 import androidx.compose.material.icons.filled.ExpandMore
 import androidx.compose.material.icons.filled.GpsFixed
+import androidx.compose.material.icons.filled.Leaderboard
 import androidx.compose.material.icons.filled.OpenWith
 import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.Refresh
@@ -433,7 +434,75 @@ private fun EditorWidgetVisual(
         config.id == ControlWidgetId.ADS -> TacticalAmber
         config.id == ControlWidgetId.WEAPON_SWIPE -> IceCyan
         config.id == ControlWidgetId.SHOP -> TacticalAmber
+        config.id == ControlWidgetId.KILLFEED -> ThreatCrimson.copy(alpha = 0.85f)
         else -> Color.White.copy(alpha = 0.55f)
+    }
+
+    if (config.id == ControlWidgetId.KILLFEED) {
+        val shape = RoundedCornerShape(8.dp)
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .background(
+                    color = if (isSelected) RtxEmerald.copy(alpha = 0.22f) else ObsidianVoid.copy(alpha = 0.80f),
+                    shape = shape
+                )
+                .border(
+                    width = if (isSelected) 2.2.dp else 1.4.dp,
+                    color = borderColor,
+                    shape = shape
+                )
+                .padding(horizontal = 7.dp, vertical = 5.dp)
+        ) {
+            Column(
+                modifier = Modifier.fillMaxSize(),
+                verticalArrangement = Arrangement.spacedBy(3.dp)
+            ) {
+                Text(
+                    text = "КИЛФИД • ТАБЛИЦА УБИЙСТВ",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = if (isSelected) RtxEmerald else TacticalAmber,
+                    fontSize = 8.sp
+                )
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .background(Color(0x88141C2B), RoundedCornerShape(4.dp))
+                        .padding(horizontal = 5.dp, vertical = 2.dp),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text("Игрок", color = TacticalAmber, fontSize = 8.5.sp)
+                    Text("[AK-47]", color = TextPrimary, fontSize = 8.sp)
+                    Text("Бот CT", color = IceCyan, fontSize = 8.5.sp)
+                }
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .background(Color(0x88141C2B), RoundedCornerShape(4.dp))
+                        .padding(horizontal = 5.dp, vertical = 2.dp),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text("Союзник", color = IceCyan, fontSize = 8.5.sp)
+                    Text("[AWP ☠]", color = ThreatCrimson, fontSize = 8.sp)
+                    Text("Бот T", color = TacticalAmber, fontSize = 8.5.sp)
+                }
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .background(Color(0x66141C2B), RoundedCornerShape(4.dp))
+                        .padding(horizontal = 5.dp, vertical = 2.dp),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text("Игрок", color = TacticalAmber, fontSize = 8.5.sp)
+                    Text("[НОЖ]", color = RtxEmerald, fontSize = 8.sp)
+                    Text("Соперник", color = IceCyan, fontSize = 8.5.sp)
+                }
+            }
+        }
+        return
     }
 
     if (config.id == ControlWidgetId.WEAPON_SWIPE) {
@@ -529,10 +598,12 @@ fun widgetBaseWidthDp(id: ControlWidgetId): Dp = when (id) {
     ControlWidgetId.WEAPON_SWIPE -> 174.dp
     ControlWidgetId.SHOP -> 54.dp
     ControlWidgetId.PAUSE -> 46.dp
+    ControlWidgetId.KILLFEED -> 232.dp
 }
 
 fun widgetBaseHeightDp(id: ControlWidgetId): Dp = when (id) {
     ControlWidgetId.WEAPON_SWIPE -> 56.dp
+    ControlWidgetId.KILLFEED -> 92.dp
     else -> widgetBaseWidthDp(id)
 }
 
@@ -546,6 +617,7 @@ fun widgetIcon(id: ControlWidgetId): ImageVector = when (id) {
     ControlWidgetId.WEAPON_SWIPE -> Icons.Default.SwapHoriz
     ControlWidgetId.SHOP -> Icons.Default.ShoppingCart
     ControlWidgetId.PAUSE -> Icons.Default.Pause
+    ControlWidgetId.KILLFEED -> Icons.Default.Leaderboard
 }
 
 fun widgetShortTag(id: ControlWidgetId): String = when (id) {
@@ -558,4 +630,5 @@ fun widgetShortTag(id: ControlWidgetId): String = when (id) {
     ControlWidgetId.WEAPON_SWIPE -> "ОРУЖ"
     ControlWidgetId.SHOP -> "$"
     ControlWidgetId.PAUSE -> "||"
+    ControlWidgetId.KILLFEED -> "КИЛ"
 }

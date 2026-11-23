@@ -3,6 +3,7 @@ package com.example.online
 import android.os.SystemClock
 import com.example.model.BombState
 import com.example.model.BombSyncEvent
+import com.example.model.MatchSyncEvent
 import com.example.model.OutgoingHitEvent
 import com.example.model.TeamSide
 import kotlinx.coroutines.CoroutineScope
@@ -24,13 +25,14 @@ import java.util.concurrent.atomic.AtomicInteger
 
 /**
  * Low-latency Supabase Realtime WebSocket Broadcast client (Phoenix protocol v1.0.0).
- * Delivers ~30 Hz player transform updates, instant PvP hit events, and authoritative
- * C4 Bomb / Warmup synchronization with ~25–60 ms latency (zero SQL migrations required).
+ * Delivers 50 Hz player transform updates, instant PvP hit events, and authoritative
+ * C4 Bomb / Round / Score / Halftime synchronization.
  */
 class SupabaseRealtimeClient(
     private val authManager: SupabaseAuthManager,
     private val onRemoteStateReceived: (PlayerMatchState) -> Unit,
     private val onBombSyncReceived: (BombSyncEvent) -> Unit,
+    private val onMatchSyncReceived: (MatchSyncEvent) -> Unit,
     private val onPingMeasured: (Int) -> Unit,
     private val onConnectionChanged: (Boolean) -> Unit
 ) {
@@ -211,7 +213,8 @@ class SupabaseRealtimeClient(
         kills: Int,
         deaths: Int,
         outgoingHit: OutgoingHitEvent?,
-        bombSync: BombSyncEvent?
+        bombSync: BombSyncEvent?,
+        matchSync: MatchSyncEvent? = null
     ): Boolean {
         val ws = webSocket ?: return false
         if (!isJoined) return false
@@ -249,6 +252,19 @@ class SupabaseRealtimeClient(
                 put("bc", round1(bombSync.countdownSec))
                 put("rn", bombSync.roundNumber)
                 put("wu", bombSync.isWarmup)
+            }
+            if (matchSync != null && matchSync.seq > 0) {
+                put("mq", matchSync.seq)
+                put("mr", matchSync.roundNumber)
+                put("mc", matchSync.ctScore)
+                put("mt", matchSync.tScore)
+                put("mw", matchSync.isWarmup)
+                put("mo", matchSync.isRoundOver)
+                put("ms", matchSync.sidesSwapped)
+                put("mn", matchSync.winnerSide)
+                put("mz", matchSync.reason)
+                put("ml", round1(matchSync.roundTimeSec))
+                put("mf", round1(matchSync.freezeTimeSec))
             }
         }
 
@@ -334,6 +350,40 @@ class SupabaseRealtimeClient(
         return ws.send(frame.toString())
     }
 
+    /**
+     * Immediately broadcasts authoritative round/score/warmup/halftime-swap state so all clients stay 100% synced.
+     */
+    fun sendMatchEvent(event: MatchSyncEvent): Boolean {
+        val ws = webSocket ?: return false
+        if (!isJoined) return false
+        val data = JSONObject().apply {
+            put("u", currentUserId)
+            put("mq", event.seq)
+            put("mr", event.roundNumber)
+            put("mc", event.ctScore)
+            put("mt", event.tScore)
+            put("mw", event.isWarmup)
+            put("mo", event.isRoundOver)
+            put("ms", event.sidesSwapped)
+            put("mn", event.winnerSide)
+            put("mz", event.reason)
+            put("ml", round1(event.roundTimeSec))
+            put("mf", round1(event.freezeTimeSec))
+        }
+        val outerPayload = JSONObject().apply {
+            put("type", "broadcast")
+            put("event", "match")
+            put("payload", data)
+        }
+        val frame = JSONObject().apply {
+            put("topic", currentTopic)
+            put("event", "broadcast")
+            put("payload", outerPayload)
+            put("ref", JSONObject.NULL)
+        }
+        return ws.send(frame.toString())
+    }
+
     private fun handleIncomingMessage(text: String) {
         val root = runCatching { JSONObject(text) }.getOrNull() ?: return
         val event = root.optString("event")
@@ -389,10 +439,14 @@ class SupabaseRealtimeClient(
                 )
                 onRemoteStateReceived(st)
 
-                // Piggybacked bomb state ensures CT ALWAYS receives planted C4 even if an earlier packet was missed
+                // Piggybacked bomb & match state guarantees every client stays 100% synchronized!
                 val bq = data.optInt("bq", 0)
                 if (bq > 0) {
                     parseBombSync(data, uid)?.let(onBombSyncReceived)
+                }
+                val mq = data.optInt("mq", 0)
+                if (mq > 0) {
+                    onMatchSyncReceived(parseMatchSync(data, uid))
                 }
             }
             "hit" -> {
@@ -419,6 +473,11 @@ class SupabaseRealtimeClient(
                 if (uid == currentUserId) return
                 parseBombSync(data, uid)?.let(onBombSyncReceived)
             }
+            "match" -> {
+                val uid = data.optString("u")
+                if (uid == currentUserId) return
+                onMatchSyncReceived(parseMatchSync(data, uid))
+            }
         }
     }
 
@@ -438,6 +497,22 @@ class SupabaseRealtimeClient(
             senderUid = senderUid
         )
     }
+
+    private fun parseMatchSync(data: JSONObject, senderUid: String): MatchSyncEvent =
+        MatchSyncEvent(
+            seq = data.optInt("mq", 0),
+            roundNumber = data.optInt("mr", 1),
+            ctScore = data.optInt("mc", 0),
+            tScore = data.optInt("mt", 0),
+            isWarmup = data.optBoolean("mw", false),
+            isRoundOver = data.optBoolean("mo", false),
+            sidesSwapped = data.optBoolean("ms", false),
+            winnerSide = data.optString("mn", ""),
+            reason = data.optString("mz", ""),
+            roundTimeSec = data.optDouble("ml", 105.0).toFloat(),
+            freezeTimeSec = data.optDouble("mf", 0.0).toFloat(),
+            senderUid = senderUid
+        )
 
     private fun round2(v: Float): Double = kotlin.math.round(v * 100.0) / 100.0
     private fun round1(v: Float): Double = kotlin.math.round(v * 10.0) / 10.0
