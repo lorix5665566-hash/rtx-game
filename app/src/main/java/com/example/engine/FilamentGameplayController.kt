@@ -10,6 +10,7 @@ import com.example.model.BombState
 import com.example.model.GraphicsSettings
 import com.example.model.ModelAssetRegistry
 import com.example.model.ModelSlot
+import com.example.model.RemoteHumanPlayer
 import com.example.model.TeamSide
 import com.example.model.WeaponType
 import com.google.android.filament.Camera
@@ -81,6 +82,7 @@ class FilamentGameplayController(
     private var handsCtRifle: LoadedGlbModel? = null
     private var handsCtPistol: LoadedGlbModel? = null
     private var handsCtKnife: LoadedGlbModel? = null
+    private val allHandsSlots = arrayOfNulls<LoadedGlbModel>(6)
 
     private var muzzleFlashModel: LoadedGlbModel? = null
     private var plantedBombModel: LoadedGlbModel? = null
@@ -103,7 +105,10 @@ class FilamentGameplayController(
 
     // Procedural skeletal rig animator (2-bone dual-arm IK + bidirectional turn-in-place foot shuffling)
     private val rigAnimator = OperativeRigAnimator()
-    private val turnStates = HashMap<String, TurnShuffleState>(12)
+    private val turnStates = HashMap<String, TurnShuffleState>(16)
+    private val activeTurnKeys = HashSet<String>(16)
+    private val remoteSnapshotBuf = ArrayList<RemoteHumanPlayer>(10)
+    private val botTurnKeys = Array(16) { "bot_$it" }
     private val reloadDelta = ViewmodelPoseDelta()
     private val inspectDelta = ViewmodelPoseDelta()
 
@@ -210,57 +215,65 @@ class FilamentGameplayController(
             assetLoader, resourceLoader,
             registry.loadBundledAssetBuffer("models/fp_hands_ct_knife.glb")
         )
-        listOf(
-            muzzleFlashModel,
-            handsTRifle, handsTPistol, handsTKnife,
-            handsCtRifle, handsCtPistol, handsCtKnife
-        ).forEach { FilamentSceneHelpers.configureViewmodelRenderables(engine, it) }
+        allHandsSlots[0] = handsTRifle
+        allHandsSlots[1] = handsTPistol
+        allHandsSlots[2] = handsTKnife
+        allHandsSlots[3] = handsCtRifle
+        allHandsSlots[4] = handsCtPistol
+        allHandsSlots[5] = handsCtKnife
+        FilamentSceneHelpers.configureViewmodelRenderables(engine, muzzleFlashModel)
+        for (h in allHandsSlots) {
+            FilamentSceneHelpers.configureViewmodelRenderables(engine, h)
+        }
         reloadDynamicSlots()
     }
 
     private fun reloadDynamicSlots() {
-        // Clear old dynamic assets cleanly
+        // Clear old dynamic assets cleanly (secondary GPU instances detach first, owners destroy shared FilamentAsset)
         destroyModel(plantedBombModel); plantedBombModel = null
-        fpWeapons.values.forEach { destroyModel(it) }; fpWeapons.clear()
         tpWeaponPools.values.forEach { list -> list.forEach { destroyModel(it) } }
         tpWeaponPools.clear()
-        ctPool.forEach { destroyModel(it) }; ctPool.clear()
-        tPool.forEach { destroyModel(it) }; tPool.clear()
+        fpWeapons.values.forEach { destroyModel(it) }; fpWeapons.clear()
+        ctPool.asReversed().forEach { destroyModel(it) }; ctPool.clear()
+        tPool.asReversed().forEach { destroyModel(it) }; tPool.clear()
 
         // Planted C4 bomb .GLB
         plantedBombModel = FilamentSceneHelpers.loadGlb(
             assetLoader, resourceLoader, registry.loadGlbBuffer(ModelSlot.BOMB_C4)
         )
 
-        // All 10 Distinct CS2 First-Person Weapon .GLB slots
-        val weaponSlots = listOf(
-            ModelSlot.WEAPON_AK47,
-            ModelSlot.WEAPON_M4A1_S,
-            ModelSlot.WEAPON_AWP,
-            ModelSlot.WEAPON_P90,
-            ModelSlot.WEAPON_MP9,
-            ModelSlot.WEAPON_USP_S,
-            ModelSlot.WEAPON_GLOCK_18,
-            ModelSlot.WEAPON_DEAGLE,
-            ModelSlot.WEAPON_KNIFE,
-            ModelSlot.BOMB_C4
-        )
-        for (slot in weaponSlots) {
-            FilamentSceneHelpers.loadGlb(assetLoader, resourceLoader, registry.loadGlbBuffer(slot))?.let {
-                FilamentSceneHelpers.configureViewmodelRenderables(engine, it)
-                fpWeapons[slot] = it
+        // All 10 Distinct CS2 Weapons: load EACH weapon ONCE into ONE shared GPU asset with 11 instances:
+        // instance[0] = First-Person viewmodel, instances[1..10] = 3rd-Person pool (ZERO duplicate GPU textures!)
+        for (weapon in WeaponType.entries) {
+            val slot = ModelSlot.forWeapon(weapon)
+            val instances = FilamentSceneHelpers.loadInstancedGlb(
+                assetLoader, resourceLoader, registry.loadGlbBuffer(slot), count = 11
+            )
+            if (instances.isNotEmpty()) {
+                val fpModel = instances[0]
+                FilamentSceneHelpers.configureViewmodelRenderables(engine, fpModel)
+                fpWeapons[slot] = fpModel
+                val tpList = ArrayList<LoadedGlbModel>((instances.size - 1).coerceAtLeast(0))
+                for (i in 1 until instances.size) {
+                    val tpModel = instances[i]
+                    FilamentSceneHelpers.disableShadowCasting(engine, tpModel)
+                    tpList.add(tpModel)
+                }
+                tpWeaponPools[weapon] = tpList
             }
         }
 
-        // Character pools (up to 5 CT + 5 T rigged skeletal .GLB bots!)
-        val ctBuf = registry.loadGlbBuffer(ModelSlot.CHARACTER_CT)
-        val tBuf = registry.loadGlbBuffer(ModelSlot.CHARACTER_T)
-        for (i in 0 until 5) {
-            ctBuf?.rewind()
-            FilamentSceneHelpers.loadGlb(assetLoader, resourceLoader, ctBuf)?.let { ctPool.add(it) }
-            tBuf?.rewind()
-            FilamentSceneHelpers.loadGlb(assetLoader, resourceLoader, tBuf)?.let { tPool.add(it) }
-        }
+        // Character pools: 5 CT sharing 1 GPU asset + 5 T sharing 1 GPU asset (~5x less VRAM & load time!)
+        val ctInstances = FilamentSceneHelpers.loadInstancedGlb(
+            assetLoader, resourceLoader, registry.loadGlbBuffer(ModelSlot.CHARACTER_CT), count = 5
+        )
+        ctPool.addAll(ctInstances)
+
+        val tInstances = FilamentSceneHelpers.loadInstancedGlb(
+            assetLoader, resourceLoader, registry.loadGlbBuffer(ModelSlot.CHARACTER_T), count = 5
+        )
+        tPool.addAll(tInstances)
+
         loadedRegistryRevision = registry.revision.value
     }
 
@@ -347,11 +360,12 @@ class FilamentGameplayController(
         destroyModel(handsCtRifle); handsCtRifle = null
         destroyModel(handsCtPistol); handsCtPistol = null
         destroyModel(handsCtKnife); handsCtKnife = null
-        fpWeapons.values.forEach { destroyModel(it) }; fpWeapons.clear()
+        allHandsSlots.fill(null)
         tpWeaponPools.values.forEach { list -> list.forEach { destroyModel(it) } }
         tpWeaponPools.clear()
-        ctPool.forEach { destroyModel(it) }; ctPool.clear()
-        tPool.forEach { destroyModel(it) }; tPool.clear()
+        fpWeapons.values.forEach { destroyModel(it) }; fpWeapons.clear()
+        ctPool.asReversed().forEach { destroyModel(it) }; ctPool.clear()
+        tPool.asReversed().forEach { destroyModel(it) }; tPool.clear()
 
         runCatching { resourceLoader.destroy() }
         runCatching { assetLoader.destroy() }
@@ -391,7 +405,9 @@ class FilamentGameplayController(
     private fun destroyModel(model: LoadedGlbModel?) {
         if (model == null) return
         FilamentSceneHelpers.setAssetVisible(scene, model, false)
-        runCatching { assetLoader.destroyAsset(model.asset) }
+        if (model.ownsAsset) {
+            runCatching { assetLoader.destroyAsset(model.asset) }
+        }
     }
 
     override fun doFrame(frameTimeNanos: Long) {
@@ -476,16 +492,9 @@ class FilamentGameplayController(
     }
 
     private fun acquireThirdPersonWeapon(weapon: WeaponType): LoadedGlbModel? {
-        val pool = tpWeaponPools.getOrPut(weapon) { ArrayList(4) }
+        val pool = tpWeaponPools[weapon] ?: return null
         val used = tpWeaponUsedCount[weapon] ?: 0
-        if (used >= 10) return null
-        if (used >= pool.size) {
-            val slot = ModelSlot.forWeapon(weapon)
-            val created = FilamentSceneHelpers.loadGlb(
-                assetLoader, resourceLoader, registry.loadGlbBuffer(slot)
-            ) ?: return null
-            pool.add(created)
-        }
+        if (used >= pool.size) return null
         tpWeaponUsedCount[weapon] = used + 1
         return pool[used]
     }
@@ -517,7 +526,7 @@ class FilamentGameplayController(
             isShooting = isShooting,
             aimPitchDeg = aimPitchDeg
         )
-        engine.transformManager.setTransform(engine.transformManager.getInstance(wModel.asset.root), tmpMat)
+        engine.transformManager.setTransform(engine.transformManager.getInstance(wModel.rootEntity), tmpMat)
     }
 
     private fun updateBots(dt: Float) {
@@ -527,13 +536,13 @@ class FilamentGameplayController(
         val px = gameEngine.playerX
         val pz = gameEngine.playerZ
         tpWeaponUsedCount.clear()
-
-        val activeTurnKeys = HashSet<String>(12)
+        activeTurnKeys.clear()
 
         // 1. Render remote human players FIRST so friends/opponents always get priority in character pools!
         if (gameEngine.matchConfig.isMultiplayer) {
-            val remotes = gameEngine.getRemotePlayersSnapshot()
-            for ((idx, rp) in remotes.withIndex()) {
+            gameEngine.fillRemotePlayersSnapshot(remoteSnapshotBuf)
+            for (idx in 0 until remoteSnapshotBuf.size) {
+                val rp = remoteSnapshotBuf[idx]
                 val pool = if (rp.team == TeamSide.CT) ctPool else tPool
                 val slotIdx = if (rp.team == TeamSide.CT) ctIdx++ else tIdx++
                 if (slotIdx >= pool.size) continue
@@ -542,7 +551,7 @@ class FilamentGameplayController(
                 val isCustomChar = registry.hasCustomFile(charSlot)
                 // Local camera looks along -Z at yaw=0 while rigged character meshes face +Z natively -> +180° aligns eyes directly toward us!
                 val visualYawDeg = rp.yawDeg + 180f
-                val turnKey = "remote_${rp.userId}"
+                val turnKey = rp.userId
                 activeTurnKeys.add(turnKey)
                 val turnState = turnStates.getOrPut(turnKey) { TurnShuffleState() }
                 turnState.update(visualYawDeg, dt, isMoving = rp.isMoving, isDead = rp.isDead)
@@ -559,37 +568,42 @@ class FilamentGameplayController(
                     targetHeight = 1.76f,
                     isCustomImported = isCustomChar
                 )
-                tm.setTransform(tm.getInstance(model.asset.root), tmpMat)
+                tm.setTransform(tm.getInstance(model.rootEntity), tmpMat)
 
-                val animator = model.asset.instance.animator
+                val animator = model.instance.animator
                 if (animator.animationCount > 0) {
-                    if (rp.isDead) {
-                        if (model.deathAnimIdx >= 0) {
-                            val dur = animator.getAnimationDuration(model.deathAnimIdx).coerceAtLeast(0.1f)
-                            animator.applyAnimation(model.deathAnimIdx, rp.deathProgress.coerceIn(0f, 0.995f) * dur)
+                    val settledCorpse = rp.isDead && rp.deathProgress >= 0.995f
+                    if (!settledCorpse || !model.deathPoseSettled) {
+                        if (rp.isDead) {
+                            if (model.deathAnimIdx >= 0) {
+                                val dur = animator.getAnimationDuration(model.deathAnimIdx).coerceAtLeast(0.1f)
+                                animator.applyAnimation(model.deathAnimIdx, rp.deathProgress.coerceIn(0f, 0.995f) * dur)
+                            }
+                            model.deathPoseSettled = settledCorpse
+                        } else {
+                            model.deathPoseSettled = false
+                            val animIdx = if (rp.isMoving) model.runAnimIdx else model.idleAnimIdx
+                            if (animIdx >= 0) {
+                                val dur = animator.getAnimationDuration(animIdx).coerceAtLeast(0.1f)
+                                animator.applyAnimation(animIdx, (gameEngine.timeSec + idx * 0.41f) % dur)
+                            }
                         }
-                    } else {
-                        val animIdx = if (rp.isMoving) model.runAnimIdx else model.idleAnimIdx
-                        if (animIdx >= 0) {
-                            val dur = animator.getAnimationDuration(animIdx).coerceAtLeast(0.1f)
-                            animator.applyAnimation(animIdx, (gameEngine.timeSec + idx * 0.41f) % dur)
+                        if (!isCustomChar) {
+                            rigAnimator.applyProceduralPose(
+                                engine = engine,
+                                handles = model.rigHandles,
+                                weapon = rp.weapon,
+                                turnState = turnState,
+                                timeSec = gameEngine.timeSec + idx * 0.41f,
+                                isMoving = rp.isMoving,
+                                isDead = rp.isDead,
+                                deathProgress = rp.deathProgress,
+                                isShooting = rp.isShooting,
+                                aimPitchDeg = rp.pitchDeg
+                            )
                         }
+                        animator.updateBoneMatrices()
                     }
-                    if (!isCustomChar) {
-                        rigAnimator.applyProceduralPose(
-                            engine = engine,
-                            handles = model.rigHandles,
-                            weapon = rp.weapon,
-                            turnState = turnState,
-                            timeSec = gameEngine.timeSec + idx * 0.41f,
-                            isMoving = rp.isMoving,
-                            isDead = rp.isDead,
-                            deathProgress = rp.deathProgress,
-                            isShooting = rp.isShooting,
-                            aimPitchDeg = rp.pitchDeg
-                        )
-                    }
-                    animator.updateBoneMatrices()
                 }
 
                 // Render remote player's real equipped 3D weapon locked directly in BOTH hands (or dropped beside them on death)
@@ -610,7 +624,9 @@ class FilamentGameplayController(
 
         // 2. Render AI bots (with bidirectional turn-in-place foot shuffling, 2-handed weapon IK, aim pitch & skeletal Death!)
         val playerEyeY = gameEngine.playerY + gameEngine.eyeHeight
-        for (b in gameEngine.bots) {
+        val botsList = gameEngine.bots
+        for (bi in 0 until botsList.size) {
+            val b = botsList[bi]
             val pool = if (b.team == TeamSide.CT) ctPool else tPool
             val slotIdx = if (b.team == TeamSide.CT) ctIdx++ else tIdx++
             if (slotIdx >= pool.size) continue
@@ -618,7 +634,7 @@ class FilamentGameplayController(
 
             val charSlot = if (b.team == TeamSide.CT) ModelSlot.CHARACTER_CT else ModelSlot.CHARACTER_T
             val isCustomChar = registry.hasCustomFile(charSlot)
-            val turnKey = "bot_${b.id}"
+            val turnKey = if (b.id in botTurnKeys.indices) botTurnKeys[b.id] else "bot_${b.id}"
             activeTurnKeys.add(turnKey)
             val turnState = turnStates.getOrPut(turnKey) { TurnShuffleState() }
             turnState.update(b.visualYawDeg, dt, isMoving = b.isMoving, isDead = b.isDead)
@@ -637,7 +653,7 @@ class FilamentGameplayController(
                 targetHeight = 1.76f,
                 isCustomImported = isCustomChar
             )
-            tm.setTransform(tm.getInstance(model.asset.root), tmpMat)
+            tm.setTransform(tm.getInstance(model.rootEntity), tmpMat)
 
             val dx = b.x - px
             val dz = b.z - pz
@@ -648,43 +664,48 @@ class FilamentGameplayController(
                 Math.toDegrees(kotlin.math.atan2(dy.toDouble(), horiz.toDouble())).toFloat().coerceIn(-38f, 38f)
             } else 0f
 
-            val animator = model.asset.instance.animator
-            if (animator.animationCount > 0 && distSq < 54f * 54f) {
-                if (b.isDead) {
-                    if (model.deathAnimIdx >= 0) {
-                        val dur = animator.getAnimationDuration(model.deathAnimIdx).coerceAtLeast(0.1f)
-                        animator.applyAnimation(model.deathAnimIdx, b.deathProgress.coerceIn(0f, 0.995f) * dur)
+            val animator = model.instance.animator
+            if (animator.animationCount > 0 && distSq < 44f * 44f) {
+                val settledCorpse = b.isDead && b.deathProgress >= 0.995f
+                if (!settledCorpse || !model.deathPoseSettled) {
+                    if (b.isDead) {
+                        if (model.deathAnimIdx >= 0) {
+                            val dur = animator.getAnimationDuration(model.deathAnimIdx).coerceAtLeast(0.1f)
+                            animator.applyAnimation(model.deathAnimIdx, b.deathProgress.coerceIn(0f, 0.995f) * dur)
+                        }
+                        model.deathPoseSettled = settledCorpse
+                    } else {
+                        model.deathPoseSettled = false
+                        val animIdx = when {
+                            !b.isMoving -> model.idleAnimIdx
+                            kotlin.math.abs(b.moveForwardRatio) > 0.65f -> model.runAnimIdx
+                            else -> model.walkAnimIdx
+                        }
+                        if (animIdx >= 0) {
+                            val dur = animator.getAnimationDuration(animIdx).coerceAtLeast(0.1f)
+                            animator.applyAnimation(animIdx, botAnimClock % dur)
+                        }
                     }
-                } else {
-                    val animIdx = when {
-                        !b.isMoving -> model.idleAnimIdx
-                        kotlin.math.abs(b.moveForwardRatio) > 0.65f -> model.runAnimIdx
-                        else -> model.walkAnimIdx
+                    if (!isCustomChar) {
+                        rigAnimator.applyProceduralPose(
+                            engine = engine,
+                            handles = model.rigHandles,
+                            weapon = b.weapon,
+                            turnState = turnState,
+                            timeSec = botAnimClock,
+                            isMoving = b.isMoving,
+                            isDead = b.isDead,
+                            deathProgress = b.deathProgress,
+                            isShooting = botShooting,
+                            aimPitchDeg = botAimPitchDeg
+                        )
                     }
-                    if (animIdx >= 0) {
-                        val dur = animator.getAnimationDuration(animIdx).coerceAtLeast(0.1f)
-                        animator.applyAnimation(animIdx, botAnimClock % dur)
-                    }
+                    animator.updateBoneMatrices()
                 }
-                if (!isCustomChar) {
-                    rigAnimator.applyProceduralPose(
-                        engine = engine,
-                        handles = model.rigHandles,
-                        weapon = b.weapon,
-                        turnState = turnState,
-                        timeSec = botAnimClock,
-                        isMoving = b.isMoving,
-                        isDead = b.isDead,
-                        deathProgress = b.deathProgress,
-                        isShooting = botShooting,
-                        aimPitchDeg = botAimPitchDeg
-                    )
-                }
-                animator.updateBoneMatrices()
             }
 
             // Render every teammate & enemy bot's real bought/equipped 3D weapon firmly inside BOTH hands!
-            if (distSq < 56f * 56f) {
+            if (distSq < 48f * 48f) {
                 placeThirdPersonWeapon(
                     weapon = b.weapon,
                     charX = b.x,
@@ -736,6 +757,7 @@ class FilamentGameplayController(
         var eqYaw = 0f
         var eqPitch = 0f
         var eqRoll = 0f
+        var eqWeaponOnlyRoll = 0f
 
         if (u > 0.001f) {
             when (w) {
@@ -743,9 +765,11 @@ class FilamentGameplayController(
                     eqX = 0.08f * ease
                     eqY = -0.26f * ease
                     eqZ = 0.07f * ease
-                    eqYaw = -22f * ease
-                    eqPitch = -35f * ease
-                    eqRoll = 210f * ease
+                    eqYaw = -18f * ease
+                    eqPitch = -32f * ease
+                    eqRoll = -14f * ease
+                    // Only the knife flips into the palm on draw — the arm stays natural!
+                    eqWeaponOnlyRoll = 210f * ease
                 }
                 WeaponType.USP_S, WeaponType.GLOCK_18, WeaponType.DESERT_EAGLE -> {
                     val rackBump = if (ep in 0.42f..0.78f) {
@@ -883,7 +907,10 @@ class FilamentGameplayController(
                     yawDeg = yawDeg,
                     pitchDeg = pitchDeg,
                     rollDeg = rollDeg,
-                    scale = VM_SCALE
+                    scale = VM_SCALE,
+                    weaponOnlyYawDeg = inspectDelta.weaponOnlyYawDeg,
+                    weaponOnlyPitchDeg = inspectDelta.weaponOnlyPitchDeg,
+                    weaponOnlyRollDeg = inspectDelta.weaponOnlyRollDeg + eqWeaponOnlyRoll
                 )
                 // Animate physical 3D Bolt/Slide and Magazine child nodes inside the weapon GLB!
                 FilamentSceneHelpers.applyWeaponPartOffsets(
@@ -917,17 +944,17 @@ class FilamentGameplayController(
                     tx = vmX,
                     ty = vmY,
                     tz = (offZ - 0.08f) * VM_SCALE,
-                    yawDeg = autoYaw + yawDeg,
-                    pitchDeg = pitchDeg,
-                    rollDeg = rollDeg,
+                    yawDeg = autoYaw + yawDeg + inspectDelta.weaponOnlyYawDeg,
+                    pitchDeg = pitchDeg + inspectDelta.weaponOnlyPitchDeg,
+                    rollDeg = rollDeg + inspectDelta.weaponOnlyRollDeg + eqWeaponOnlyRoll,
                     anchorBottom = false
                 )
             }
             Matrix.multiplyMM(finalMat, 0, camMat, 0, localMat, 0)
-            tm.setTransform(tm.getInstance(model.asset.root), finalMat)
+            tm.setTransform(tm.getInstance(model.rootEntity), finalMat)
         }
 
-        // Synced Faction First-Person Tactical Hands & Gloves (with anti-wall-clip scale + reload hand motion)
+        // Synced Faction First-Person Tactical Hands & Gloves (zero per-frame allocs, NEVER inherits weaponOnly spin!)
         val isT = gameEngine.matchConfig.playerSide == TeamSide.T
         val activeHands: LoadedGlbModel? = if (hideWeapon || isCustomWeapon || w == WeaponType.C4_BOMB) {
             null
@@ -938,8 +965,8 @@ class FilamentGameplayController(
                 else -> if (isT) handsTRifle else handsCtRifle
             }
         }
-        val allHands = listOf(handsTRifle, handsTPistol, handsTKnife, handsCtRifle, handsCtPistol, handsCtKnife)
-        for (h in allHands) {
+        for (i in 0 until allHandsSlots.size) {
+            val h = allHandsSlots[i]
             val vis = (h != null && h === activeHands)
             FilamentSceneHelpers.setAssetVisible(scene, h, vis)
             if (vis && h != null) {
@@ -954,7 +981,7 @@ class FilamentGameplayController(
                     scale = VM_SCALE
                 )
                 Matrix.multiplyMM(finalMat, 0, camMat, 0, handLocalMat, 0)
-                tm.setTransform(tm.getInstance(h.asset.root), finalMat)
+                tm.setTransform(tm.getInstance(h.rootEntity), finalMat)
             }
         }
 

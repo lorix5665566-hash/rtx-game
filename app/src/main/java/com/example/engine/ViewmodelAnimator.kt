@@ -21,6 +21,11 @@ data class ViewmodelPoseDelta(
     var handTz: Float = 0f,
     var handPitchDeg: Float = 0f,
     var handRollDeg: Float = 0f,
+    // Weapon-only flourish rotations (e.g. Knife 360° blade spin / Deagle trigger spin) that
+    // rotate ONLY the weapon around its handle while the first-person hand stays naturally steady!
+    var weaponOnlyYawDeg: Float = 0f,
+    var weaponOnlyPitchDeg: Float = 0f,
+    var weaponOnlyRollDeg: Float = 0f,
     // Physical animated sub-parts inside the weapon GLB ("Bolt" and "Magazine" child nodes)
     var boltOffsetZ: Float = 0f,
     var magTx: Float = 0f,
@@ -33,6 +38,7 @@ data class ViewmodelPoseDelta(
         yawDeg = 0f; pitchDeg = 0f; rollDeg = 0f
         handTx = 0f; handTy = 0f; handTz = 0f
         handPitchDeg = 0f; handRollDeg = 0f
+        weaponOnlyYawDeg = 0f; weaponOnlyPitchDeg = 0f; weaponOnlyRollDeg = 0f
         boltOffsetZ = 0f
         magTx = 0f; magTy = 0f; magTz = 0f; magPitchDeg = 0f
     }
@@ -248,22 +254,28 @@ object ViewmodelAnimator {
 
         when (weapon) {
             WeaponType.KNIFE -> {
-                // Iconic CS2 / Standoff knife inspect: brisk 360° blade spin -> flat light-catching tilt -> reverse check -> return!
+                // Iconic CS2 knife inspect: ONLY the knife performs the brisk 360° blade spin
+                // around its handle while the wrist & hand stay steady and gently tilted!
                 val spinT = smoothstep(0.06f, 0.38f, p)
                 val leftShowcase = plateau(p, 0.36f, 0.50f, 0.64f, 0.76f)
                 val rightShowcase = plateau(p, 0.66f, 0.76f, 0.84f, 0.94f)
                 val spinKick = pulse(p, 0.06f, 0.38f)
 
-                out.tx = -0.065f * lift + 0.025f * rightShowcase
-                out.ty = 0.055f * lift + 0.022f * spinKick + microFloat
-                out.tz = 0.055f * lift - 0.020f * leftShowcase
-                out.yawDeg = 52f * leftShowcase - 24f * rightShowcase + 26f * spinKick
-                out.pitchDeg = 18f * lift + 14f * leftShowcase - 10f * rightShowcase + 360f * spinT
-                out.rollDeg = -32f * leftShowcase + 42f * rightShowcase - 45f * spinKick
+                out.tx = -0.058f * lift + 0.022f * rightShowcase
+                out.ty = 0.050f * lift + 0.014f * spinKick + microFloat
+                out.tz = 0.048f * lift - 0.016f * leftShowcase
+                // Natural wrist presentation angles shared by hand + knife
+                out.yawDeg = 32f * leftShowcase - 18f * rightShowcase + 8f * spinKick
+                out.pitchDeg = 14f * lift + 10f * leftShowcase - 8f * rightShowcase
+                out.rollDeg = -22f * leftShowcase + 26f * rightShowcase - 10f * spinKick
+                // Pure weapon-only 360° spin around knife grip axis (hand NEVER spins around its axis!)
+                out.weaponOnlyPitchDeg = 360f * spinT
+                out.weaponOnlyRollDeg = -22f * spinKick
             }
 
             WeaponType.USP_S, WeaponType.GLOCK_18, WeaponType.DESERT_EAGLE -> {
-                // Stylish pistol inspect: raise near center -> flourish cant -> admire left slide -> roll to right slide!
+                // Stylish pistol inspect: raise near center -> admire left slide -> roll to right slide!
+                // On Desert Eagle, ONLY the pistol spins 360° on the trigger finger, never the hand!
                 val leftView = plateau(p, 0.08f, 0.24f, 0.48f, 0.60f)
                 val rightView = plateau(p, 0.52f, 0.66f, 0.82f, 0.94f)
                 val deagleSpin = if (weapon == WeaponType.DESERT_EAGLE) {
@@ -274,8 +286,9 @@ object ViewmodelAnimator {
                 out.ty = 0.058f * lift + microFloat
                 out.tz = 0.068f * lift
                 out.yawDeg = 54f * leftView - 16f * rightView
-                out.pitchDeg = 14f * leftView - 6f * rightView + deagleSpin
+                out.pitchDeg = 14f * leftView - 6f * rightView
                 out.rollDeg = -28f * leftView + 52f * rightView
+                out.weaponOnlyPitchDeg = deagleSpin
             }
 
             WeaponType.AK47, WeaponType.M4A1_S, WeaponType.AWP, WeaponType.P90, WeaponType.MP9 -> {

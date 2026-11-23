@@ -4,6 +4,7 @@ import android.opengl.Matrix
 import com.example.model.WeaponType
 import com.google.android.filament.Engine
 import com.google.android.filament.gltfio.FilamentAsset
+import com.google.android.filament.gltfio.FilamentInstance
 import kotlin.math.PI
 import kotlin.math.abs
 import kotlin.math.acos
@@ -75,20 +76,65 @@ class TurnShuffleState {
 }
 
 /**
- * Cached Filament joint entity handles for char_terrorist.glb & char_ct.glb.
+ * Resolves a named glTF node entity strictly belonging to [instance] (safe for GPU-instanced
+ * assets created via AssetLoader.createInstancedAsset).
  */
-class OperativeRigHandles(asset: FilamentAsset) {
-    val pelvis: Int = asset.getFirstEntityByName("Pelvis")
-    val spine: Int = asset.getFirstEntityByName("Spine")
-    val head: Int = asset.getFirstEntityByName("Head")
-    val lShoulder: Int = asset.getFirstEntityByName("L_Shoulder")
-    val lElbow: Int = asset.getFirstEntityByName("L_Elbow")
-    val rShoulder: Int = asset.getFirstEntityByName("R_Shoulder")
-    val rElbow: Int = asset.getFirstEntityByName("R_Elbow")
-    val lHip: Int = asset.getFirstEntityByName("L_Hip")
-    val lKnee: Int = asset.getFirstEntityByName("L_Knee")
-    val rHip: Int = asset.getFirstEntityByName("R_Hip")
-    val rKnee: Int = asset.getFirstEntityByName("R_Knee")
+internal fun resolveInstanceEntityByName(
+    asset: FilamentAsset,
+    instance: FilamentInstance,
+    name: String
+): Int {
+    val instEntities = instance.entities
+    for (e in instEntities) {
+        if (asset.getName(e) == name) return e
+    }
+    // Check skin joints directly if this instance is skinned
+    if (instance.skinCount > 0) {
+        val instJoints = instance.getJointsAt(0)
+        for (j in instJoints) {
+            if (asset.getName(j) == name) return j
+        }
+    }
+    // Fallback: Filament creates every FilamentInstance's entities in identical glTF node order
+    val primary = asset.instance
+    val primaryTarget = asset.getFirstEntityByName(name)
+    if (primaryTarget != 0) {
+        if (instance === primary) return primaryTarget
+        val primaryEntities = primary.entities
+        val idx = primaryEntities.indexOf(primaryTarget)
+        if (idx in instEntities.indices) {
+            return instEntities[idx]
+        }
+        if (primary.skinCount > 0 && instance.skinCount > 0) {
+            val pJoints = primary.getJointsAt(0)
+            val iJoints = instance.getJointsAt(0)
+            val jIdx = pJoints.indexOf(primaryTarget)
+            if (jIdx in iJoints.indices) {
+                return iJoints[jIdx]
+            }
+        }
+    }
+    return 0
+}
+
+/**
+ * Cached Filament joint entity handles for a specific FilamentInstance of char_terrorist.glb & char_ct.glb.
+ */
+class OperativeRigHandles(
+    asset: FilamentAsset,
+    instance: FilamentInstance = asset.instance
+) {
+    val pelvis: Int = resolveInstanceEntityByName(asset, instance, "Pelvis")
+    val spine: Int = resolveInstanceEntityByName(asset, instance, "Spine")
+    val head: Int = resolveInstanceEntityByName(asset, instance, "Head")
+    val lShoulder: Int = resolveInstanceEntityByName(asset, instance, "L_Shoulder")
+    val lElbow: Int = resolveInstanceEntityByName(asset, instance, "L_Elbow")
+    val rShoulder: Int = resolveInstanceEntityByName(asset, instance, "R_Shoulder")
+    val rElbow: Int = resolveInstanceEntityByName(asset, instance, "R_Elbow")
+    val lHip: Int = resolveInstanceEntityByName(asset, instance, "L_Hip")
+    val lKnee: Int = resolveInstanceEntityByName(asset, instance, "L_Knee")
+    val rHip: Int = resolveInstanceEntityByName(asset, instance, "R_Hip")
+    val rKnee: Int = resolveInstanceEntityByName(asset, instance, "R_Knee")
 
     val hasFullHumanoidRig: Boolean =
         pelvis != 0 && spine != 0 &&

@@ -275,6 +275,15 @@ class GameEngine(
         remotePlayersMap.values.map { it.copy() }
     }
 
+    fun fillRemotePlayersSnapshot(out: MutableList<RemoteHumanPlayer>) {
+        out.clear()
+        synchronized(remoteLock) {
+            for (rp in remotePlayersMap.values) {
+                out.add(rp.copy())
+            }
+        }
+    }
+
     /**
      * Thread-safe enqueue for incoming C4 Bomb & Warmup-skip sync events from Supabase Realtime WebSocket.
      */
