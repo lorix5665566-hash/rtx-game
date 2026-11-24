@@ -44,6 +44,7 @@ class FilamentLobbyController(
     @Volatile var showcaseSide: TeamSide = TeamSide.T
     @Volatile var showcaseMap: ArenaMapId = ArenaMapId.MIRAGE
     @Volatile var characterYawDeg: Float = 0f
+    @Volatile var equippedSkins: Map<String, String> = emptyMap()
     @Volatile private var yawVelocityDegPerSec: Float = 0f
 
     private lateinit var engine: Engine
@@ -407,6 +408,7 @@ class FilamentLobbyController(
 
         val activeWeaponModel = if (isT) ak47WeaponModel else m4WeaponModel
         if (activeWeaponModel != null) {
+            FilamentSceneHelpers.applyWeaponSkin(activeWeaponModel, equippedSkins[showcaseWeapon.name])
             rigAnimator.buildHeldWeaponMatrix(
                 out = weaponMat,
                 weapon = showcaseWeapon,

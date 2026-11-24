@@ -77,10 +77,14 @@ class GameViewModel(application: Application) : AndroidViewModel(application) {
     fun startGame(
         localUserId: String = "",
         localDisplayName: String = "",
-        localShortId: String = ""
+        localShortId: String = "",
+        localLevel: Int = 1,
+        localEquippedSkins: Map<String, String> = emptyMap()
     ) {
         _isPauseOverlayOpen.value = false
         engine.settings = _settings.value
+        engine.localLevel = localLevel.coerceAtLeast(1)
+        engine.localEquippedSkins = localEquippedSkins
         engine.startNewMatch(
             _matchConfig.value.copy(
                 isMultiplayer = false,
@@ -88,7 +92,9 @@ class GameViewModel(application: Application) : AndroidViewModel(application) {
                 allowBots = true,
                 localUserId = localUserId,
                 localDisplayName = localDisplayName,
-                localShortId = localShortId
+                localShortId = localShortId,
+                localLevel = localLevel.coerceAtLeast(1),
+                localEquippedSkins = localEquippedSkins
             )
         )
         _screen.value = AppScreen.Playing

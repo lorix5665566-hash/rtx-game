@@ -38,11 +38,16 @@ object AvatarPresets {
     }
 }
 
-const val ADMIN_SHORT_ID: String = "932760"
+const val ADMIN_SHORT_ID: String = "developer"
+
+fun isValidPlayerShortId(raw: String): Boolean {
+    val clean = raw.trim().lowercase()
+    return clean == ADMIN_SHORT_ID || Regex("^[1-9][0-9]{5}$").matches(clean)
+}
 
 /**
  * Cloud human player profile stored in Supabase.
- * Every real human player has a permanent unique 6-digit numeric ID (bots never have IDs).
+ * Regular players have a permanent unique 6-digit numeric ID; admin has exclusive 'developer' ID.
  */
 data class PlayerProfile(
     val id: String = "",
@@ -51,23 +56,30 @@ data class PlayerProfile(
     val displayName: String = "",
     val avatarData: String = AvatarPresets.DEFAULT_KEY,
     val online: Boolean = true,
+    val lastSeenAtMs: Long = 0L,
     val totalKills: Int = 0,
     val totalHeadshots: Int = 0,
+    val xp: Long = 0L,
+    val level: Int = 1,
+    val coins: Int = 0,
+    val ownedSkins: List<String> = emptyList(),
+    val equippedSkins: Map<String, String> = emptyMap(),
     val banned: Boolean = false,
     val banReason: String = ""
 ) {
     val isAdmin: Boolean
-        get() = shortId == ADMIN_SHORT_ID
+        get() = shortId.equals(ADMIN_SHORT_ID, ignoreCase = true)
 }
 
 /**
- * Mutual cloud friend entry hydrated with live nickname, avatar, and online status.
+ * Mutual cloud friend entry hydrated with live nickname, avatar, level, and real online status.
  */
 data class FriendEntry(
     val friendUid: String = "",
     val friendShortId: String = "",
     val friendName: String = "",
     val friendAvatarData: String = AvatarPresets.DEFAULT_KEY,
+    val level: Int = 1,
     val online: Boolean = false
 )
 
@@ -80,10 +92,12 @@ data class FriendRequest(
     val fromShortId: String = "",
     val fromName: String = "",
     val fromAvatarData: String = AvatarPresets.DEFAULT_KEY,
+    val fromLevel: Int = 1,
     val toUid: String = "",
     val toShortId: String = "",
     val toName: String = "",
     val toAvatarData: String = AvatarPresets.DEFAULT_KEY,
+    val toLevel: Int = 1,
     val status: String = "pending"
 )
 
@@ -112,6 +126,7 @@ data class LobbyInvite(
     val fromShortId: String = "",
     val fromName: String = "",
     val fromAvatarData: String = AvatarPresets.DEFAULT_KEY,
+    val fromLevel: Int = 1,
     val toUid: String = "",
     val mapId: String = "MIRAGE",
     val status: String = "pending"
@@ -126,6 +141,9 @@ data class PlayerMatchState(
     val shortId: String = "",
     val displayName: String = "",
     val avatarData: String = AvatarPresets.DEFAULT_KEY,
+    val level: Int = 1,
+    val equippedSkins: Map<String, String> = emptyMap(),
+    val activeSkinId: String = "",
     val team: String = "T",
     val ready: Boolean = true,
     val x: Double = 0.0,

@@ -166,21 +166,118 @@ class SupabaseOnlineRepository(
     suspend fun setOnlineStatus(userId: String, online: Boolean) {
         withContext(Dispatchers.IO) {
             runCatching {
-                patchRest(
-                    table = "profiles",
-                    query = mapOf("user_id" to "eq.$userId"),
-                    body = JSONObject().apply { put("online", online) }
+                val rpc = callRpc(
+                    fnName = "ping_presence",
+                    body = JSONObject().apply { put("p_online", online) }
                 )
+                if (rpc.isFailure) {
+                    patchRest(
+                        table = "profiles",
+                        query = mapOf("user_id" to "eq.$userId"),
+                        body = JSONObject().apply {
+                            put("online", online)
+                            put("updated_at", nowIsoUtc())
+                        }
+                    )
+                }
             }
         }
     }
 
+    suspend fun awardKillXp(kills: Int = 1, headshots: Int = 0): Result<PlayerProfile> =
+        withContext(Dispatchers.IO) {
+            runCatching {
+                val raw = callRpc(
+                    fnName = "award_kill_xp",
+                    body = JSONObject().apply {
+                        put("p_kills", kills.coerceIn(1, 5))
+                        put("p_headshots", headshots.coerceIn(0, kills.coerceIn(1, 5)))
+                    }
+                ).getOrThrow().trim()
+                val obj = parseSingleObject(raw) ?: error("Не удалось прочитать профиль после начисления EXP.")
+                parseProfile(obj)
+            }
+        }
+
+    suspend fun openSkinCase(skinId: String, duplicateRefund: Int): Result<PlayerProfile> =
+        withContext(Dispatchers.IO) {
+            runCatching {
+                val raw = callRpc(
+                    fnName = "open_skin_case",
+                    body = JSONObject().apply {
+                        put("p_skin_id", skinId.trim())
+                        put("p_duplicate_refund", duplicateRefund.coerceIn(0, 120))
+                    }
+                ).getOrThrow().trim()
+                val obj = parseSingleObject(raw) ?: error("Не удалось прочитать профиль после открытия кейса.")
+                parseProfile(obj)
+            }
+        }
+
+    suspend fun equipWeaponSkin(weaponName: String, skinId: String?): Result<PlayerProfile> =
+        withContext(Dispatchers.IO) {
+            runCatching {
+                val raw = callRpc(
+                    fnName = "equip_weapon_skin",
+                    body = JSONObject().apply {
+                        put("p_weapon", weaponName.trim().uppercase())
+                        put("p_skin_id", skinId?.trim().orEmpty())
+                    }
+                ).getOrThrow().trim()
+                val obj = parseSingleObject(raw) ?: error("Не удалось обновить экипированный скин.")
+                parseProfile(obj)
+            }
+        }
+
+    suspend fun adminGrantXp(targetShortIdRaw: String, xpAmount: Int): Result<PlayerProfile> =
+        withContext(Dispatchers.IO) {
+            runCatching {
+                val cleanId = targetShortIdRaw.trim().lowercase()
+                require(isValidPlayerShortId(cleanId)) {
+                    "Укажите 6-значный ID игрока или developer."
+                }
+                val safeXp = xpAmount.coerceIn(1, 500_000)
+                val raw = callRpc(
+                    fnName = "admin_grant_xp",
+                    body = JSONObject().apply {
+                        put("p_target_short_id", cleanId)
+                        put("p_xp_amount", safeXp)
+                    }
+                ).getOrThrow().trim()
+                val obj = parseSingleObject(raw) ?: error("Не удалось начислить EXP игроку.")
+                parseProfile(obj)
+            }
+        }
+
+    suspend fun adminGrantSkins(targetShortIdRaw: String, skinIds: List<String>): Result<PlayerProfile> =
+        withContext(Dispatchers.IO) {
+            runCatching {
+                val cleanId = targetShortIdRaw.trim().lowercase()
+                require(isValidPlayerShortId(cleanId)) {
+                    "Укажите 6-значный ID игрока или developer."
+                }
+                val cleanSkins = skinIds.map { it.trim() }.filter { it.isNotBlank() }.distinct()
+                require(cleanSkins.isNotEmpty()) { "Выберите хотя бы один скин." }
+                val arr = JSONArray()
+                cleanSkins.forEach { arr.put(it) }
+                val raw = callRpc(
+                    fnName = "admin_grant_skins",
+                    body = JSONObject().apply {
+                        put("p_target_short_id", cleanId)
+                        put("p_skin_ids", arr)
+                    }
+                ).getOrThrow().trim()
+                val obj = parseSingleObject(raw) ?: error("Не удалось выдать скины игроку.")
+                parseProfile(obj)
+            }
+        }
+
     suspend fun findPlayerByShortId(shortIdRaw: String): Result<PlayerProfile?> =
         withContext(Dispatchers.IO) {
             runCatching {
-                val shortId = shortIdRaw.trim()
-                require(SHORT_ID_REGEX.matches(shortId)) {
-                    "ID игрока должен состоять из 6 цифр (например, 482915)."
+                val shortId = shortIdRaw.trim().lowercase()
+                require(isValidPlayerShortId(shortId)) {
+                    "Введите 6-значный ID игрока (например, 482915) или developer."
                 }
                 val body = getRest(
                     table = "profiles",
@@ -206,12 +303,12 @@ class SupabaseOnlineRepository(
         reasonRaw: String = ""
     ): Result<PlayerProfile> = withContext(Dispatchers.IO) {
         runCatching {
-            val shortId = targetShortIdRaw.trim()
+            val shortId = targetShortIdRaw.trim().lowercase()
+            require(shortId != ADMIN_SHORT_ID) {
+                "Нельзя заблокировать аккаунт администратора ($ADMIN_SHORT_ID)."
+            }
             require(SHORT_ID_REGEX.matches(shortId)) {
                 "ID игрока должен состоять из 6 цифр."
-            }
-            require(shortId != ADMIN_SHORT_ID) {
-                "Нельзя заблокировать аккаунт администратора."
             }
             val cleanReason = reasonRaw.trim().take(120)
             val body = JSONObject().apply {
@@ -220,9 +317,7 @@ class SupabaseOnlineRepository(
                 put("p_reason", cleanReason)
             }
             val raw = callRpc("admin_set_ban", body).getOrThrow().trim()
-            val obj = runCatching {
-                if (raw.startsWith("[")) JSONArray(raw).optJSONObject(0) else JSONObject(raw)
-            }.getOrNull() ?: error("Не удалось прочитать ответ сервера.")
+            val obj = parseSingleObject(raw) ?: error("Не удалось прочитать ответ сервера.")
             parseProfile(obj)
         }
     }
@@ -305,6 +400,7 @@ class SupabaseOnlineRepository(
                     friendShortId = p.shortId,
                     friendName = p.displayName,
                     friendAvatarData = p.avatarData,
+                    level = p.level,
                     online = p.online
                 )
             }.sortedWith(compareByDescending<FriendEntry> { it.online }.thenBy { it.friendName.lowercase() })
@@ -346,10 +442,12 @@ class SupabaseOnlineRepository(
                         fromShortId = fromP?.shortId.orEmpty(),
                         fromName = fromP?.displayName ?: "Игрок",
                         fromAvatarData = fromP?.avatarData ?: AvatarPresets.DEFAULT_KEY,
+                        fromLevel = fromP?.level ?: 1,
                         toUid = toUid,
                         toShortId = toP?.shortId.orEmpty(),
                         toName = toP?.displayName ?: "Игрок",
                         toAvatarData = toP?.avatarData ?: AvatarPresets.DEFAULT_KEY,
+                        toLevel = toP?.level ?: 1,
                         status = o.optString("status", "pending")
                     )
                     if (toUid == userId) incoming.add(req) else if (fromUid == userId) outgoing.add(req)
@@ -452,14 +550,26 @@ class SupabaseOnlineRepository(
                 put("short_id", host.shortId)
                 put("display_name", host.displayName)
                 put("avatar_data", host.avatarData)
+                put("level", host.level.coerceAtLeast(1))
+                put("equipped_skins", JSONObject(host.equippedSkins))
                 put("team", team.name)
                 put("weapon", if (team == TeamSide.CT) "USP_S" else "GLOCK_18")
             }
-            postRest(
+            val insertRes = postRest(
                 table = "lobby_members",
                 body = memberBody,
                 prefer = "resolution=merge-duplicates,return=minimal"
-            ).getOrThrow()
+            )
+            if (insertRes.isFailure) {
+                // Backward-compatible fallback if v0.07 SQL migration not yet run
+                memberBody.remove("level")
+                memberBody.remove("equipped_skins")
+                postRest(
+                    table = "lobby_members",
+                    body = memberBody,
+                    prefer = "resolution=merge-duplicates,return=minimal"
+                ).getOrThrow()
+            }
 
             parseLobby(obj, listOf(host.userId))
         }
@@ -489,14 +599,25 @@ class SupabaseOnlineRepository(
                 put("short_id", profile.shortId)
                 put("display_name", profile.displayName)
                 put("avatar_data", profile.avatarData)
+                put("level", profile.level.coerceAtLeast(1))
+                put("equipped_skins", JSONObject(profile.equippedSkins))
                 put("team", assignedTeam.name)
                 put("weapon", if (assignedTeam == TeamSide.CT) "USP_S" else "GLOCK_18")
             }
-            postRest(
+            val insertRes = postRest(
                 table = "lobby_members",
                 body = memberBody,
                 prefer = "resolution=merge-duplicates,return=minimal"
-            ).getOrThrow()
+            )
+            if (insertRes.isFailure) {
+                memberBody.remove("level")
+                memberBody.remove("equipped_skins")
+                postRest(
+                    table = "lobby_members",
+                    body = memberBody,
+                    prefer = "resolution=merge-duplicates,return=minimal"
+                ).getOrThrow()
+            }
 
             fetchLobbySnapshot(lobbyId).getOrThrow()
                 ?: (lobby to existingMembers)
@@ -684,6 +805,7 @@ class SupabaseOnlineRepository(
                                 fromShortId = sender?.shortId.orEmpty(),
                                 fromName = sender?.displayName ?: "Игрок",
                                 fromAvatarData = sender?.avatarData ?: AvatarPresets.DEFAULT_KEY,
+                                fromLevel = sender?.level ?: 1,
                                 toUid = o.optString("to_uid"),
                                 mapId = o.optString("map_id", "MIRAGE"),
                                 status = o.optString("status", "pending")
@@ -934,19 +1056,63 @@ class SupabaseOnlineRepository(
         return Result.failure(IllegalStateException(friendly))
     }
 
-    private fun parseProfile(o: JSONObject): PlayerProfile = PlayerProfile(
-        id = o.optString("user_id"),
-        userId = o.optString("user_id"),
-        shortId = o.optString("short_id"),
-        displayName = o.optString("display_name", "Игрок"),
-        avatarData = o.optString("avatar_data", AvatarPresets.DEFAULT_KEY)
-            .ifBlank { AvatarPresets.DEFAULT_KEY },
-        online = o.optBoolean("online", false),
-        totalKills = o.optInt("total_kills", 0),
-        totalHeadshots = o.optInt("total_headshots", 0),
-        banned = o.optBoolean("banned", false),
-        banReason = o.optString("ban_reason", "")
-    )
+    private fun parseSingleObject(raw: String): JSONObject? = runCatching {
+        if (raw.startsWith("[")) JSONArray(raw).optJSONObject(0) else JSONObject(raw)
+    }.getOrNull()
+
+    private fun parseProfile(o: JSONObject): PlayerProfile {
+        val rawOnline = o.optBoolean("online", false)
+        val lastSeenStr = o.optString("last_seen_at", "").ifBlank { o.optString("updated_at", "") }
+        val lastSeenMs = parseIsoTimestampMs(lastSeenStr)
+        val nowMs = System.currentTimeMillis()
+        // Strict real-time presence: player is only online if flagged online AND heartbeat was within 55 seconds!
+        val isTrulyOnline = rawOnline && (lastSeenMs > 0L && (nowMs - lastSeenMs) in -60_000L..ONLINE_PRESENCE_TTL_MS)
+
+        val ownedList = ArrayList<String>()
+        val ownedArr = o.optJSONArray("owned_skins")
+        if (ownedArr != null) {
+            for (i in 0 until ownedArr.length()) {
+                val sid = ownedArr.optString(i).trim()
+                if (sid.isNotBlank() && !ownedList.contains(sid)) ownedList.add(sid)
+            }
+        }
+
+        val equippedMap = LinkedHashMap<String, String>()
+        val eqObj = o.optJSONObject("equipped_skins")
+        if (eqObj != null) {
+            val keys = eqObj.keys()
+            while (keys.hasNext()) {
+                val wKey = keys.next()
+                val sVal = eqObj.optString(wKey).trim()
+                if (wKey.isNotBlank() && sVal.isNotBlank()) {
+                    equippedMap[wKey] = sVal
+                }
+            }
+        }
+
+        val xp = o.optLong("xp", 0L).coerceAtLeast(0L)
+        val level = o.optInt("level", 1).coerceAtLeast(1)
+
+        return PlayerProfile(
+            id = o.optString("user_id"),
+            userId = o.optString("user_id"),
+            shortId = o.optString("short_id"),
+            displayName = o.optString("display_name", "Игрок"),
+            avatarData = o.optString("avatar_data", AvatarPresets.DEFAULT_KEY)
+                .ifBlank { AvatarPresets.DEFAULT_KEY },
+            online = isTrulyOnline,
+            lastSeenAtMs = lastSeenMs,
+            totalKills = o.optInt("total_kills", 0),
+            totalHeadshots = o.optInt("total_headshots", 0),
+            xp = xp,
+            level = level,
+            coins = o.optInt("coins", 0).coerceAtLeast(0),
+            ownedSkins = ownedList,
+            equippedSkins = equippedMap,
+            banned = o.optBoolean("banned", false),
+            banReason = o.optString("ban_reason", "")
+        )
+    }
 
     private fun parseLobby(o: JSONObject, memberUids: List<String>): MultiplayerLobby = MultiplayerLobby(
         id = o.optString("id"),
@@ -960,33 +1126,84 @@ class SupabaseOnlineRepository(
         memberUids = memberUids
     )
 
-    private fun parseMemberState(o: JSONObject): PlayerMatchState = PlayerMatchState(
-        id = o.optString("user_id"),
-        userId = o.optString("user_id"),
-        shortId = o.optString("short_id"),
-        displayName = o.optString("display_name", "Игрок"),
-        avatarData = o.optString("avatar_data", AvatarPresets.DEFAULT_KEY)
-            .ifBlank { AvatarPresets.DEFAULT_KEY },
-        team = if (o.optString("team") == TeamSide.CT.name) TeamSide.CT.name else TeamSide.T.name,
-        ready = o.optBoolean("ready", true),
-        x = o.optDouble("x", 0.0),
-        y = o.optDouble("y", 0.0),
-        z = o.optDouble("z", 0.0),
-        yawDeg = o.optDouble("yaw_deg", 0.0),
-        pitchDeg = o.optDouble("pitch_deg", 0.0),
-        hp = o.optInt("hp", 100).coerceIn(0, 100),
-        dead = o.optBoolean("dead", false),
-        moving = o.optBoolean("moving", false),
-        shooting = o.optBoolean("shooting", false),
-        weapon = o.optString("weapon", "GLOCK_18"),
-        kills = o.optInt("kills", 0),
-        deaths = o.optInt("deaths", 0),
-        hitTargetUid = o.optString("hit_target_uid", ""),
-        hitDamage = o.optInt("hit_damage", 0),
-        hitHeadshot = o.optBoolean("hit_headshot", false),
-        hitWeapon = o.optString("hit_weapon", ""),
-        hitSeq = o.optInt("hit_seq", 0)
-    )
+    private fun parseMemberState(o: JSONObject): PlayerMatchState {
+        val equippedMap = LinkedHashMap<String, String>()
+        val eqObj = o.optJSONObject("equipped_skins")
+        if (eqObj != null) {
+            val keys = eqObj.keys()
+            while (keys.hasNext()) {
+                val wKey = keys.next()
+                val sVal = eqObj.optString(wKey).trim()
+                if (wKey.isNotBlank() && sVal.isNotBlank()) equippedMap[wKey] = sVal
+            }
+        }
+        val weaponName = o.optString("weapon", "GLOCK_18")
+        return PlayerMatchState(
+            id = o.optString("user_id"),
+            userId = o.optString("user_id"),
+            shortId = o.optString("short_id"),
+            displayName = o.optString("display_name", "Игрок"),
+            avatarData = o.optString("avatar_data", AvatarPresets.DEFAULT_KEY)
+                .ifBlank { AvatarPresets.DEFAULT_KEY },
+            level = o.optInt("level", 1).coerceAtLeast(1),
+            equippedSkins = equippedMap,
+            activeSkinId = equippedMap[weaponName].orEmpty(),
+            team = if (o.optString("team") == TeamSide.CT.name) TeamSide.CT.name else TeamSide.T.name,
+            ready = o.optBoolean("ready", true),
+            x = o.optDouble("x", 0.0),
+            y = o.optDouble("y", 0.0),
+            z = o.optDouble("z", 0.0),
+            yawDeg = o.optDouble("yaw_deg", 0.0),
+            pitchDeg = o.optDouble("pitch_deg", 0.0),
+            hp = o.optInt("hp", 100).coerceIn(0, 100),
+            dead = o.optBoolean("dead", false),
+            moving = o.optBoolean("moving", false),
+            shooting = o.optBoolean("shooting", false),
+            weapon = weaponName,
+            kills = o.optInt("kills", 0),
+            deaths = o.optInt("deaths", 0),
+            hitTargetUid = o.optString("hit_target_uid", ""),
+            hitDamage = o.optInt("hit_damage", 0),
+            hitHeadshot = o.optBoolean("hit_headshot", false),
+            hitWeapon = o.optString("hit_weapon", ""),
+            hitSeq = o.optInt("hit_seq", 0)
+        )
+    }
+
+    private fun parseIsoTimestampMs(raw: String): Long {
+        if (raw.isBlank()) return 0L
+        return runCatching {
+            // Normalize PostgREST timestamptz e.g. "2026-11-24T12:34:56.789123+00:00" or "...Z"
+            val cleaned = raw.trim().replace(" ", "T")
+            val tzRegex = Regex("([+-]\\d{2}):(\\d{2})$")
+            val normalized = when {
+                cleaned.endsWith("Z") -> cleaned.dropLast(1) + "+0000"
+                tzRegex.containsMatchIn(cleaned) -> tzRegex.replace(cleaned, "$1$2")
+                else -> cleaned + "+0000"
+            }
+            // Trim sub-second precision to 3 digits for SimpleDateFormat
+            val dotIdx = normalized.indexOf('.')
+            val tzIdx = normalized.lastIndexOfAny(charArrayOf('+', '-'))
+            val trimmed = if (dotIdx in 1 until tzIdx) {
+                val frac = normalized.substring(dotIdx + 1, tzIdx).take(3).padEnd(3, '0')
+                normalized.substring(0, dotIdx + 1) + frac + normalized.substring(tzIdx)
+            } else {
+                normalized
+            }
+            val pattern = if (trimmed.contains('.')) "yyyy-MM-dd'T'HH:mm:ss.SSSZ" else "yyyy-MM-dd'T'HH:mm:ssZ"
+            val fmt = java.text.SimpleDateFormat(pattern, java.util.Locale.US).apply {
+                timeZone = java.util.TimeZone.getTimeZone("UTC")
+            }
+            fmt.parse(trimmed)?.time ?: 0L
+        }.getOrDefault(0L)
+    }
+
+    private fun nowIsoUtc(): String {
+        val fmt = java.text.SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss.SSS'Z'", java.util.Locale.US).apply {
+            timeZone = java.util.TimeZone.getTimeZone("UTC")
+        }
+        return fmt.format(java.util.Date())
+    }
 
     private fun sanitizeDisplayName(raw: String): String {
         val cleaned = raw.trim().filter {
@@ -997,6 +1214,7 @@ class SupabaseOnlineRepository(
 
     companion object {
         private val JSON_MEDIA = "application/json; charset=utf-8".toMediaType()
+        private const val ONLINE_PRESENCE_TTL_MS = 55_000L
         private const val FAST_MEMBER_SELECT =
             "user_id,short_id,display_name,team,ready,x,y,z,yaw_deg,pitch_deg,hp,dead,moving,shooting,weapon,kills,deaths,hit_target_uid,hit_damage,hit_headshot,hit_weapon,hit_seq"
         private val SHORT_ID_REGEX = Regex("^[1-9][0-9]{5}$")

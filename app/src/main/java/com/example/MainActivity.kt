@@ -32,6 +32,9 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.example.model.ArenaMapId
@@ -49,6 +52,7 @@ import com.example.ui.ControlEditorScreen
 import com.example.ui.FriendsOverlay
 import com.example.ui.GameViewModel
 import com.example.ui.GameplayScreen
+import com.example.ui.InventoryAndCasesOverlay
 import com.example.ui.MainMenuScreen
 import com.example.ui.MultiplayerLobbyScreen
 import com.example.ui.OnlineUiState
@@ -203,7 +207,26 @@ fun VanguardRtxApp(
         factory = OnlineViewModel.factory(currentUserId, session.loginName, onlineRepo, authManager)
     )
 
-    // Wire zero-latency WebSocket broadcast sinks directly into GameEngine during matches
+    val lifecycleOwner = LocalLifecycleOwner.current
+
+    // Accurate Online/Offline presence: immediately set offline when app goes to background or closes
+    DisposableEffect(lifecycleOwner, onlineVm) {
+        val observer = LifecycleEventObserver { _, event ->
+            when (event) {
+                Lifecycle.Event.ON_START -> onlineVm.setAppForeground(true)
+                Lifecycle.Event.ON_STOP -> onlineVm.setAppForeground(false)
+                else -> Unit
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onlineVm.setAppForeground(true)
+        onDispose {
+            lifecycleOwner.lifecycle.removeObserver(observer)
+            onlineVm.setAppForeground(false)
+        }
+    }
+
+    // Wire zero-latency WebSocket broadcast sinks & kill EXP rewards directly into GameEngine
     DisposableEffect(currentUserId, vm.engine, onlineVm) {
         onlineVm.attachDirectMatchSinks(
             onRemoteState = { st ->
@@ -232,9 +255,15 @@ fun VanguardRtxApp(
                 onlineVm.switchMyTeam(side)
             }
         }
+        vm.engine.onPlayerKillAwarded = { isHeadshot, _ ->
+            onlineVm.onLocalKillEarned(headshot = isHeadshot) { toast ->
+                vm.engine.showXpToast(toast)
+            }
+        }
         onDispose {
             onlineVm.attachDirectMatchSinks(null, null, null, null)
             vm.engine.onTeamChanged = null
+            vm.engine.onPlayerKillAwarded = null
         }
     }
 
@@ -264,6 +293,8 @@ fun VanguardRtxApp(
     val adminStatus by onlineVm.adminStatus.collectAsStateWithLifecycle()
     val kickedMessage by onlineVm.kickedMessage.collectAsStateWithLifecycle()
     val localBanNotice by onlineVm.localBanNotice.collectAsStateWithLifecycle()
+    val isOpeningCase by onlineVm.isOpeningCase.collectAsStateWithLifecycle()
+    val isUpdatingSkin by onlineVm.isUpdatingSkin.collectAsStateWithLifecycle()
 
     val isAdmin = playerProfile?.isAdmin == true
     val isBanned = (playerProfile?.banned == true) || !localBanNotice.isNullOrBlank()
@@ -271,12 +302,21 @@ fun VanguardRtxApp(
     var isFriendsOpen by rememberSaveable { mutableStateOf(false) }
     var isProfileOpen by rememberSaveable { mutableStateOf(false) }
     var isAdminPanelOpen by rememberSaveable { mutableStateOf(false) }
+    var inventoryOverlayTab by rememberSaveable { mutableStateOf<Int?>(null) }
     var espUiEnabled by rememberSaveable { mutableStateOf(false) }
     var autoAimUiEnabled by rememberSaveable { mutableStateOf(false) }
 
     // Apply target FPS (60 / 90 / 120 FPS) to Android display mode immediately on change
     LaunchedEffect(settings.graphics.targetFps) {
         onTargetFpsChanged(settings.graphics.targetFps.fps)
+    }
+
+    // Keep engine's local level & equipped 3D weapon skins synced live with cloud profile
+    LaunchedEffect(playerProfile?.level, playerProfile?.equippedSkins) {
+        if (playerProfile != null) {
+            vm.engine.localLevel = playerProfile.level.coerceAtLeast(1)
+            vm.engine.localEquippedSkins = playerProfile.equippedSkins
+        }
     }
 
     // Keep engine admin flags synced and strictly disabled for non-admin accounts
@@ -301,6 +341,7 @@ fun VanguardRtxApp(
             isFriendsOpen = false
             isProfileOpen = false
             isAdminPanelOpen = false
+            inventoryOverlayTab = null
             if (screen != AppScreen.Menu) {
                 vm.exitToMainMenu()
             }
@@ -344,7 +385,9 @@ fun VanguardRtxApp(
                 isMatchHost = lobby.hostUid == currentUserId,
                 localUserId = currentUserId,
                 localDisplayName = playerProfile?.displayName ?: session.loginName,
-                localShortId = playerProfile?.shortId ?: ""
+                localShortId = playerProfile?.shortId ?: "",
+                localLevel = playerProfile?.level ?: 1,
+                localEquippedSkins = playerProfile?.equippedSkins ?: emptyMap()
             )
             vm.startMultiplayerMatch(mpConfig)
         }
@@ -372,9 +415,22 @@ fun VanguardRtxApp(
                     if (isAdmin) {
                         isFriendsOpen = false
                         isProfileOpen = false
+                        inventoryOverlayTab = null
                         isAdminPanelOpen = true
                         onlineVm.refreshBannedAccounts()
                     }
+                },
+                onOpenInventory = {
+                    isFriendsOpen = false
+                    isProfileOpen = false
+                    isAdminPanelOpen = false
+                    inventoryOverlayTab = 0
+                },
+                onOpenCases = {
+                    isFriendsOpen = false
+                    isProfileOpen = false
+                    isAdminPanelOpen = false
+                    inventoryOverlayTab = 1
                 },
                 onUpdateMatchConfig = vm::updateMatchConfig,
                 onPlay = {
@@ -382,10 +438,13 @@ fun VanguardRtxApp(
                     vm.startGame(
                         localUserId = p?.userId ?: currentUserId,
                         localDisplayName = p?.displayName ?: session.loginName,
-                        localShortId = p?.shortId ?: ""
+                        localShortId = p?.shortId ?: "",
+                        localLevel = p?.level ?: 1,
+                        localEquippedSkins = p?.equippedSkins ?: emptyMap()
                     )
                 },
                 onCreateLobby = {
+                    inventoryOverlayTab = null
                     onlineVm.createMultiplayerLobby(
                         map = matchConfig.map,
                         mode = matchConfig.mode,
@@ -397,17 +456,20 @@ fun VanguardRtxApp(
                 },
                 onOpenFriends = {
                     isProfileOpen = false
+                    inventoryOverlayTab = null
                     isFriendsOpen = true
                     onlineVm.refreshSocialData()
                 },
                 onOpenProfile = {
                     isFriendsOpen = false
+                    inventoryOverlayTab = null
                     isProfileOpen = true
                     if (profileState is OnlineUiState.Error) {
                         onlineVm.retryLoadProfile()
                     }
                 },
                 onAcceptInvite = { invite ->
+                    inventoryOverlayTab = null
                     onlineVm.acceptLobbyInvite(invite, matchConfig.playerSide) {
                         vm.openMultiplayerLobby()
                     }
@@ -416,11 +478,13 @@ fun VanguardRtxApp(
                 onOpenSettings = {
                     isFriendsOpen = false
                     isProfileOpen = false
+                    inventoryOverlayTab = null
                     vm.openSettings(fromGame = false)
                 },
                 onOpenControls = {
                     isFriendsOpen = false
                     isProfileOpen = false
+                    inventoryOverlayTab = null
                     vm.openControlEditor(fromGame = false)
                 }
             )
@@ -577,7 +641,29 @@ fun VanguardRtxApp(
             )
         }
 
-        // Exclusive Admin Panel Overlay (strictly gated to player with ID 932760)
+        // Skin Inventory & 100-Coin Cases Overlay
+        AnimatedVisibility(
+            visible = inventoryOverlayTab != null && screen == AppScreen.Menu,
+            enter = fadeIn(tween(180)),
+            exit = fadeOut(tween(160))
+        ) {
+            InventoryAndCasesOverlay(
+                initialTab = inventoryOverlayTab ?: 0,
+                profile = playerProfile,
+                isOpeningCase = isOpeningCase,
+                isUpdatingSkin = isUpdatingSkin,
+                statusBanner = statusBanner,
+                onOpenCase = onlineVm::openSkinCase,
+                onEquipSkin = onlineVm::equipWeaponSkin,
+                onClearBanner = onlineVm::clearBanner,
+                onClose = {
+                    inventoryOverlayTab = null
+                    onlineVm.clearBanner()
+                }
+            )
+        }
+
+        // Exclusive Admin Panel Overlay (strictly gated to player with ID "developer")
         AnimatedVisibility(
             visible = isAdmin && isAdminPanelOpen,
             enter = fadeIn(tween(160)),
@@ -586,6 +672,7 @@ fun VanguardRtxApp(
             AdminPanelOverlay(
                 inMatch = screen == AppScreen.Playing,
                 currentUserId = currentUserId,
+                myProfile = playerProfile,
                 espEnabled = espUiEnabled,
                 autoAimEnabled = autoAimUiEnabled,
                 onToggleEsp = { enabled ->
@@ -608,6 +695,8 @@ fun VanguardRtxApp(
                 },
                 onBanAccount = onlineVm::adminBanAccount,
                 onUnbanAccount = onlineVm::adminUnbanAccount,
+                onGrantXp = onlineVm::adminGrantXp,
+                onGrantSkins = onlineVm::adminGrantSkins,
                 onClearStatus = onlineVm::clearAdminStatus,
                 onClose = {
                     isAdminPanelOpen = false

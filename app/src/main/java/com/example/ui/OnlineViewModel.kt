@@ -8,9 +8,14 @@ import com.example.model.ArenaMapId
 import com.example.model.BombSyncEvent
 import com.example.model.GameMode
 import com.example.model.KillFeedSyncEvent
+import com.example.model.LevelProgression
 import com.example.model.MatchSyncEvent
 import com.example.model.OutgoingHitEvent
+import com.example.model.SkinCase
+import com.example.model.SkinCatalog
 import com.example.model.TeamSide
+import com.example.model.WeaponSkin
+import com.example.model.WeaponType
 import com.example.online.ADMIN_SHORT_ID
 import com.example.online.FriendEntry
 import com.example.online.FriendRequest
@@ -104,6 +109,18 @@ class OnlineViewModel(
 
     private val _localBanNotice = MutableStateFlow<String?>(null)
     val localBanNotice: StateFlow<String?> = _localBanNotice.asStateFlow()
+
+    private val _isOpeningCase = MutableStateFlow(false)
+    val isOpeningCase: StateFlow<Boolean> = _isOpeningCase.asStateFlow()
+
+    private val _isUpdatingSkin = MutableStateFlow(false)
+    val isUpdatingSkin: StateFlow<Boolean> = _isUpdatingSkin.asStateFlow()
+
+    private val _progressionNotice = MutableStateFlow<String?>(null)
+    val progressionNotice: StateFlow<String?> = _progressionNotice.asStateFlow()
+
+    @Volatile private var isAppForeground: Boolean = true
+    @Volatile private var lastPresenceHeartbeatMs: Long = 0L
 
     // Direct zero-latency listeners invoked straight from the WebSocket thread into GameEngine!
     @Volatile private var directRemoteStateSink: ((PlayerMatchState) -> Unit)? = null
@@ -206,16 +223,182 @@ class OnlineViewModel(
         }
     }
 
+    fun clearProgressionNotice() {
+        _progressionNotice.value = null
+    }
+
+    /**
+     * Driven by MainActivity ON_START / ON_STOP so Friends online status reflects true presence immediately!
+     */
+    fun setAppForeground(foreground: Boolean) {
+        isAppForeground = foreground
+        viewModelScope.launch {
+            repository.setOnlineStatus(currentUserId, online = foreground)
+            if (foreground) {
+                lastPresenceHeartbeatMs = android.os.SystemClock.elapsedRealtime()
+                refreshSocialData()
+            }
+        }
+    }
+
+    /**
+     * Called on every non-warmup kill (bot or PvP) -> awards +100 EXP on server and +50 coins per level-up!
+     */
+    fun onLocalKillEarned(headshot: Boolean, onToast: ((String) -> Unit)? = null) {
+        val prevLevel = currentProfileOrNull()?.level ?: 1
+        viewModelScope.launch {
+            repository.awardKillXp(kills = 1, headshots = if (headshot) 1 else 0)
+                .onSuccess { updated ->
+                    _profileState.value = OnlineUiState.Success(updated)
+                    val levelsGained = (updated.level - prevLevel).coerceAtLeast(0)
+                    val msg = if (levelsGained > 0) {
+                        val coinsAwarded = levelsGained * LevelProgression.COINS_PER_LEVEL_UP
+                        "УРОВЕНЬ ${updated.level}! +$coinsAwarded МОНЕТ"
+                    } else {
+                        "+${LevelProgression.XP_PER_KILL} EXP"
+                    }
+                    onToast?.invoke(msg)
+                    if (levelsGained > 0) {
+                        _progressionNotice.value = msg
+                    }
+                }
+                .onFailure {
+                    // Still show local +100 EXP feedback if network hiccups
+                    onToast?.invoke("+${LevelProgression.XP_PER_KILL} EXP")
+                }
+        }
+    }
+
+    fun openSkinCase(
+        skinCase: SkinCase,
+        onRolled: (skin: WeaponSkin, wasDuplicate: Boolean, refundCoins: Int) -> Unit,
+        onError: (String) -> Unit
+    ) {
+        val me = currentProfileOrNull()
+        if (me == null) {
+            onError("Профиль ещё загружается.")
+            return
+        }
+        if (me.coins < skinCase.priceCoins) {
+            onError("Недостаточно монет! Нужно ${skinCase.priceCoins} монет (у вас ${me.coins}).")
+            return
+        }
+        if (_isOpeningCase.value) return
+        viewModelScope.launch {
+            _isOpeningCase.value = true
+            val rolled = SkinCatalog.rollSkinFromCase(skinCase)
+            val alreadyOwned = me.ownedSkins.contains(rolled.id)
+            val refund = if (alreadyOwned) rolled.rarity.duplicateRefundCoins else 0
+            repository.openSkinCase(rolled.id, rolled.rarity.duplicateRefundCoins)
+                .onSuccess { updated ->
+                    _profileState.value = OnlineUiState.Success(updated)
+                    onRolled(rolled, alreadyOwned, refund)
+                }
+                .onFailure { err ->
+                    onError(err.localizedMessage ?: "Не удалось открыть кейс")
+                }
+            _isOpeningCase.value = false
+        }
+    }
+
+    fun equipWeaponSkin(weapon: WeaponType, skinId: String?) {
+        if (_isUpdatingSkin.value) return
+        viewModelScope.launch {
+            _isUpdatingSkin.value = true
+            repository.equipWeaponSkin(weapon.name, skinId)
+                .onSuccess { updated ->
+                    _profileState.value = OnlineUiState.Success(updated)
+                    _statusBanner.value = if (skinId.isNullOrBlank()) {
+                        "Скин снят с ${weapon.shortLabel}"
+                    } else {
+                        val sName = SkinCatalog.byId(skinId)?.nameRu ?: skinId
+                        "Применён скин: $sName"
+                    }
+                }
+                .onFailure { err ->
+                    _statusBanner.value = err.localizedMessage ?: "Не удалось применить скин"
+                }
+            _isUpdatingSkin.value = false
+        }
+    }
+
+    fun adminGrantXp(targetShortIdRaw: String, xpAmount: Int) {
+        val me = currentProfileOrNull()
+        if (me?.isAdmin != true) return
+        viewModelScope.launch {
+            _adminBusy.value = true
+            repository.adminGrantXp(targetShortIdRaw, xpAmount)
+                .onSuccess { updated ->
+                    if (updated.userId == currentUserId) {
+                        _profileState.value = OnlineUiState.Success(updated)
+                    } else {
+                        realtimeClient.sendAdminAction(
+                            AdminActionEvent(
+                                seq = ++adminActionSeq,
+                                action = "refresh",
+                                targetUid = updated.userId,
+                                targetShortId = updated.shortId,
+                                reason = "",
+                                senderUid = currentUserId,
+                                senderShortId = me.shortId
+                            )
+                        )
+                    }
+                    _adminStatus.value = "Начислено +$xpAmount EXP для ${updated.displayName} (ID ${updated.shortId}) → LVL ${updated.level} (${updated.coins} монет)"
+                }
+                .onFailure { err ->
+                    _adminStatus.value = err.localizedMessage ?: "Ошибка начисления EXP"
+                }
+            _adminBusy.value = false
+        }
+    }
+
+    fun adminGrantSkins(targetShortIdRaw: String, skinIds: List<String>) {
+        val me = currentProfileOrNull()
+        if (me?.isAdmin != true) return
+        viewModelScope.launch {
+            _adminBusy.value = true
+            repository.adminGrantSkins(targetShortIdRaw, skinIds)
+                .onSuccess { updated ->
+                    if (updated.userId == currentUserId) {
+                        _profileState.value = OnlineUiState.Success(updated)
+                    } else {
+                        realtimeClient.sendAdminAction(
+                            AdminActionEvent(
+                                seq = ++adminActionSeq,
+                                action = "refresh",
+                                targetUid = updated.userId,
+                                targetShortId = updated.shortId,
+                                reason = "",
+                                senderUid = currentUserId,
+                                senderShortId = me.shortId
+                            )
+                        )
+                    }
+                    val label = if (skinIds.size == 1) {
+                        SkinCatalog.byId(skinIds.first())?.nameRu ?: skinIds.first()
+                    } else {
+                        "${skinIds.size} скинов"
+                    }
+                    _adminStatus.value = "Выдано ($label) игроку ${updated.displayName} (ID ${updated.shortId})"
+                }
+                .onFailure { err ->
+                    _adminStatus.value = err.localizedMessage ?: "Ошибка выдачи скина"
+                }
+            _adminBusy.value = false
+        }
+    }
+
     private fun handleIncomingAdminAction(ev: AdminActionEvent) {
-        // Strictly validate that the sender is the designated admin account (ID 932760)
-        if (ev.senderShortId != ADMIN_SHORT_ID) return
+        // Strictly validate that the sender is the designated admin account (ID developer)
+        if (!ev.senderShortId.equals(ADMIN_SHORT_ID, ignoreCase = true)) return
         val knownSender = _lobbyMemberStates.value.firstOrNull { it.userId == ev.senderUid }
-        if (knownSender != null && knownSender.shortId.isNotBlank() && knownSender.shortId != ADMIN_SHORT_ID) {
+        if (knownSender != null && knownSender.shortId.isNotBlank() && !knownSender.shortId.equals(ADMIN_SHORT_ID, ignoreCase = true)) {
             return
         }
         val myShortId = currentProfileOrNull()?.shortId.orEmpty()
         val isTargeted = (ev.targetUid.isNotBlank() && ev.targetUid == currentUserId) ||
-            (ev.targetShortId.isNotBlank() && ev.targetShortId == myShortId)
+            (ev.targetShortId.isNotBlank() && ev.targetShortId.equals(myShortId, ignoreCase = true))
         if (!isTargeted) return
 
         when (ev.action) {
@@ -231,6 +414,9 @@ class OnlineViewModel(
             }
             "unban" -> {
                 _localBanNotice.value = null
+                refreshBanStatusNow()
+            }
+            "refresh" -> {
                 refreshBanStatusNow()
             }
         }
@@ -254,7 +440,7 @@ class OnlineViewModel(
     fun adminKickPlayer(targetUid: String, targetShortId: String, targetName: String) {
         val me = currentProfileOrNull()
         if (me?.isAdmin != true) return
-        if (targetUid == currentUserId || targetShortId == ADMIN_SHORT_ID) {
+        if (targetUid == currentUserId || targetShortId.equals(ADMIN_SHORT_ID, ignoreCase = true)) {
             _adminStatus.value = "Нельзя кикнуть самого себя."
             return
         }
@@ -284,10 +470,10 @@ class OnlineViewModel(
     fun adminBanAccount(shortIdRaw: String, reasonRaw: String, targetUid: String = "") {
         val me = currentProfileOrNull()
         if (me?.isAdmin != true) return
-        val cleanId = shortIdRaw.trim()
+        val cleanId = shortIdRaw.trim().lowercase()
         val cleanReason = reasonRaw.trim().ifBlank { "Нарушение правил сервера" }.take(120)
         if (cleanId == ADMIN_SHORT_ID) {
-            _adminStatus.value = "Нельзя заблокировать аккаунт администратора."
+            _adminStatus.value = "Нельзя заблокировать аккаунт администратора ($ADMIN_SHORT_ID)."
             return
         }
         viewModelScope.launch {
@@ -366,11 +552,16 @@ class OnlineViewModel(
                     )
                 }
 
-            // Periodic background cloud sync for profile recovery, ban status, friends, requests, and invites
+            // Periodic background cloud sync + strict 15s foreground presence heartbeat!
             var pollCycle = 0
             while (isActive) {
                 delay(3_500L)
                 pollCycle++
+                val nowElapsed = android.os.SystemClock.elapsedRealtime()
+                if (isAppForeground && nowElapsed - lastPresenceHeartbeatMs >= 15_000L) {
+                    lastPresenceHeartbeatMs = nowElapsed
+                    repository.setOnlineStatus(currentUserId, online = true)
+                }
                 if (_activeLobby.value?.status != "playing") {
                     if (_profileState.value !is OnlineUiState.Success) {
                         repository.ensurePlayerProfile(currentUserId, initialLoginName)
@@ -383,7 +574,7 @@ class OnlineViewModel(
                                     err.localizedMessage ?: "Не удалось загрузить или создать ID профиля"
                                 )
                             }
-                    } else {
+                    } else if (isAppForeground) {
                         refreshSocialData()
                         if (pollCycle % 2 == 0) {
                             repository.refreshMyProfile(currentUserId).onSuccess { refreshed ->
@@ -530,6 +721,8 @@ class OnlineViewModel(
                             shortId = me.shortId,
                             displayName = me.displayName,
                             avatarData = me.avatarData,
+                            level = me.level,
+                            equippedSkins = me.equippedSkins,
                             team = team.name
                         )
                     )
@@ -672,7 +865,10 @@ class OnlineViewModel(
         matchSync: MatchSyncEvent? = null
     ) {
         if (lobbyId.isBlank()) return
-        val displayName = currentProfileOrNull()?.displayName ?: initialLoginName
+        val prof = currentProfileOrNull()
+        val displayName = prof?.displayName ?: initialLoginName
+        val myLevel = prof?.level ?: 1
+        val activeSkinId = prof?.equippedSkins?.get(weaponName).orEmpty()
         // 0. Ultra-low-latency dedicated PvP hit packet first when shooting hits an enemy!
         if (outgoingHit != null) {
             realtimeClient.sendHitEvent(
@@ -701,7 +897,9 @@ class OnlineViewModel(
             deaths = deaths,
             outgoingHit = outgoingHit,
             bombSync = bombSync,
-            matchSync = matchSync
+            matchSync = matchSync,
+            level = myLevel,
+            activeSkinId = activeSkinId
         )
 
         // 2. Database mirror: immediate ONLY if WebSocket failed; otherwise lightweight 2.2s mirror

@@ -4,8 +4,11 @@ import android.opengl.Matrix
 import com.example.model.ArenaMapId
 import com.example.model.GraphicsPreset
 import com.example.model.GraphicsSettings
+import com.example.model.SkinCatalog
+import com.example.model.WeaponSkin
 import com.example.model.WeaponType
 import com.google.android.filament.ColorGrading
+import org.json.JSONObject
 import com.google.android.filament.Engine
 import com.google.android.filament.EntityManager
 import com.google.android.filament.Filament
@@ -45,9 +48,18 @@ object FilamentBootstrap {
     }
 }
 
+data class OriginalGlbMaterial(
+    val name: String,
+    val baseColorFactor: FloatArray,
+    val metallicFactor: Float,
+    val roughnessFactor: Float,
+    val emissiveFactor: FloatArray
+)
+
 /**
  * Holds a loaded Google Filament glTF 2.0 / .GLB instance (standalone or GPU-instanced)
- * along with its auto-computed bounding box center, dimensions, and skeletal animation indices.
+ * along with its auto-computed bounding box center, dimensions, skeletal animation indices,
+ * and original PBR material parameters for lossless runtime weapon skin switching.
  */
 class LoadedGlbModel(
     val asset: FilamentAsset,
@@ -63,7 +75,8 @@ class LoadedGlbModel(
     val idleAnimIdx: Int,
     val walkAnimIdx: Int,
     val runAnimIdx: Int,
-    val deathAnimIdx: Int = -1
+    val deathAnimIdx: Int = -1,
+    val originalMaterials: List<OriginalGlbMaterial> = emptyList()
 ) {
     val rootEntity: Int = instance.root
     val entities: IntArray = instance.entities
@@ -73,6 +86,7 @@ class LoadedGlbModel(
     val magEntity: Int = resolveInstanceEntityByName(asset, instance, "Magazine")
     var inScene: Boolean = false
     var deathPoseSettled: Boolean = false
+    var appliedSkinId: String? = null
 }
 
 data class SkyboxRig(
@@ -104,12 +118,66 @@ object FilamentSceneHelpers {
         return intArrayOf(idleIdx, walkIdx, runIdx, deathIdx)
     }
 
+    private fun extractGlbMaterials(buffer: ByteBuffer?): List<OriginalGlbMaterial> {
+        if (buffer == null) return emptyList()
+        return runCatching {
+            val dup = buffer.duplicate().order(ByteOrder.LITTLE_ENDIAN)
+            dup.position(0)
+            if (dup.remaining() < 20) return emptyList()
+            val magic = dup.int
+            if (magic != 0x46546C67) return emptyList() // "glTF"
+            dup.int // version
+            dup.int // total length
+            val chunkLen = dup.int
+            val chunkType = dup.int
+            if (chunkType != 0x4E4F534A || chunkLen <= 0 || chunkLen > dup.remaining()) return emptyList()
+            val jsonBytes = ByteArray(chunkLen)
+            dup.get(jsonBytes)
+            val root = JSONObject(String(jsonBytes, Charsets.UTF_8))
+            val mats = root.optJSONArray("materials") ?: return emptyList()
+            buildList {
+                for (i in 0 until mats.length()) {
+                    val m = mats.optJSONObject(i) ?: continue
+                    val pbr = m.optJSONObject("pbrMetallicRoughness")
+                    val bcArr = pbr?.optJSONArray("baseColorFactor")
+                    val bc = if (bcArr != null && bcArr.length() >= 4) {
+                        floatArrayOf(
+                            bcArr.optDouble(0, 1.0).toFloat(),
+                            bcArr.optDouble(1, 1.0).toFloat(),
+                            bcArr.optDouble(2, 1.0).toFloat(),
+                            bcArr.optDouble(3, 1.0).toFloat()
+                        )
+                    } else floatArrayOf(1f, 1f, 1f, 1f)
+                    val emArr = m.optJSONArray("emissiveFactor")
+                    val em = if (emArr != null && emArr.length() >= 3) {
+                        floatArrayOf(
+                            emArr.optDouble(0, 0.0).toFloat(),
+                            emArr.optDouble(1, 0.0).toFloat(),
+                            emArr.optDouble(2, 0.0).toFloat()
+                        )
+                    } else floatArrayOf(0f, 0f, 0f)
+                    add(
+                        OriginalGlbMaterial(
+                            name = m.optString("name", "mat_$i"),
+                            baseColorFactor = bc,
+                            metallicFactor = pbr?.optDouble("metallicFactor", 1.0)?.toFloat() ?: 1f,
+                            roughnessFactor = pbr?.optDouble("roughnessFactor", 1.0)?.toFloat() ?: 1f,
+                            emissiveFactor = em
+                        )
+                    )
+                }
+            }
+        }.getOrDefault(emptyList())
+    }
+
     fun loadGlb(
         assetLoader: AssetLoader,
         resourceLoader: ResourceLoader,
         buffer: ByteBuffer?
     ): LoadedGlbModel? {
         if (buffer == null) return null
+        val origMaterials = extractGlbMaterials(buffer)
+        buffer.rewind()
         val asset = runCatching { assetLoader.createAsset(buffer) }.getOrNull() ?: return null
         return runCatching {
             resourceLoader.loadResources(asset)
@@ -134,7 +202,8 @@ object FilamentSceneHelpers {
                 idleAnimIdx = anims[0],
                 walkAnimIdx = anims[1],
                 runAnimIdx = anims[2],
-                deathAnimIdx = anims[3]
+                deathAnimIdx = anims[3],
+                originalMaterials = origMaterials
             )
         }.getOrElse {
             runCatching { assetLoader.destroyAsset(asset) }
@@ -157,6 +226,8 @@ object FilamentSceneHelpers {
         if (count == 1) {
             return loadGlb(assetLoader, resourceLoader, buffer)?.let { listOf(it) } ?: emptyList()
         }
+        val origMaterials = extractGlbMaterials(buffer)
+        buffer.rewind()
         val rawInstances = arrayOfNulls<FilamentInstance>(count)
         val asset = runCatching { assetLoader.createInstancedAsset(buffer, rawInstances) }.getOrNull()
             ?: return emptyList()
@@ -187,7 +258,8 @@ object FilamentSceneHelpers {
                         idleAnimIdx = anims[0],
                         walkAnimIdx = anims[1],
                         runAnimIdx = anims[2],
-                        deathAnimIdx = anims[3]
+                        deathAnimIdx = anims[3],
+                        originalMaterials = origMaterials
                     )
                 )
             }
@@ -200,6 +272,104 @@ object FilamentSceneHelpers {
             emptyList()
         }
     }
+
+    /**
+     * Applies or clears a 3D PBR weapon skin directly onto a FilamentInstance's independent MaterialInstances.
+     * Works seamlessly in first-person viewmodel, lobby 3D showcase, AND third-person opponent weapons!
+     */
+    fun applyWeaponSkin(model: LoadedGlbModel?, skinId: String?) {
+        if (model == null) return
+        val normalized = skinId?.trim()?.takeIf { it.isNotEmpty() }
+        if (model.appliedSkinId == normalized) return
+        model.appliedSkinId = normalized
+
+        val matInstances = runCatching { model.instance.materialInstances }.getOrNull() ?: return
+        val skin: WeaponSkin? = SkinCatalog.byId(normalized)
+
+        if (skin == null) {
+            for (i in matInstances.indices) {
+                val mi = matInstances[i]
+                val orig = model.originalMaterials.getOrNull(i)
+                if (orig != null) {
+                    runCatching {
+                        mi.setParameter(
+                            "baseColorFactor",
+                            orig.baseColorFactor[0],
+                            orig.baseColorFactor[1],
+                            orig.baseColorFactor[2],
+                            orig.baseColorFactor[3]
+                        )
+                    }
+                    runCatching { mi.setParameter("metallicFactor", orig.metallicFactor) }
+                    runCatching { mi.setParameter("roughnessFactor", orig.roughnessFactor) }
+                    runCatching {
+                        mi.setParameter(
+                            "emissiveFactor",
+                            orig.emissiveFactor[0],
+                            orig.emissiveFactor[1],
+                            orig.emissiveFactor[2]
+                        )
+                    }
+                }
+            }
+            return
+        }
+
+        val pR = srgbChannelToLinear(((skin.primaryArgb shr 16) and 0xFF).toInt())
+        val pG = srgbChannelToLinear(((skin.primaryArgb shr 8) and 0xFF).toInt())
+        val pB = srgbChannelToLinear((skin.primaryArgb and 0xFF).toInt())
+
+        val sR = srgbChannelToLinear(((skin.secondaryArgb shr 16) and 0xFF).toInt())
+        val sG = srgbChannelToLinear(((skin.secondaryArgb shr 8) and 0xFF).toInt())
+        val sB = srgbChannelToLinear((skin.secondaryArgb and 0xFF).toInt())
+
+        val aR = srgbChannelToLinear(((skin.accentArgb shr 16) and 0xFF).toInt())
+        val aG = srgbChannelToLinear(((skin.accentArgb shr 8) and 0xFF).toInt())
+        val aB = srgbChannelToLinear((skin.accentArgb and 0xFF).toInt())
+
+        val eR = srgbChannelToLinear(((skin.emissiveArgb shr 16) and 0xFF).toInt()) * skin.emissiveIntensity
+        val eG = srgbChannelToLinear(((skin.emissiveArgb shr 8) and 0xFF).toInt()) * skin.emissiveIntensity
+        val eB = srgbChannelToLinear((skin.emissiveArgb and 0xFF).toInt()) * skin.emissiveIntensity
+
+        for (i in matInstances.indices) {
+            val mi = matInstances[i]
+            val origName = (model.originalMaterials.getOrNull(i)?.name ?: mi.name).lowercase()
+            // Preserve scope glass / optics lenses on sniper rifles
+            if (origName.contains("lens") || origName.contains("glass") || origName.contains("optic")) continue
+
+            val slotKind = when {
+                origName.contains("grip") || origName.contains("handle") || origName.contains("wood") ||
+                    origName.contains("stock") || origName.contains("polymer") || origName.contains("mag") -> 1
+                origName.contains("rail") || origName.contains("bolt") || origName.contains("trim") ||
+                    origName.contains("accent") || origName.contains("sight") || origName.contains("suppressor") ||
+                    origName.contains("barrel") -> 2
+                else -> i % 3
+            }
+
+            when (slotKind) {
+                0 -> {
+                    runCatching { mi.setParameter("baseColorFactor", pR, pG, pB, 1.0f) }
+                    runCatching { mi.setParameter("metallicFactor", skin.metallic) }
+                    runCatching { mi.setParameter("roughnessFactor", skin.roughness) }
+                    runCatching { mi.setParameter("emissiveFactor", eR * 0.45f, eG * 0.45f, eB * 0.45f) }
+                }
+                1 -> {
+                    runCatching { mi.setParameter("baseColorFactor", sR, sG, sB, 1.0f) }
+                    runCatching { mi.setParameter("metallicFactor", (skin.metallic * 0.65f).coerceIn(0.08f, 0.95f)) }
+                    runCatching { mi.setParameter("roughnessFactor", (skin.roughness + 0.12f).coerceIn(0.12f, 0.85f)) }
+                    runCatching { mi.setParameter("emissiveFactor", eR * 0.18f, eG * 0.18f, eB * 0.18f) }
+                }
+                else -> {
+                    runCatching { mi.setParameter("baseColorFactor", aR, aG, aB, 1.0f) }
+                    runCatching { mi.setParameter("metallicFactor", (skin.metallic + 0.15f).coerceIn(0.15f, 0.98f)) }
+                    runCatching { mi.setParameter("roughnessFactor", (skin.roughness - 0.06f).coerceIn(0.10f, 0.70f)) }
+                    runCatching { mi.setParameter("emissiveFactor", eR, eG, eB) }
+                }
+            }
+        }
+    }
+
+    private fun srgbChannelToLinear(c: Int): Float = (c / 255.0f).coerceIn(0f, 1f).pow(2.2f)
 
     private val partScratchMat = FloatArray(16)
 

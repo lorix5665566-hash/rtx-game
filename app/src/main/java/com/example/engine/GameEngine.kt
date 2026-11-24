@@ -301,15 +301,28 @@ class GameEngine(
     private val lastKillFeedSeqBySender = HashMap<String, Int>()
     private var outgoingKillFeedSeq: Int = 0
 
-    // Admin features strictly restricted to player with shortId == "932760"
+    // Admin features strictly restricted to player with shortId == "developer"
     val isLocalAdmin: Boolean
-        get() = matchConfig.localShortId == ADMIN_SHORT_ID
+        get() = matchConfig.localShortId.equals(ADMIN_SHORT_ID, ignoreCase = true)
     @Volatile var adminEspEnabled: Boolean = false
     @Volatile var adminAutoAimEnabled: Boolean = false
     @Volatile var viewportAspect: Float = 16f / 9f
     private var adminLockedOnTarget: Boolean = false
     private val pendingKickBotIds = ArrayDeque<Int>()
     private val kickBotLock = Any()
+
+    // Player progression & equipped 3D weapon skins (synced live from Supabase profile)
+    @Volatile var localLevel: Int = 1
+    @Volatile var localEquippedSkins: Map<String, String> = emptyMap()
+    var onPlayerKillAwarded: ((isHeadshot: Boolean, isPvp: Boolean) -> Unit)? = null
+    @Volatile private var xpToastText: String = ""
+    @Volatile private var xpToastTimer: Float = 0f
+
+    fun showXpToast(message: String) {
+        if (message.isBlank()) return
+        xpToastText = message
+        xpToastTimer = 2.8f
+    }
 
     private var nextBotId: Int = 1
     private var lastTStrategy: Int = -1
@@ -594,6 +607,7 @@ class GameEngine(
         val newZ = if (hasTransform) st.z.toFloat() else 0f
         val newPitch = st.pitchDeg.toFloat().coerceIn(-55f, 55f)
         val existing = remotePlayersMap[st.userId]
+        val resolvedSkinId = st.activeSkinId.ifBlank { st.equippedSkins[st.weapon].orEmpty() }
         if (existing == null) {
             if (hasTransform) {
                 remotePlayersMap[st.userId] = RemoteHumanPlayer(
@@ -621,7 +635,9 @@ class GameEngine(
                     isShooting = st.shooting,
                     weapon = wep,
                     kills = st.kills,
-                    deaths = st.deaths
+                    deaths = st.deaths,
+                    level = st.level.coerceAtLeast(1),
+                    activeSkinId = resolvedSkinId
                 )
             }
             // Baseline hitSeq on first observe so old hits aren't replayed on join
@@ -629,6 +645,10 @@ class GameEngine(
         } else {
             existing.lastSeenMs = nowMs
             existing.team = side
+            if (st.level > 0) existing.level = st.level
+            if (fromWebSocket || resolvedSkinId.isNotBlank() || st.equippedSkins.isNotEmpty()) {
+                existing.activeSkinId = resolvedSkinId
+            }
             if (hasTransform) {
                 existing.kills = st.kills
                 existing.deaths = st.deaths
@@ -979,6 +999,10 @@ class GameEngine(
 
     fun startNewMatch(config: MatchConfig) {
         matchConfig = config
+        localLevel = config.localLevel.coerceAtLeast(1)
+        if (config.localEquippedSkins.isNotEmpty()) {
+            localEquippedSkins = config.localEquippedSkins
+        }
         isPaused = false
         pendingReset = true
     }
@@ -1060,6 +1084,10 @@ class GameEngine(
         if (killFeedTimer > 0f) {
             killFeedTimer -= dt
             if (killFeedTimer <= 0f) killFeedText = ""
+        }
+        if (xpToastTimer > 0f) {
+            xpToastTimer -= dt
+            if (xpToastTimer <= 0f) xpToastText = ""
         }
         var kfi = killFeedList.size - 1
         while (kfi >= 0) {
@@ -1956,7 +1984,7 @@ class GameEngine(
         boltProgress = 0f
         knifeSwingProgress = 0f
         fireTimer = 0f
-        soundEngine.playWeaponSwitch()
+        soundEngine.playWeaponDraw(next)
     }
 
     private fun updatePlayerLookAndMovement(dt: Float) {
@@ -2476,6 +2504,7 @@ class GameEngine(
                     if (bestIsHead) headshots++
                     money = (money + WeaponType.KNIFE.killReward).coerceAtMost(16000)
                     score += 300
+                    onPlayerKillAwarded?.invoke(bestIsHead, true)
                 }
                 pushKillFeed(
                     killerName = matchConfig.localDisplayName.ifBlank { "ВЫ" },
@@ -2647,6 +2676,7 @@ class GameEngine(
                     if (headshot) headshots++
                     money = (money + w.killReward).coerceAtMost(16000)
                     score += if (headshot) 250 else 150
+                    onPlayerKillAwarded?.invoke(headshot, true)
                 }
                 pushKillFeed(
                     killerName = matchConfig.localDisplayName.ifBlank { "ВЫ" },
@@ -2745,6 +2775,7 @@ class GameEngine(
                     if (isHeadshot) headshots++
                     money = (money + weaponUsed.killReward).coerceAtMost(16000)
                     score += if (isHeadshot) 250 else 150
+                    onPlayerKillAwarded?.invoke(isHeadshot, false)
                 }
                 pushKillFeed(
                     killerName = matchConfig.localDisplayName.ifBlank { "ВЫ" },
@@ -3703,7 +3734,8 @@ class GameEngine(
                 isLocalPlayer = true,
                 isAlly = true,
                 isBot = false,
-                weaponLabel = activeWeapon.shortLabel
+                weaponLabel = activeWeapon.shortLabel,
+                level = localLevel.coerceAtLeast(1)
             )
         )
         for (rp in remotes) {
@@ -3721,7 +3753,8 @@ class GameEngine(
                     isLocalPlayer = false,
                     isAlly = ally,
                     isBot = false,
-                    weaponLabel = if (ally) rp.weapon.shortLabel else ""
+                    weaponLabel = if (ally) rp.weapon.shortLabel else "",
+                    level = rp.level.coerceAtLeast(1)
                 )
             )
         }
@@ -3850,12 +3883,13 @@ class GameEngine(
             scoreboardRows = scoreboardRows,
             espBoxes = espBoxes,
             adminEspEnabled = isLocalAdmin && adminEspEnabled,
-            adminAutoAimEnabled = isLocalAdmin && adminAutoAimEnabled
+            adminAutoAimEnabled = isLocalAdmin && adminAutoAimEnabled,
+            xpToastText = if (xpToastTimer > 0f) xpToastText else ""
         )
     }
 
     /**
-     * Admin-only Auto-Aim (exclusively unlocked for player with shortId == "932760").
+     * Admin-only Auto-Aim (exclusively unlocked for player with shortId == "developer").
      * Locks cleanly onto the best line-of-sight enemy head and counters recoil while active.
      */
     private fun applyAdminAutoAim(dt: Float) {

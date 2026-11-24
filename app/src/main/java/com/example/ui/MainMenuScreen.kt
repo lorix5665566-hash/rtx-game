@@ -80,6 +80,7 @@ import com.example.engine.FilamentLobbyController
 import com.example.model.ArenaMapId
 import com.example.model.GameMode
 import com.example.model.GameSettings
+import com.example.model.LevelProgression
 import com.example.model.MatchConfig
 import com.example.model.ModelAssetRegistry
 import com.example.model.PlayerStats
@@ -111,6 +112,8 @@ fun MainMenuScreen(
     incomingInvites: List<LobbyInvite>,
     isAdmin: Boolean = false,
     onOpenAdminPanel: () -> Unit = {},
+    onOpenInventory: () -> Unit = {},
+    onOpenCases: () -> Unit = {},
     onUpdateMatchConfig: ((MatchConfig) -> MatchConfig) -> Unit,
     onPlay: () -> Unit,
     onCreateLobby: () -> Unit,
@@ -144,6 +147,10 @@ fun MainMenuScreen(
 
     LaunchedEffect(matchConfig.map) {
         lobbyController.showcaseMap = matchConfig.map
+    }
+
+    LaunchedEffect(playerProfile?.equippedSkins) {
+        lobbyController.equippedSkins = playerProfile?.equippedSkins ?: emptyMap()
     }
 
     val surfaceView = remember(lobbyController) {
@@ -292,6 +299,20 @@ fun MainMenuScreen(
                     tag = "nav_lobby"
                 )
                 Cs2NavTab(
+                    label = "ИНВЕНТАРЬ",
+                    selected = false,
+                    accentOverride = IceCyan,
+                    onClick = onOpenInventory,
+                    tag = "nav_inventory"
+                )
+                Cs2NavTab(
+                    label = "КЕЙСЫ",
+                    selected = false,
+                    accentOverride = TacticalAmber,
+                    onClick = onOpenCases,
+                    tag = "nav_cases"
+                )
+                Cs2NavTab(
                     label = if (pendingFriendsCount > 0) "ДРУЗЬЯ ($pendingFriendsCount)" else "ДРУЗЬЯ",
                     selected = false,
                     accentOverride = if (pendingFriendsCount > 0) TacticalAmber else null,
@@ -301,7 +322,6 @@ fun MainMenuScreen(
                 Cs2NavTab(
                     label = "ПРОФИЛЬ",
                     selected = false,
-                    accentOverride = TacticalAmber,
                     onClick = onOpenProfile,
                     tag = "nav_profile"
                 )
@@ -322,7 +342,10 @@ fun MainMenuScreen(
                 }
             }
 
-            // Top-Right Avatar + Nickname + Unique 6-Digit Human Player ID Pill (opens Profile Customization)
+            // Top-Right Avatar + Nickname + Level/EXP Bar + Coins + Unique ID Pill
+            val levelProgress = remember(playerProfile?.xp) {
+                playerProfile?.let { LevelProgression.computeFromTotalXp(it.xp) }
+            }
             Row(
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(m.s(6f)),
@@ -341,30 +364,66 @@ fun MainMenuScreen(
                 if (playerProfile != null) {
                     PlayerAvatar(
                         avatarData = playerProfile.avatarData,
-                        size = m.s(25f),
+                        size = m.s(26f),
                         borderColor = RtxEmerald,
                         borderWidth = 1.2.dp
                     )
                 }
-                Column {
-                    Text(
-                        text = playerProfile?.displayName ?: fallbackLoginName.ifBlank { "Игрок" },
-                        fontSize = m.sp(9.8f),
-                        fontWeight = FontWeight.Black,
-                        color = TextPrimary,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis
-                    )
+                Column(verticalArrangement = Arrangement.spacedBy(1.dp)) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(m.s(5f))
+                    ) {
+                        Text(
+                            text = playerProfile?.displayName ?: fallbackLoginName.ifBlank { "Игрок" },
+                            fontSize = m.sp(9.6f),
+                            fontWeight = FontWeight.Black,
+                            color = TextPrimary,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                        if (playerProfile != null) {
+                            Box(
+                                modifier = Modifier
+                                    .clip(RoundedCornerShape(m.s(3.5f)))
+                                    .background(IceCyan.copy(alpha = 0.22f))
+                                    .padding(horizontal = m.s(4f), vertical = m.s(0.8f))
+                            ) {
+                                Text(
+                                    text = "LVL ${playerProfile.level}",
+                                    fontSize = m.sp(7.8f),
+                                    fontWeight = FontWeight.Black,
+                                    color = IceCyan
+                                )
+                            }
+                        }
+                    }
                     Text(
                         text = when {
-                            playerProfile != null -> "ID: ${playerProfile.shortId}"
+                            playerProfile != null -> "ID: ${playerProfile.shortId} • ${playerProfile.coins} 🪙"
                             isProfileError -> "ID: ошибка • открыть"
                             else -> "ID: загрузка..."
                         },
-                        fontSize = m.sp(8.6f),
+                        fontSize = m.sp(8.2f),
                         fontWeight = FontWeight.ExtraBold,
                         color = if (isProfileError) Color(0xFFFF9E9E) else TacticalAmber
                     )
+                    if (levelProgress != null) {
+                        Box(
+                            modifier = Modifier
+                                .width(m.s(98f))
+                                .height(3.dp)
+                                .clip(RoundedCornerShape(2.dp))
+                                .background(Color.White.copy(alpha = 0.14f))
+                        ) {
+                            Box(
+                                modifier = Modifier
+                                    .fillMaxHeight()
+                                    .fillMaxWidth(levelProgress.progressFraction.coerceIn(0.03f, 1f))
+                                    .background(RtxEmerald)
+                            )
+                        }
+                    }
                 }
             }
         }

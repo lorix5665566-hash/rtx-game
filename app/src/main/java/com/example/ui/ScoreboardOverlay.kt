@@ -394,13 +394,29 @@ private fun ScoreboardPlayerRow(
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.spacedBy(m.s(4f))
                 ) {
+                    if (!row.isBot && row.level > 0) {
+                        Box(
+                            modifier = Modifier
+                                .clip(RoundedCornerShape(m.s(3.5f)))
+                                .background(accent.copy(alpha = 0.20f))
+                                .padding(horizontal = m.s(4f), vertical = m.s(1f))
+                        ) {
+                            Text(
+                                text = "LVL ${row.level}",
+                                fontSize = m.sp(7.5f),
+                                fontWeight = FontWeight.Black,
+                                color = accent
+                            )
+                        }
+                    }
                     Text(
                         text = row.name,
                         fontSize = m.sp(10f),
                         fontWeight = if (row.isLocalPlayer) FontWeight.Black else FontWeight.SemiBold,
                         color = if (row.isLocalPlayer) Color.White else TextPrimary.copy(alpha = nameAlpha),
                         maxLines = 1,
-                        overflow = TextOverflow.Ellipsis
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.weight(1f, fill = false)
                     )
                     if (row.isLocalPlayer) {
                         Text(

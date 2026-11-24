@@ -602,9 +602,11 @@ class FilamentGameplayController(
         isMoving: Boolean,
         deathProgress: Float,
         isShooting: Boolean,
-        aimPitchDeg: Float = 0f
+        aimPitchDeg: Float = 0f,
+        skinId: String? = null
     ) {
         val wModel = acquireThirdPersonWeapon(weapon) ?: return
+        FilamentSceneHelpers.applyWeaponSkin(wModel, skinId)
         FilamentSceneHelpers.setAssetVisible(scene, wModel, true)
         rigAnimator.buildHeldWeaponMatrix(
             out = tmpMat,
@@ -699,7 +701,7 @@ class FilamentGameplayController(
                     }
                 }
 
-                // Render remote player's real equipped 3D weapon locked directly in BOTH hands (or dropped beside them on death)
+                // Render remote player's real equipped 3D weapon & weapon skin locked directly in BOTH hands!
                 placeThirdPersonWeapon(
                     weapon = rp.weapon,
                     charX = rp.x,
@@ -710,7 +712,8 @@ class FilamentGameplayController(
                     isMoving = rp.isMoving,
                     deathProgress = rp.deathProgress,
                     isShooting = rp.isShooting,
-                    aimPitchDeg = rp.pitchDeg
+                    aimPitchDeg = rp.pitchDeg,
+                    skinId = rp.activeSkinId
                 )
             }
         }
@@ -985,10 +988,12 @@ class FilamentGameplayController(
         }
         val activeBoltZ = maxOf(gunfireBoltZ, reloadDelta.boltOffsetZ)
 
+        val equippedSkinForActive = gameEngine.localEquippedSkins[w.name]
         for ((slot, model) in fpWeapons) {
             val visible = !hideWeapon && slot == activeSlot
             FilamentSceneHelpers.setAssetVisible(scene, model, visible)
             if (!visible) continue
+            FilamentSceneHelpers.applyWeaponSkin(model, equippedSkinForActive)
 
             if (!isCustomWeapon) {
                 FilamentSceneHelpers.buildDirectWeaponMatrix(

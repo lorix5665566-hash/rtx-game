@@ -68,6 +68,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import com.example.model.LevelProgression
 import com.example.online.AvatarPresets
 import com.example.online.PlayerProfile
 import com.example.ui.theme.BorderSteel
@@ -344,6 +345,56 @@ fun ProfileCustomizationOverlay(
                                             contentDescription = "Скопировать ID",
                                             tint = if (copiedId) RtxEmerald else TacticalAmber,
                                             modifier = Modifier.size(m.s(14f))
+                                        )
+                                    }
+
+                                    // Character Level, EXP Bar, Coins & Skins summary
+                                    val prog = remember(profile.xp) { LevelProgression.computeFromTotalXp(profile.xp) }
+                                    Column(
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .clip(RoundedCornerShape(m.s(8f)))
+                                            .background(ElevatedGunmetal.copy(alpha = 0.72f))
+                                            .border(1.dp, IceCyan.copy(alpha = 0.45f), RoundedCornerShape(m.s(8f)))
+                                            .padding(horizontal = m.s(9f), vertical = m.s(7f)),
+                                        verticalArrangement = Arrangement.spacedBy(m.s(4f))
+                                    ) {
+                                        Row(
+                                            modifier = Modifier.fillMaxWidth(),
+                                            horizontalArrangement = Arrangement.SpaceBetween,
+                                            verticalAlignment = Alignment.CenterVertically
+                                        ) {
+                                            Text(
+                                                text = "УРОВЕНЬ ${prog.level}",
+                                                fontSize = m.sp(10.5f),
+                                                fontWeight = FontWeight.Black,
+                                                color = IceCyan
+                                            )
+                                            Text(
+                                                text = "${profile.coins} 🪙",
+                                                fontSize = m.sp(10.5f),
+                                                fontWeight = FontWeight.Black,
+                                                color = TacticalAmber
+                                            )
+                                        }
+                                        Box(
+                                            modifier = Modifier
+                                                .fillMaxWidth()
+                                                .height(6.dp)
+                                                .clip(RoundedCornerShape(3.dp))
+                                                .background(Color.White.copy(alpha = 0.12f))
+                                        ) {
+                                            Box(
+                                                modifier = Modifier
+                                                    .fillMaxHeight()
+                                                    .fillMaxWidth(prog.progressFraction.coerceIn(0.02f, 1f))
+                                                    .background(RtxEmerald)
+                                            )
+                                        }
+                                        Text(
+                                            text = "${prog.xpIntoLevel} / ${prog.xpForNextLevel} EXP  •  Скинов: ${profile.ownedSkins.size}",
+                                            fontSize = m.sp(8.6f),
+                                            color = TextSecondary
                                         )
                                     }
 

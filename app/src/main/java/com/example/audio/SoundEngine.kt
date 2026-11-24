@@ -36,11 +36,22 @@ class SoundEngine {
     private val hitMarkerPcm = synthesizeHitThump(isHeadshot = false)
     private val headshotPcm = synthesizeHitThump(isHeadshot = true)
     private val reloadPcm = synthesizeReload()
-    private val switchWeaponPcm = synthesizeWeaponSwitch()
     private val damagePcm = synthesizeDamage()
     private val bombBeepPcm = synthesizeBombBeep()
     private val bombPlantPcm = synthesizeBombPlantDone()
     private val bombExplodePcm = synthesizeBombExplosion()
+
+    // Unique mechanical draw / equip sound for every weapon (safety flick, bolt rack, slide, sheath)
+    private val drawAk47Pcm = synthesizeAk47Draw()
+    private val drawM4a1sPcm = synthesizeM4a1sDraw()
+    private val drawAwpPcm = synthesizeAwpDraw()
+    private val drawDeaglePcm = synthesizeDeagleDraw()
+    private val drawGlockPcm = synthesizeGlockDraw()
+    private val drawUspsPcm = synthesizeUspsDraw()
+    private val drawMp9Pcm = synthesizeMp9Draw()
+    private val drawP90Pcm = synthesizeP90Draw()
+    private val drawKnifePcm = synthesizeKnifeDraw()
+    private val drawC4Pcm = synthesizeC4Draw()
 
     fun playWeaponShot(weapon: WeaponType) {
         when (weapon) {
@@ -57,10 +68,25 @@ class SoundEngine {
         }
     }
 
+    fun playWeaponDraw(weapon: WeaponType) {
+        when (weapon) {
+            WeaponType.AK47 -> playClip(drawAk47Pcm, 0.86f)
+            WeaponType.M4A1_S -> playClip(drawM4a1sPcm, 0.82f)
+            WeaponType.AWP -> playClip(drawAwpPcm, 0.90f)
+            WeaponType.DESERT_EAGLE -> playClip(drawDeaglePcm, 0.86f)
+            WeaponType.GLOCK_18 -> playClip(drawGlockPcm, 0.78f)
+            WeaponType.USP_S -> playClip(drawUspsPcm, 0.78f)
+            WeaponType.MP9 -> playClip(drawMp9Pcm, 0.80f)
+            WeaponType.P90 -> playClip(drawP90Pcm, 0.80f)
+            WeaponType.KNIFE -> playClip(drawKnifePcm, 0.82f)
+            WeaponType.C4_BOMB -> playClip(drawC4Pcm, 0.76f)
+        }
+    }
+
     fun playHitMarker() = playClip(hitMarkerPcm, 0.74f)
     fun playHeadshot() = playClip(headshotPcm, 0.96f)
     fun playReload() = playClip(reloadPcm, 0.88f)
-    fun playWeaponSwitch() { /* Weapon switch audio disabled per user preference */ }
+    fun playWeaponSwitch() { /* Replaced by playWeaponDraw(weapon) */ }
     fun playDamage() = playClip(damagePcm, 0.85f)
     fun playBombBeep() = playClip(bombBeepPcm, 0.82f)
     fun playBombPlanted() = playClip(bombPlantPcm, 0.92f)
@@ -416,19 +442,351 @@ class SoundEngine {
         return out
     }
 
-    private fun synthesizeWeaponSwitch(): ShortArray {
-        val count = (sampleRate * 0.15f).toInt()
+    /**
+     * AK-47: iconic stamped-steel safety selector snap + heavy steel bolt carrier rack back & forward clank.
+     */
+    private fun synthesizeAk47Draw(): ShortArray {
+        val count = (sampleRate * 0.56f).toInt()
         val out = ShortArray(count)
-        val rng = Random(909)
+        val rng = Random(1047)
+        var lpLow = 0f; var lpMid = 0f; var hpPrev = 0f; var prevN = 0f
         for (i in 0 until count) {
             val t = i.toFloat() / sampleRate
             val n = rng.nextFloat() * 2f - 1f
-            val rustle = n * exp(-t * 30f) * 0.34f
-            val latch = if (t > 0.045f) {
-                val dt = t - 0.045f
-                (n * 0.4f + sin(2.0 * PI * 1120.0 * dt).toFloat() * 0.24f) * exp(-dt * 88f)
+            lpLow += (n - lpLow) * 0.05f
+            lpMid += (n - lpMid) * 0.24f
+            val hp = 0.86f * (hpPrev + n - prevN); hpPrev = hp; prevN = n
+            var s = 0f
+            // 1. Stamped-steel safety lever sweep & snap (0.04..0.14s)
+            if (t in 0.04f..0.14f) {
+                val dt = t - 0.04f
+                s += (hp * 0.7f + sin(2.0 * PI * 1850.0 * dt).toFloat() * 0.26f) * exp(-dt * 75f) * 0.72f
+            }
+            // 2. Heavy AK bolt carrier pulled back with gritty spring scrape (0.18..0.33s)
+            if (t in 0.18f..0.33f) {
+                val dt = t - 0.18f
+                val scrape = (hp * 0.65f + (lpMid - lpLow) * 0.9f + sin(2.0 * PI * 1240.0 * dt).toFloat() * 0.18f) *
+                    sin(PI * (dt / 0.15f)).toFloat()
+                val rearStop = if (dt > 0.105f) {
+                    val d2 = dt - 0.105f
+                    (hp * 1.1f + lpLow * 1.3f + sin(2.0 * PI * 920.0 * d2).toFloat() * 0.30f) * exp(-d2 * 90f)
+                } else 0f
+                s += scrape * 0.68f + rearStop * 0.82f
+            }
+            // 3. Heavy steel bolt slamming home into receiver (0.35..0.54s)
+            if (t in 0.35f..0.54f) {
+                val dt = t - 0.35f
+                val slam = (hp * 1.35f + (lpMid - lpLow) * 1.1f + lpLow * 1.9f +
+                    sin(2.0 * PI * 1380.0 * dt).toFloat() * 0.34f +
+                    sin(2.0 * PI * 2650.0 * dt).toFloat() * 0.20f) * exp(-dt * 48f)
+                s += slam * 0.96f
+            }
+            out[i] = (tanh((s * 1.25f).toDouble()).toFloat() * Short.MAX_VALUE * 0.86f).toInt().toShort()
+        }
+        return out
+    }
+
+    /**
+     * M4A1-S: crisp AR-15 thumb safety click + smooth T-handle charge & buffer spring snap.
+     */
+    private fun synthesizeM4a1sDraw(): ShortArray {
+        val count = (sampleRate * 0.50f).toInt()
+        val out = ShortArray(count)
+        val rng = Random(1401)
+        var lpLow = 0f; var lpMid = 0f; var hpPrev = 0f; var prevN = 0f
+        for (i in 0 until count) {
+            val t = i.toFloat() / sampleRate
+            val n = rng.nextFloat() * 2f - 1f
+            lpLow += (n - lpLow) * 0.06f
+            lpMid += (n - lpMid) * 0.28f
+            val hp = 0.87f * (hpPrev + n - prevN); hpPrev = hp; prevN = n
+            var s = 0f
+            // 1. Crisp AR thumb safety click (0.03..0.09s)
+            if (t in 0.03f..0.09f) {
+                val dt = t - 0.03f
+                s += (hp * 1.05f + sin(2.0 * PI * 2780.0 * dt).toFloat() * 0.32f) * exp(-dt * 145f) * 0.78f
+            }
+            // 2. Smooth charging handle latch + draw back (0.14..0.28s)
+            if (t in 0.14f..0.28f) {
+                val dt = t - 0.14f
+                s += (hp * 0.55f + (lpMid - lpLow) * 0.65f + sin(2.0 * PI * 2240.0 * dt).toFloat() * 0.15f) *
+                    sin(PI * (dt / 0.14f)).toFloat() * 0.72f
+            }
+            // 3. Fast buffer-spring snap forward + crisp bolt lock (0.30..0.48s)
+            if (t in 0.30f..0.48f) {
+                val dt = t - 0.30f
+                val lock = (hp * 1.2f + lpLow * 1.25f + sin(2.0 * PI * 1920.0 * dt).toFloat() * 0.26f +
+                    sin(2.0 * PI * 3420.0 * dt).toFloat() * 0.16f) * exp(-dt * 68f)
+                s += lock * 0.88f
+            }
+            out[i] = (tanh((s * 1.2f).toDouble()).toFloat() * Short.MAX_VALUE * 0.84f).toInt().toShort()
+        }
+        return out
+    }
+
+    /**
+     * AWP: deep sniper sling shift + heavy bolt-action handle lift, slide, and lock down.
+     */
+    private fun synthesizeAwpDraw(): ShortArray {
+        val count = (sampleRate * 0.66f).toInt()
+        val out = ShortArray(count)
+        val rng = Random(1338)
+        var lpLow = 0f; var lpMid = 0f; var hpPrev = 0f; var prevN = 0f
+        for (i in 0 until count) {
+            val t = i.toFloat() / sampleRate
+            val n = rng.nextFloat() * 2f - 1f
+            lpLow += (n - lpLow) * 0.035f
+            lpMid += (n - lpMid) * 0.18f
+            val hp = 0.86f * (hpPrev + n - prevN); hpPrev = hp; prevN = n
+            var s = 0f
+            // 1. Heavy rifle shoulder lift thud (0.00..0.14s)
+            if (t < 0.14f) {
+                s += lpLow * 1.5f * sin(PI * (t / 0.14f)).toFloat() * 0.65f
+            }
+            // 2. Bolt handle unlock lift click (0.17..0.27s)
+            if (t in 0.17f..0.27f) {
+                val dt = t - 0.17f
+                s += (hp * 0.95f + lpLow * 1.1f + sin(2.0 * PI * 1080.0 * dt).toFloat() * 0.32f) * exp(-dt * 80f) * 0.85f
+            }
+            // 3. Heavy precision bolt push forward (0.31..0.44s)
+            if (t in 0.31f..0.44f) {
+                val dt = t - 0.31f
+                s += (hp * 0.55f + (lpMid - lpLow) * 0.9f) * sin(PI * (dt / 0.13f)).toFloat() * 0.72f
+            }
+            // 4. Solid steel bolt lock-down clunk (0.45..0.63s)
+            if (t in 0.45f..0.63f) {
+                val dt = t - 0.45f
+                s += (hp * 1.15f + lpLow * 2.1f + sin(2.0 * PI * 760.0 * dt).toFloat() * 0.36f +
+                    sin(2.0 * PI * 1620.0 * dt).toFloat() * 0.22f) * exp(-dt * 42f) * 0.98f
+            }
+            out[i] = (tanh((s * 1.3f).toDouble()).toFloat() * Short.MAX_VALUE * 0.88f).toInt().toShort()
+        }
+        return out
+    }
+
+    /**
+     * Desert Eagle: heavy .50 AE stainless-steel slide rack + authoritative safety thumb click.
+     */
+    private fun synthesizeDeagleDraw(): ShortArray {
+        val count = (sampleRate * 0.44f).toInt()
+        val out = ShortArray(count)
+        val rng = Random(1050)
+        var lpLow = 0f; var lpMid = 0f; var hpPrev = 0f; var prevN = 0f
+        for (i in 0 until count) {
+            val t = i.toFloat() / sampleRate
+            val n = rng.nextFloat() * 2f - 1f
+            lpLow += (n - lpLow) * 0.045f
+            lpMid += (n - lpMid) * 0.24f
+            val hp = 0.88f * (hpPrev + n - prevN); hpPrev = hp; prevN = n
+            var s = 0f
+            // 1. Heavy steel slide pull back (0.04..0.17s)
+            if (t in 0.04f..0.17f) {
+                val dt = t - 0.04f
+                s += (hp * 0.75f + (lpMid - lpLow) * 0.85f + sin(2.0 * PI * 1620.0 * dt).toFloat() * 0.22f) *
+                    sin(PI * (dt / 0.13f)).toFloat() * 0.80f
+            }
+            // 2. Heavy slide forward slam (0.19..0.34s)
+            if (t in 0.19f..0.34f) {
+                val dt = t - 0.19f
+                s += (hp * 1.3f + lpLow * 1.75f + sin(2.0 * PI * 1480.0 * dt).toFloat() * 0.34f +
+                    sin(2.0 * PI * 3120.0 * dt).toFloat() * 0.20f) * exp(-dt * 58f) * 0.95f
+            }
+            // 3. Ambidextrous slide safety snap off (0.33..0.42s)
+            if (t in 0.33f..0.42f) {
+                val dt = t - 0.33f
+                s += (hp * 0.9f + sin(2.0 * PI * 2450.0 * dt).toFloat() * 0.28f) * exp(-dt * 120f) * 0.68f
+            }
+            out[i] = (tanh((s * 1.25f).toDouble()).toFloat() * Short.MAX_VALUE * 0.86f).toInt().toShort()
+        }
+        return out
+    }
+
+    /**
+     * Glock-18: polymer holster zip + crisp light compact pistol slide rack.
+     */
+    private fun synthesizeGlockDraw(): ShortArray {
+        val count = (sampleRate * 0.36f).toInt()
+        val out = ShortArray(count)
+        val rng = Random(1018)
+        var lpLow = 0f; var lpMid = 0f; var hpPrev = 0f; var prevN = 0f
+        for (i in 0 until count) {
+            val t = i.toFloat() / sampleRate
+            val n = rng.nextFloat() * 2f - 1f
+            lpLow += (n - lpLow) * 0.08f
+            lpMid += (n - lpMid) * 0.34f
+            val hp = 0.86f * (hpPrev + n - prevN); hpPrev = hp; prevN = n
+            var s = 0f
+            // 1. Polymer unholster brush (0.00..0.09s)
+            if (t < 0.09f) {
+                s += (lpMid - lpLow) * 0.85f * sin(PI * (t / 0.09f)).toFloat() * 0.60f
+            }
+            // 2. Quick snappy slide pull + spring snap (0.11..0.33s)
+            if (t in 0.11f..0.20f) {
+                val dt = t - 0.11f
+                s += (hp * 0.72f + sin(2.0 * PI * 2380.0 * dt).toFloat() * 0.18f) * exp(-dt * 42f) * 0.70f
+            }
+            if (t in 0.21f..0.34f) {
+                val dt = t - 0.21f
+                s += (hp * 1.15f + lpLow * 0.95f + sin(2.0 * PI * 2650.0 * dt).toFloat() * 0.28f) * exp(-dt * 85f) * 0.88f
+            }
+            out[i] = (tanh((s * 1.2f).toDouble()).toFloat() * Short.MAX_VALUE * 0.82f).toInt().toShort()
+        }
+        return out
+    }
+
+    /**
+     * USP-S: quiet tactical unholster + refined decocker/safety double-click + tight slide lock.
+     */
+    private fun synthesizeUspsDraw(): ShortArray {
+        val count = (sampleRate * 0.38f).toInt()
+        val out = ShortArray(count)
+        val rng = Random(1045)
+        var lpLow = 0f; var lpMid = 0f; var hpPrev = 0f; var prevN = 0f
+        for (i in 0 until count) {
+            val t = i.toFloat() / sampleRate
+            val n = rng.nextFloat() * 2f - 1f
+            lpLow += (n - lpLow) * 0.07f
+            lpMid += (n - lpMid) * 0.28f
+            val hp = 0.88f * (hpPrev + n - prevN); hpPrev = hp; prevN = n
+            var s = 0f
+            // 1. Suppressor clearing holster (0.00..0.10s)
+            if (t < 0.10f) {
+                s += (hp * 0.32f + (lpMid - lpLow) * 0.55f) * sin(PI * (t / 0.10f)).toFloat() * 0.55f
+            }
+            // 2. Crisp German metal safety/decocker click (0.12..0.19s)
+            if (t in 0.12f..0.19f) {
+                val dt = t - 0.12f
+                s += (hp * 1.0f + sin(2.0 * PI * 3150.0 * dt).toFloat() * 0.30f) * exp(-dt * 135f) * 0.80f
+            }
+            // 3. Tight damped slide snap (0.22..0.36s)
+            if (t in 0.22f..0.36f) {
+                val dt = t - 0.22f
+                s += (hp * 0.92f + lpLow * 1.15f + sin(2.0 * PI * 2120.0 * dt).toFloat() * 0.24f) * exp(-dt * 78f) * 0.82f
+            }
+            out[i] = (tanh((s * 1.2f).toDouble()).toFloat() * Short.MAX_VALUE * 0.82f).toInt().toShort()
+        }
+        return out
+    }
+
+    /**
+     * MP9: fast folding-stock click + snappy lightweight SMG bolt cock.
+     */
+    private fun synthesizeMp9Draw(): ShortArray {
+        val count = (sampleRate * 0.38f).toInt()
+        val out = ShortArray(count)
+        val rng = Random(1009)
+        var lpLow = 0f; var lpMid = 0f; var hpPrev = 0f; var prevN = 0f
+        for (i in 0 until count) {
+            val t = i.toFloat() / sampleRate
+            val n = rng.nextFloat() * 2f - 1f
+            lpLow += (n - lpLow) * 0.06f
+            lpMid += (n - lpMid) * 0.32f
+            val hp = 0.87f * (hpPrev + n - prevN); hpPrev = hp; prevN = n
+            var s = 0f
+            // 1. Folding stock / grip snap (0.03..0.10s)
+            if (t in 0.03f..0.10f) {
+                val dt = t - 0.03f
+                s += (hp * 0.95f + lpLow * 0.85f + sin(2.0 * PI * 1950.0 * dt).toFloat() * 0.22f) * exp(-dt * 110f) * 0.74f
+            }
+            // 2. Fast SMG T-handle cock back & snap (0.14..0.35s)
+            if (t in 0.14f..0.22f) {
+                val dt = t - 0.14f
+                s += (hp * 0.72f + (lpMid - lpLow) * 0.7f) * sin(PI * (dt / 0.08f)).toFloat() * 0.72f
+            }
+            if (t in 0.23f..0.36f) {
+                val dt = t - 0.23f
+                s += (hp * 1.25f + lpLow * 1.05f + sin(2.0 * PI * 2860.0 * dt).toFloat() * 0.26f) * exp(-dt * 92f) * 0.86f
+            }
+            out[i] = (tanh((s * 1.2f).toDouble()).toFloat() * Short.MAX_VALUE * 0.82f).toInt().toShort()
+        }
+        return out
+    }
+
+    /**
+     * P90: bullpup side charging knob slide + distinctive hollow polymer frame tap + fire selector click.
+     */
+    private fun synthesizeP90Draw(): ShortArray {
+        val count = (sampleRate * 0.42f).toInt()
+        val out = ShortArray(count)
+        val rng = Random(1090)
+        var lpLow = 0f; var lpMid = 0f; var hpPrev = 0f; var prevN = 0f
+        for (i in 0 until count) {
+            val t = i.toFloat() / sampleRate
+            val n = rng.nextFloat() * 2f - 1f
+            lpLow += (n - lpLow) * 0.055f
+            lpMid += (n - lpMid) * 0.26f
+            val hp = 0.86f * (hpPrev + n - prevN); hpPrev = hp; prevN = n
+            var s = 0f
+            // 1. Hollow polymer bullpup mag-top tap (0.04..0.12s)
+            if (t in 0.04f..0.12f) {
+                val dt = t - 0.04f
+                s += (lpLow * 1.4f + sin(2.0 * PI * 540.0 * dt).toFloat() * 0.35f) * exp(-dt * 75f) * 0.76f
+            }
+            // 2. Side charging knob pull & snap (0.15..0.33s)
+            if (t in 0.15f..0.24f) {
+                val dt = t - 0.15f
+                s += (hp * 0.65f + (lpMid - lpLow) * 0.8f) * sin(PI * (dt / 0.09f)).toFloat() * 0.70f
+            }
+            if (t in 0.25f..0.36f) {
+                val dt = t - 0.25f
+                s += (hp * 1.1f + lpLow * 1.25f + sin(2.0 * PI * 1720.0 * dt).toFloat() * 0.28f) * exp(-dt * 74f) * 0.86f
+            }
+            // 3. Rotary fire selector tick (0.35..0.41s)
+            if (t in 0.35f..0.41f) {
+                val dt = t - 0.35f
+                s += (hp * 0.88f + sin(2.0 * PI * 3320.0 * dt).toFloat() * 0.22f) * exp(-dt * 150f) * 0.62f
+            }
+            out[i] = (tanh((s * 1.2f).toDouble()).toFloat() * Short.MAX_VALUE * 0.82f).toInt().toShort()
+        }
+        return out
+    }
+
+    /**
+     * Combat Knife: crisp metallic blade unsheathing hiss + clean high-steel harmonic ring.
+     */
+    private fun synthesizeKnifeDraw(): ShortArray {
+        val count = (sampleRate * 0.34f).toInt()
+        val out = ShortArray(count)
+        val rng = Random(1777)
+        var hpPrev = 0f; var prevN = 0f; var bp = 0f
+        for (i in 0 until count) {
+            val t = i.toFloat() / sampleRate
+            val n = rng.nextFloat() * 2f - 1f
+            val hp = 0.90f * (hpPrev + n - prevN); hpPrev = hp; prevN = n
+            bp += (hp - bp) * 0.22f
+            val sheathEnv = sin(PI * (t / 0.22f).coerceIn(0f, 1f)).toFloat() * exp(-t * 5.5f)
+            val scrape = bp * sheathEnv * 0.85f
+            // Subtle high-carbon steel shimmer (ascending shimmer as blade clears sheath)
+            val shimmer = if (t >= 0.04f) {
+                val dt = t - 0.04f
+                val f1 = 3650.0 + dt * 1100.0
+                val f2 = 5820.0 + dt * 1400.0
+                (sin(2.0 * PI * f1 * dt) * 0.22 + sin(2.0 * PI * f2 * dt) * 0.14).toFloat() * exp(-dt * 14f)
             } else 0f
-            out[i] = ((rustle + latch).coerceIn(-1f, 1f) * Short.MAX_VALUE * 0.72f).toInt().toShort()
+            val s = tanh(((scrape + shimmer) * 1.25f).toDouble()).toFloat()
+            out[i] = (s * Short.MAX_VALUE * 0.82f).toInt().toShort()
+        }
+        return out
+    }
+
+    /**
+     * C4 Bomb: tactical pack rustle + soft arming keypad chirp.
+     */
+    private fun synthesizeC4Draw(): ShortArray {
+        val count = (sampleRate * 0.28f).toInt()
+        val out = ShortArray(count)
+        val rng = Random(1004)
+        var lp = 0f
+        for (i in 0 until count) {
+            val t = i.toFloat() / sampleRate
+            val n = rng.nextFloat() * 2f - 1f
+            lp += (n - lp) * 0.16f
+            val rustle = lp * sin(PI * (t / 0.16f).coerceIn(0f, 1f)).toFloat() * 0.62f
+            val chirp = if (t in 0.13f..0.24f) {
+                val dt = t - 0.13f
+                sin(2.0 * PI * 2420.0 * dt).toFloat() * exp(-dt * 28f) * 0.42f
+            } else 0f
+            out[i] = (((rustle + chirp).coerceIn(-1f, 1f)) * Short.MAX_VALUE * 0.78f).toInt().toShort()
         }
         return out
     }

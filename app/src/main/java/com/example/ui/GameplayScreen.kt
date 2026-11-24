@@ -744,6 +744,28 @@ fun GameplayScreen(
                 }
             }
 
+            AnimatedVisibility(
+                visible = hud.xpToastText.isNotBlank() && !hud.awaitingTeamSelection && !hud.isMatchFinished,
+                enter = fadeIn(tween(180)) + scaleIn(initialScale = 0.92f, animationSpec = tween(180)),
+                exit = fadeOut(tween(260))
+            ) {
+                val isLevelUp = hud.xpToastText.contains("УРОВЕНЬ", ignoreCase = true)
+                val toastAccent = if (isLevelUp) TacticalAmber else RtxEmerald
+                Surface(
+                    color = Color(0xDC08131B),
+                    shape = CutCornerShape(topStart = m.s(7f), bottomEnd = m.s(7f)),
+                    border = BorderStroke(1.1.dp, toastAccent.copy(alpha = 0.85f))
+                ) {
+                    Text(
+                        text = hud.xpToastText,
+                        fontSize = m.sp(if (isLevelUp) 11f else 9.8f),
+                        fontWeight = FontWeight.Black,
+                        color = toastAccent,
+                        modifier = Modifier.padding(horizontal = m.s(11f), vertical = m.s(3.5f))
+                    )
+                }
+            }
+
         }
 
         // 7b. Non-Clickable (Touch-Transparent) Movable Killfeed Table Widget

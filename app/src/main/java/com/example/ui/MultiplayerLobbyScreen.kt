@@ -293,7 +293,7 @@ fun MultiplayerLobbyScreen(
                                                         overflow = TextOverflow.Ellipsis
                                                     )
                                                     Text(
-                                                        text = "ID: ${f.friendShortId}",
+                                                        text = "LVL ${f.level.coerceAtLeast(1)}  •  ID: ${f.friendShortId}",
                                                         fontSize = m.sp(9.2f),
                                                         color = TacticalAmber
                                                     )
@@ -482,14 +482,34 @@ private fun UnifiedLobbyRosterPanel(
                                     borderColor = accent
                                 )
                                 Column {
-                                    Text(
-                                        text = p.displayName + (if (isMe) " (ВЫ)" else "") + (if (isHostMember) " ★" else ""),
-                                        fontSize = m.sp(11f),
-                                        fontWeight = FontWeight.Bold,
-                                        color = TextPrimary,
-                                        maxLines = 1,
-                                        overflow = TextOverflow.Ellipsis
-                                    )
+                                    Row(
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.spacedBy(m.s(5f))
+                                    ) {
+                                        Text(
+                                            text = p.displayName + (if (isMe) " (ВЫ)" else "") + (if (isHostMember) " ★" else ""),
+                                            fontSize = m.sp(11f),
+                                            fontWeight = FontWeight.Bold,
+                                            color = TextPrimary,
+                                            maxLines = 1,
+                                            overflow = TextOverflow.Ellipsis,
+                                            modifier = Modifier.weight(1f, fill = false)
+                                        )
+                                        Box(
+                                            modifier = Modifier
+                                                .clip(RoundedCornerShape(m.s(4f)))
+                                                .background(accent.copy(alpha = 0.20f))
+                                                .border(0.8.dp, accent.copy(alpha = 0.65f), RoundedCornerShape(m.s(4f)))
+                                                .padding(horizontal = m.s(5f), vertical = m.s(1f))
+                                        ) {
+                                            Text(
+                                                text = "LVL ${p.level.coerceAtLeast(1)}",
+                                                fontSize = m.sp(8.2f),
+                                                fontWeight = FontWeight.Black,
+                                                color = accent
+                                            )
+                                        }
+                                    }
                                     Text(
                                         text = "ID: ${p.shortId}",
                                         fontSize = m.sp(9.5f),

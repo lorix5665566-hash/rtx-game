@@ -64,6 +64,7 @@ import androidx.compose.ui.unit.dp
 import com.example.online.FriendEntry
 import com.example.online.FriendRequest
 import com.example.online.PlayerProfile
+import com.example.online.isValidPlayerShortId
 import com.example.ui.theme.BorderSteel
 import com.example.ui.theme.ElevatedGunmetal
 import com.example.ui.theme.IceCyan
@@ -169,7 +170,7 @@ fun FriendsOverlay(
                                     borderWidth = 1.dp
                                 )
                                 Text(
-                                    text = "${myProfile.displayName}  •  ID: ${myProfile.shortId}",
+                                    text = "${myProfile.displayName} • LVL ${myProfile.level} • ID: ${myProfile.shortId}",
                                     fontSize = m.sp(10.5f),
                                     fontWeight = FontWeight.ExtraBold,
                                     color = TacticalAmber
@@ -341,18 +342,38 @@ fun FriendsOverlay(
                                                             )
                                                         }
                                                         Column {
-                                                            Text(
-                                                                text = friend.friendName,
-                                                                fontSize = m.sp(12f),
-                                                                fontWeight = FontWeight.Bold,
-                                                                color = TextPrimary,
-                                                                maxLines = 1,
-                                                                overflow = TextOverflow.Ellipsis
-                                                            )
+                                                            Row(
+                                                                verticalAlignment = Alignment.CenterVertically,
+                                                                horizontalArrangement = Arrangement.spacedBy(m.s(6f))
+                                                            ) {
+                                                                Text(
+                                                                    text = friend.friendName,
+                                                                    fontSize = m.sp(12f),
+                                                                    fontWeight = FontWeight.Bold,
+                                                                    color = TextPrimary,
+                                                                    maxLines = 1,
+                                                                    overflow = TextOverflow.Ellipsis,
+                                                                    modifier = Modifier.weight(1f, fill = false)
+                                                                )
+                                                                Box(
+                                                                    modifier = Modifier
+                                                                        .clip(RoundedCornerShape(m.s(4f)))
+                                                                        .background(IceCyan.copy(alpha = 0.16f))
+                                                                        .border(0.8.dp, IceCyan.copy(alpha = 0.65f), RoundedCornerShape(m.s(4f)))
+                                                                        .padding(horizontal = m.s(5f), vertical = m.s(1.5f))
+                                                                ) {
+                                                                    Text(
+                                                                        text = "LVL ${friend.level.coerceAtLeast(1)}",
+                                                                        fontSize = m.sp(8.5f),
+                                                                        fontWeight = FontWeight.Black,
+                                                                        color = IceCyan
+                                                                    )
+                                                                }
+                                                            }
                                                             Text(
                                                                 text = "ID: ${friend.friendShortId}  •  ${if (friend.online) "В сети" else "Не в сети"}",
                                                                 fontSize = m.sp(9.8f),
-                                                                color = if (friend.online) TacticalAmber else TextSecondary,
+                                                                color = if (friend.online) RtxEmerald else TextSecondary,
                                                                 fontWeight = FontWeight.SemiBold
                                                             )
                                                         }
@@ -446,7 +467,7 @@ fun FriendsOverlay(
                                                 )
                                                 Column {
                                                     Text(req.fromName, fontSize = m.sp(12f), fontWeight = FontWeight.Bold, color = TextPrimary)
-                                                    Text("ID: ${req.fromShortId}", fontSize = m.sp(10f), color = TacticalAmber)
+                                                    Text("LVL ${req.fromLevel.coerceAtLeast(1)}  •  ID: ${req.fromShortId}", fontSize = m.sp(10f), color = TacticalAmber)
                                                 }
                                             }
                                             Row(horizontalArrangement = Arrangement.spacedBy(m.s(6f))) {
@@ -520,7 +541,7 @@ fun FriendsOverlay(
                                 verticalArrangement = Arrangement.spacedBy(m.s(10f))
                             ) {
                                 Text(
-                                    text = "Введите 6-значный цифровой ID друга (только для реальных игроков):",
+                                    text = "Введите 6-значный ID друга или специальный ID игрока:",
                                     fontSize = m.sp(11f),
                                     color = TextSecondary
                                 )
@@ -532,11 +553,11 @@ fun FriendsOverlay(
                                     OutlinedTextField(
                                         value = searchInput,
                                         onValueChange = { raw ->
-                                            searchInput = raw.filter { it.isDigit() }.take(6)
+                                            searchInput = raw.filter { it.isLetterOrDigit() }.lowercase().take(9)
                                         },
                                         placeholder = { Text("Например: 482915", color = TextSecondary) },
                                         singleLine = true,
-                                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Text),
                                         colors = OutlinedTextFieldDefaults.colors(
                                             focusedBorderColor = IceCyan,
                                             unfocusedBorderColor = BorderSteel,
@@ -551,7 +572,7 @@ fun FriendsOverlay(
 
                                     Button(
                                         onClick = { onSearchById(searchInput) },
-                                        enabled = searchInput.length == 6 && !isSearching,
+                                        enabled = isValidPlayerShortId(searchInput) && !isSearching,
                                         shape = CutCornerShape(topStart = m.s(8f), bottomEnd = m.s(8f)),
                                         colors = ButtonDefaults.buttonColors(
                                             containerColor = IceCyan,
@@ -600,7 +621,7 @@ fun FriendsOverlay(
                                                     color = TextPrimary
                                                 )
                                                 Text(
-                                                    text = "ID: ${searchResult.shortId}  •  Убийств: ${searchResult.totalKills}",
+                                                    text = "LVL ${searchResult.level.coerceAtLeast(1)}  •  ID: ${searchResult.shortId}  •  Убийств: ${searchResult.totalKills}",
                                                     fontSize = m.sp(10f),
                                                     color = TacticalAmber
                                                 )

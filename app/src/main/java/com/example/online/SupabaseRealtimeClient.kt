@@ -218,7 +218,9 @@ class SupabaseRealtimeClient(
         deaths: Int,
         outgoingHit: OutgoingHitEvent?,
         bombSync: BombSyncEvent?,
-        matchSync: MatchSyncEvent? = null
+        matchSync: MatchSyncEvent? = null,
+        level: Int = 1,
+        activeSkinId: String = ""
     ): Boolean {
         val ws = webSocket ?: return false
         if (!isJoined) return false
@@ -227,6 +229,10 @@ class SupabaseRealtimeClient(
             put("u", userId)
             put("n", displayName.take(24))
             put("t", team.name)
+            put("lv", level.coerceAtLeast(1))
+            if (activeSkinId.isNotBlank()) {
+                put("sk", activeSkinId.take(48))
+            }
             put("x", round2(x))
             put("y", round2(y))
             put("z", round2(z))
@@ -483,6 +489,8 @@ class SupabaseRealtimeClient(
                     id = uid,
                     userId = uid,
                     displayName = data.optString("n", "Игрок"),
+                    level = data.optInt("lv", 1).coerceAtLeast(1),
+                    activeSkinId = data.optString("sk", ""),
                     team = if (data.optString("t") == TeamSide.CT.name) TeamSide.CT.name else TeamSide.T.name,
                     x = data.optDouble("x", 0.0),
                     y = data.optDouble("y", 0.0),

@@ -60,6 +60,8 @@ data class MatchConfig(
     val localUserId: String = "",
     val localDisplayName: String = "",
     val localShortId: String = "",
+    val localLevel: Int = 1,
+    val localEquippedSkins: Map<String, String> = emptyMap(),
     val isMatchHost: Boolean = true
 )
 
@@ -68,6 +70,8 @@ data class RemoteHumanPlayer(
     val shortId: String,
     val displayName: String,
     var team: TeamSide,
+    var level: Int = 1,
+    var activeSkinId: String = "",
     var x: Float = 0f,
     var y: Float = 0f,
     var z: Float = 0f,
@@ -106,7 +110,8 @@ data class ScoreboardRow(
     val isLocalPlayer: Boolean,
     val isAlly: Boolean,
     val isBot: Boolean,
-    val weaponLabel: String = ""
+    val weaponLabel: String = "",
+    val level: Int = 0
 )
 
 data class OutgoingHitEvent(
@@ -756,7 +761,8 @@ data class HudSnapshot(
     val scoreboardRows: List<ScoreboardRow> = emptyList(),
     val espBoxes: List<EspBox> = emptyList(),
     val adminEspEnabled: Boolean = false,
-    val adminAutoAimEnabled: Boolean = false
+    val adminAutoAimEnabled: Boolean = false,
+    val xpToastText: String = ""
 ) {
     val isFreezeTime: Boolean
         get() = freezeTimeSec > 0.05f

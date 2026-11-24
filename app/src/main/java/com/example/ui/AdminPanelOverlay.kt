@@ -27,8 +27,11 @@ import androidx.compose.foundation.shape.CutCornerShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.AutoAwesome
 import androidx.compose.material.icons.filled.Block
+import androidx.compose.material.icons.filled.Bolt
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.ExitToApp
@@ -70,11 +73,15 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.model.EspBox
+import com.example.model.LevelProgression
 import com.example.model.ScoreboardRow
+import com.example.model.SkinCatalog
 import com.example.model.TeamSide
+import com.example.model.WeaponType
 import com.example.online.ADMIN_SHORT_ID
 import com.example.online.PlayerMatchState
 import com.example.online.PlayerProfile
+import com.example.online.isValidPlayerShortId
 import com.example.ui.theme.BorderSteel
 import com.example.ui.theme.ElevatedGunmetal
 import com.example.ui.theme.IceCyan
@@ -88,7 +95,7 @@ import com.example.ui.theme.TextSecondary
 import com.example.ui.theme.ThreatCrimson
 
 /**
- * Touch-transparent 2D Wallhack ESP Canvas exclusively rendered for Admin ID 932760.
+ * Touch-transparent 2D Wallhack ESP Canvas exclusively rendered for Admin ID "developer".
  * Draws corner-bracketed bounding boxes, head dots, HP bars, subtle snaplines, and name/distance/weapon tags.
  */
 @Composable
@@ -212,12 +219,13 @@ fun AdminEspOverlay(
 }
 
 /**
- * Exclusive Admin Control Panel rendered ONLY for player with 6-digit ID 932760.
+ * Exclusive Admin Control Panel rendered ONLY for player with ID "developer".
  */
 @Composable
 fun AdminPanelOverlay(
     inMatch: Boolean,
     currentUserId: String,
+    myProfile: PlayerProfile?,
     espEnabled: Boolean,
     autoAimEnabled: Boolean,
     onToggleEsp: (Boolean) -> Unit,
@@ -232,6 +240,8 @@ fun AdminPanelOverlay(
     onKickBot: (botId: Int) -> Unit,
     onBanAccount: (shortId: String, reason: String, targetUid: String) -> Unit,
     onUnbanAccount: (shortId: String) -> Unit,
+    onGrantXp: (targetShortId: String, xpAmount: Int) -> Unit,
+    onGrantSkins: (targetShortId: String, skinIds: List<String>) -> Unit,
     onClearStatus: () -> Unit,
     onClose: () -> Unit
 ) {
@@ -241,6 +251,11 @@ fun AdminPanelOverlay(
     var selectedTab by remember { mutableIntStateOf(if (inMatch) 0 else 1) }
     var targetIdInput by remember { mutableStateOf("") }
     var banReasonInput by remember { mutableStateOf("") }
+
+    // Tab 1 (EXP & Skins) states
+    var grantTargetId by remember { mutableStateOf(ADMIN_SHORT_ID) }
+    var customXpInput by remember { mutableStateOf("1000") }
+    var selectedSkinWeapon by remember { mutableStateOf(WeaponType.AK47) }
 
     LaunchedEffect(Unit) {
         onRefreshBanned()
@@ -322,10 +337,16 @@ fun AdminPanelOverlay(
                             tag = "admin_tab_combat"
                         )
                         AdminTabChip(
-                            label = "БАН / РАЗБАН",
+                            label = "EXP И СКИНЫ",
                             selected = selectedTab == 1,
+                            onClick = { selectedTab = 1 },
+                            tag = "admin_tab_grants"
+                        )
+                        AdminTabChip(
+                            label = "БАН / РАЗБАН",
+                            selected = selectedTab == 2,
                             onClick = {
-                                selectedTab = 1
+                                selectedTab = 2
                                 onRefreshBanned()
                             },
                             tag = "admin_tab_bans"
@@ -483,7 +504,7 @@ fun AdminPanelOverlay(
                                                     overflow = TextOverflow.Ellipsis
                                                 )
                                                 Text(
-                                                    text = "ID ${member.shortId.ifBlank { "—" }} • ${member.team} • ${member.hp} HP",
+                                                    text = "LVL ${member.level.coerceAtLeast(1)} • ID ${member.shortId.ifBlank { "—" }} • ${member.team} • ${member.hp} HP",
                                                     fontSize = 10.5.sp,
                                                     color = sideColor
                                                 )
@@ -576,6 +597,344 @@ fun AdminPanelOverlay(
                                                 ) {
                                                     Text("КИК БОТА", color = TacticalAmber, fontSize = 10.5.sp, fontWeight = FontWeight.Bold)
                                                 }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    } else if (selectedTab == 1) {
+                        // TAB 1: EXP Booster & Skin Granter (Self or Any Player)
+                        val validTarget = isValidPlayerShortId(grantTargetId)
+                        val myProgress = myProfile?.let { LevelProgression.computeFromTotalXp(it.xp) }
+
+                        Surface(
+                            color = ObsidianVoid.copy(alpha = 0.76f),
+                            shape = RoundedCornerShape(10.dp),
+                            border = BorderStroke(1.dp, IceCyan.copy(alpha = 0.55f)),
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Column(
+                                modifier = Modifier.padding(12.dp),
+                                verticalArrangement = Arrangement.spacedBy(8.dp)
+                            ) {
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Text(
+                                        text = "ЦЕЛЕВОЙ ИГРОК (СЕБЕ ИЛИ ПО ID)",
+                                        fontSize = 11.5.sp,
+                                        fontWeight = FontWeight.Black,
+                                        color = IceCyan
+                                    )
+                                    if (myProfile != null && myProgress != null) {
+                                        Text(
+                                            text = "Вы: LVL ${myProfile.level} • ${myProfile.coins} 🪙 • Скинов: ${myProfile.ownedSkins.size}",
+                                            fontSize = 10.5.sp,
+                                            fontWeight = FontWeight.Bold,
+                                            color = TacticalAmber
+                                        )
+                                    }
+                                }
+
+                                // Quick target selector chips (Self + Lobby members)
+                                Row(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .horizontalScroll(rememberScrollState()),
+                                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                                ) {
+                                    val selfSelected = grantTargetId.equals(ADMIN_SHORT_ID, ignoreCase = true)
+                                    Box(
+                                        modifier = Modifier
+                                            .clip(RoundedCornerShape(6.dp))
+                                            .background(if (selfSelected) RtxEmerald.copy(alpha = 0.24f) else ElevatedGunmetal)
+                                            .border(1.dp, if (selfSelected) RtxEmerald else BorderSteel, RoundedCornerShape(6.dp))
+                                            .clickable { grantTargetId = ADMIN_SHORT_ID }
+                                            .padding(horizontal = 10.dp, vertical = 7.dp)
+                                            .testTag("admin_grant_target_self")
+                                    ) {
+                                        Text(
+                                            text = "СЕБЕ ($ADMIN_SHORT_ID)",
+                                            fontSize = 10.5.sp,
+                                            fontWeight = FontWeight.Black,
+                                            color = if (selfSelected) RtxEmerald else TextPrimary
+                                        )
+                                    }
+                                    lobbyMembers
+                                        .filter { it.shortId.isNotBlank() && !it.shortId.equals(ADMIN_SHORT_ID, ignoreCase = true) }
+                                        .distinctBy { it.shortId }
+                                        .forEach { member ->
+                                            val sel = grantTargetId.equals(member.shortId, ignoreCase = true)
+                                            Box(
+                                                modifier = Modifier
+                                                    .clip(RoundedCornerShape(6.dp))
+                                                    .background(if (sel) IceCyan.copy(alpha = 0.24f) else ElevatedGunmetal)
+                                                    .border(1.dp, if (sel) IceCyan else BorderSteel, RoundedCornerShape(6.dp))
+                                                    .clickable { grantTargetId = member.shortId }
+                                                    .padding(horizontal = 10.dp, vertical = 7.dp)
+                                                    .testTag("admin_grant_target_${member.shortId}")
+                                            ) {
+                                                Text(
+                                                    text = "${member.displayName.ifBlank { "Игрок" }} (${member.shortId})",
+                                                    fontSize = 10.5.sp,
+                                                    fontWeight = FontWeight.Bold,
+                                                    color = if (sel) IceCyan else TextPrimary
+                                                )
+                                            }
+                                        }
+                                }
+
+                                OutlinedTextField(
+                                    value = grantTargetId,
+                                    onValueChange = { raw ->
+                                        grantTargetId = raw.filter { it.isLetterOrDigit() }.lowercase().take(9)
+                                    },
+                                    label = { Text("ID получателя (developer или 6 цифр)", fontSize = 11.sp) },
+                                    singleLine = true,
+                                    colors = OutlinedTextFieldDefaults.colors(
+                                        focusedBorderColor = IceCyan,
+                                        unfocusedBorderColor = BorderSteel,
+                                        focusedTextColor = TextPrimary,
+                                        unfocusedTextColor = TextPrimary
+                                    ),
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .testTag("admin_grant_target_input")
+                                )
+                            }
+                        }
+
+                        // EXP Booster Card
+                        Surface(
+                            color = ObsidianVoid.copy(alpha = 0.76f),
+                            shape = RoundedCornerShape(10.dp),
+                            border = BorderStroke(1.dp, TacticalAmber.copy(alpha = 0.55f)),
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Column(
+                                modifier = Modifier.padding(12.dp),
+                                verticalArrangement = Arrangement.spacedBy(8.dp)
+                            ) {
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                                ) {
+                                    Icon(Icons.Default.Bolt, contentDescription = null, tint = TacticalAmber, modifier = Modifier.size(18.dp))
+                                    Text(
+                                        text = "НАКРУТЧИК EXP (+50 МОНЕТ ЗА КАЖДЫЙ УРОВЕНЬ)",
+                                        fontSize = 11.5.sp,
+                                        fontWeight = FontWeight.Black,
+                                        color = TacticalAmber
+                                    )
+                                }
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                                ) {
+                                    listOf(500, 2500, 10000, 50000).forEach { preset ->
+                                        OutlinedButton(
+                                            onClick = { onGrantXp(grantTargetId, preset) },
+                                            enabled = !isBusy && validTarget,
+                                            border = BorderStroke(1.dp, TacticalAmber.copy(alpha = 0.8f)),
+                                            shape = RoundedCornerShape(6.dp),
+                                            modifier = Modifier
+                                                .weight(1f)
+                                                .height(44.dp)
+                                                .testTag("admin_xp_preset_$preset")
+                                        ) {
+                                            Text(
+                                                text = "+$preset",
+                                                fontSize = 10.5.sp,
+                                                fontWeight = FontWeight.Black,
+                                                color = TacticalAmber,
+                                                maxLines = 1
+                                            )
+                                        }
+                                    }
+                                }
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    OutlinedTextField(
+                                        value = customXpInput,
+                                        onValueChange = { raw ->
+                                            customXpInput = raw.filter { it.isDigit() }.take(7)
+                                        },
+                                        label = { Text("Своё количество EXP", fontSize = 11.sp) },
+                                        singleLine = true,
+                                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                                        colors = OutlinedTextFieldDefaults.colors(
+                                            focusedBorderColor = TacticalAmber,
+                                            unfocusedBorderColor = BorderSteel,
+                                            focusedTextColor = TextPrimary,
+                                            unfocusedTextColor = TextPrimary
+                                        ),
+                                        modifier = Modifier
+                                            .weight(1f)
+                                            .testTag("admin_custom_xp_input")
+                                    )
+                                    val parsedXp = customXpInput.toIntOrNull() ?: 0
+                                    Button(
+                                        onClick = { if (parsedXp > 0) onGrantXp(grantTargetId, parsedXp) },
+                                        enabled = !isBusy && validTarget && parsedXp > 0,
+                                        colors = ButtonDefaults.buttonColors(containerColor = TacticalAmber, contentColor = ObsidianVoid),
+                                        shape = CutCornerShape(topStart = 8.dp, bottomEnd = 8.dp),
+                                        modifier = Modifier
+                                            .height(50.dp)
+                                            .testTag("admin_grant_custom_xp_button")
+                                    ) {
+                                        Text("НАКРУТИТЬ EXP", fontWeight = FontWeight.Black, fontSize = 11.5.sp)
+                                    }
+                                }
+                            }
+                        }
+
+                        // Skin Granter Card
+                        Surface(
+                            color = ObsidianVoid.copy(alpha = 0.76f),
+                            shape = RoundedCornerShape(10.dp),
+                            border = BorderStroke(1.dp, RtxEmerald.copy(alpha = 0.55f)),
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Column(
+                                modifier = Modifier.padding(12.dp),
+                                verticalArrangement = Arrangement.spacedBy(8.dp)
+                            ) {
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Row(
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.spacedBy(6.dp)
+                                    ) {
+                                        Icon(Icons.Default.AutoAwesome, contentDescription = null, tint = RtxEmerald, modifier = Modifier.size(18.dp))
+                                        Text(
+                                            text = "ВЫДАЧА СКИНОВ (${SkinCatalog.allSkins.size})",
+                                            fontSize = 11.5.sp,
+                                            fontWeight = FontWeight.Black,
+                                            color = RtxEmerald
+                                        )
+                                    }
+                                    Button(
+                                        onClick = {
+                                            onGrantSkins(grantTargetId, SkinCatalog.allSkins.map { it.id })
+                                        },
+                                        enabled = !isBusy && validTarget,
+                                        colors = ButtonDefaults.buttonColors(containerColor = RtxEmerald, contentColor = ObsidianVoid),
+                                        shape = RoundedCornerShape(6.dp),
+                                        modifier = Modifier
+                                            .height(40.dp)
+                                            .testTag("admin_grant_all_skins_button")
+                                    ) {
+                                        Text("ВЫДАТЬ ВСЕ СКИНЫ", fontWeight = FontWeight.Black, fontSize = 10.5.sp)
+                                    }
+                                }
+
+                                // Weapon filter strip
+                                Row(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .horizontalScroll(rememberScrollState()),
+                                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                                ) {
+                                    SkinCatalog.skinnableWeapons.forEach { w ->
+                                        val selected = selectedSkinWeapon == w
+                                        Box(
+                                            modifier = Modifier
+                                                .clip(RoundedCornerShape(6.dp))
+                                                .background(if (selected) IceCyan.copy(alpha = 0.22f) else ElevatedGunmetal)
+                                                .border(1.dp, if (selected) IceCyan else BorderSteel, RoundedCornerShape(6.dp))
+                                                .clickable { selectedSkinWeapon = w }
+                                                .padding(horizontal = 10.dp, vertical = 6.dp)
+                                                .testTag("admin_skin_filter_${w.name.lowercase()}")
+                                        ) {
+                                            Text(
+                                                text = w.shortLabel,
+                                                fontSize = 10.5.sp,
+                                                fontWeight = FontWeight.Bold,
+                                                color = if (selected) IceCyan else TextPrimary
+                                            )
+                                        }
+                                    }
+                                }
+
+                                val weaponSkins = remember(selectedSkinWeapon) {
+                                    SkinCatalog.forWeapon(selectedSkinWeapon)
+                                }
+                                weaponSkins.forEach { skin ->
+                                    val alreadyOwnedBySelf = grantTargetId.equals(ADMIN_SHORT_ID, ignoreCase = true) &&
+                                        myProfile?.ownedSkins?.contains(skin.id) == true
+                                    Surface(
+                                        color = ElevatedGunmetal,
+                                        shape = RoundedCornerShape(8.dp),
+                                        border = BorderStroke(1.dp, skin.rarity.accentColor.copy(alpha = 0.65f)),
+                                        modifier = Modifier.fillMaxWidth()
+                                    ) {
+                                        Row(
+                                            modifier = Modifier
+                                                .fillMaxWidth()
+                                                .padding(horizontal = 10.dp, vertical = 8.dp),
+                                            verticalAlignment = Alignment.CenterVertically,
+                                            horizontalArrangement = Arrangement.SpaceBetween
+                                        ) {
+                                            Row(
+                                                verticalAlignment = Alignment.CenterVertically,
+                                                horizontalArrangement = Arrangement.spacedBy(10.dp),
+                                                modifier = Modifier.weight(1f)
+                                            ) {
+                                                // 3-color material preview strip
+                                                Row(
+                                                    modifier = Modifier
+                                                        .size(width = 36.dp, height = 24.dp)
+                                                        .clip(RoundedCornerShape(5.dp))
+                                                        .border(1.dp, skin.rarity.accentColor, RoundedCornerShape(5.dp))
+                                                ) {
+                                                    Box(Modifier.weight(1f).fillMaxHeight().background(skin.primaryColor))
+                                                    Box(Modifier.weight(1f).fillMaxHeight().background(skin.secondaryColor))
+                                                    Box(Modifier.weight(0.6f).fillMaxHeight().background(skin.accentColor))
+                                                }
+                                                Column(modifier = Modifier.weight(1f)) {
+                                                    Text(
+                                                        text = skin.nameRu,
+                                                        fontSize = 12.sp,
+                                                        fontWeight = FontWeight.Bold,
+                                                        color = TextPrimary,
+                                                        maxLines = 1,
+                                                        overflow = TextOverflow.Ellipsis
+                                                    )
+                                                    Text(
+                                                        text = "${skin.rarity.displayRu} • ${skin.subtitleRu}",
+                                                        fontSize = 9.5.sp,
+                                                        color = skin.rarity.accentColor,
+                                                        maxLines = 1,
+                                                        overflow = TextOverflow.Ellipsis
+                                                    )
+                                                }
+                                            }
+                                            Button(
+                                                onClick = { onGrantSkins(grantTargetId, listOf(skin.id)) },
+                                                enabled = !isBusy && validTarget,
+                                                colors = ButtonDefaults.buttonColors(
+                                                    containerColor = if (alreadyOwnedBySelf) BorderSteel else skin.rarity.accentColor,
+                                                    contentColor = if (alreadyOwnedBySelf) TextPrimary else ObsidianVoid
+                                                ),
+                                                shape = RoundedCornerShape(6.dp),
+                                                modifier = Modifier
+                                                    .height(40.dp)
+                                                    .testTag("admin_grant_skin_${skin.id}")
+                                            ) {
+                                                Text(
+                                                    text = if (alreadyOwnedBySelf) "ЕСТЬ" else "ВЫДАТЬ",
+                                                    fontSize = 10.5.sp,
+                                                    fontWeight = FontWeight.Black
+                                                )
                                             }
                                         }
                                     }
