@@ -147,6 +147,11 @@ fun AuthScreen(
         scope.launch {
             val freshAccess = authManager.checkClientAccess()
             accessStatus = freshAccess
+            if (!freshAccess.checked) {
+                errorMessage = "Не удалось проверить актуальную версию игры на сервере. Проверьте подключение и повторите попытку."
+                isSubmitting = false
+                return@launch
+            }
             if (freshAccess.updateRequired || freshAccess.deviceBanned) {
                 isSubmitting = false
                 return@launch

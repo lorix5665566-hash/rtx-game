@@ -666,7 +666,8 @@ class GameEngine(
                     (nowMs - existing.lastWsSyncMs) < 2_200L
 
                 if (!ignoreStaleTransform) {
-                    val dtSync = ((nowMs - existing.lastSyncMs) / 1000f).coerceIn(0.016f, 0.40f)
+                    val rawDtMs = (nowMs - existing.lastSyncMs).coerceAtLeast(1L)
+                    val dtSync = (rawDtMs / 1000f).coerceIn(0.022f, 0.45f)
                     val dx = newX - existing.targetX
                     val dy = newY - existing.targetY
                     val dz = newZ - existing.targetZ
@@ -679,13 +680,18 @@ class GameEngine(
                         existing.vy = 0f
                         existing.vz = 0f
                     } else if (st.moving && !st.dead) {
-                        existing.vx = (dx / dtSync).coerceIn(-7.8f, 7.8f)
-                        existing.vy = (dy / dtSync).coerceIn(-8.0f, 8.0f)
-                        existing.vz = (dz / dtSync).coerceIn(-7.8f, 7.8f)
+                        if (rawDtMs >= 20L) {
+                            val instVx = (dx / dtSync).coerceIn(-7.5f, 7.5f)
+                            val instVy = (dy / dtSync).coerceIn(-8.0f, 8.0f)
+                            val instVz = (dz / dtSync).coerceIn(-7.5f, 7.5f)
+                            existing.vx = existing.vx * 0.45f + instVx * 0.55f
+                            existing.vy = existing.vy * 0.45f + instVy * 0.55f
+                            existing.vz = existing.vz * 0.45f + instVz * 0.55f
+                        }
                     } else {
-                        existing.vx = 0f
-                        existing.vy = 0f
-                        existing.vz = 0f
+                        existing.vx *= 0.35f
+                        existing.vy *= 0.35f
+                        existing.vz *= 0.35f
                     }
                     existing.targetX = newX
                     existing.targetY = newY
@@ -971,13 +977,13 @@ class GameEngine(
 
     private fun updateRemotePlayersInterpolation(dt: Float) {
         val nowMs = SystemClock.elapsedRealtime()
-        val posAlpha = (dt * 32f).coerceAtMost(1f)
-        val rotAlpha = (dt * 34f).coerceAtMost(1f)
+        val posAlpha = (1f - kotlin.math.exp(-dt * 22f)).coerceIn(0.05f, 1f)
+        val rotAlpha = (1f - kotlin.math.exp(-dt * 26f)).coerceIn(0.05f, 1f)
         synchronized(remoteLock) {
             for (rp in remotePlayersMap.values) {
-                // Tight 65ms dead-reckoning tuned for 50Hz TCP_NODELAY Realtime WebSocket broadcasts
+                // Smooth exponential interpolation + bounded dead-reckoning tuned for 35Hz WebSocket sync
                 val leadSec = if (rp.isMoving && !rp.isDead) {
-                    ((nowMs - rp.lastSyncMs) / 1000f).coerceIn(0f, 0.065f)
+                    ((nowMs - rp.lastSyncMs) / 1000f).coerceIn(0f, 0.085f)
                 } else 0f
                 val predX = rp.targetX + rp.vx * leadSec
                 val predY = rp.targetY + rp.vy * leadSec * 0.35f

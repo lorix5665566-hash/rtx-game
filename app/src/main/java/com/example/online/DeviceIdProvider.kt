@@ -2,12 +2,14 @@ package com.example.online
 
 import android.content.Context
 import android.provider.Settings
+import com.example.security.LocalSecureVault
 import java.security.MessageDigest
 import java.util.UUID
 
 /**
  * Generates a stable, permissionless SHA-256 device fingerprint used strictly for
  * server-side device-ban enforcement and preventing banned devices from creating new accounts.
+ * Persisted fallback IDs are AES-256-GCM encrypted in AndroidKeyStore LocalSecureVault.
  */
 object DeviceIdProvider {
     private const val PREFS_NAME = "vanguard_device_prefs"
@@ -27,11 +29,11 @@ object DeviceIdProvider {
         val rawSeed = if (androidId.length >= 8 && androidId != KNOWN_BAD_ANDROID_ID) {
             androidId
         } else {
-            val prefs = appCtx.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-            val existing = prefs.getString(KEY_FALLBACK_ID, null)?.trim().orEmpty()
+            val vault = LocalSecureVault(appCtx, PREFS_NAME)
+            val existing = vault.getString(KEY_FALLBACK_ID, null)?.trim().orEmpty()
             existing.ifBlank {
                 UUID.randomUUID().toString().also { generated ->
-                    prefs.edit().putString(KEY_FALLBACK_ID, generated).apply()
+                    vault.putString(KEY_FALLBACK_ID, generated)
                 }
             }
         }

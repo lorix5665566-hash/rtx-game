@@ -81,8 +81,10 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.RELEASE_TOKEN || github.token }}
         run: |
+          APP_VER=$(grep -m1 'versionName' app/build.gradle.kts | cut -d'"' -f2)
+          APP_VER=${APP_VER:-0.09beta}
           TAG_FALLBACK="build-${{ github.run_number }}"
-          NOTES="Автоматическая сборка Vanguard RTX v0.08beta (#${{ github.run_number }}). Нажмите на файл Vanguard-RTX.apk ниже, чтобы скачать и установить на Android."
+          NOTES="Автоматическая сборка Vanguard RTX v${APP_VER} (#${{ github.run_number }}). Нажмите на файл Vanguard-RTX.apk ниже, чтобы скачать и установить на Android."
           if gh release view latest >/dev/null 2>&1; then
             if gh release upload latest Vanguard-RTX.apk --clobber; then
               echo "Updated 'latest' release successfully."
@@ -96,7 +98,7 @@ jobs:
             fi
           fi
 
-          if gh release create "$TAG_FALLBACK" Vanguard-RTX.apk --title "Vanguard RTX v0.08beta (#${{ github.run_number }})" --notes "$NOTES"; then
+          if gh release create "$TAG_FALLBACK" Vanguard-RTX.apk --title "Vanguard RTX v${APP_VER} (#${{ github.run_number }})" --notes "$NOTES"; then
             echo "Published APK under release tag $TAG_FALLBACK."
             exit 0
           fi

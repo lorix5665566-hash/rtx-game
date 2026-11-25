@@ -34,12 +34,14 @@ class SupabaseOnlineRepository(
                 val cleanName = sanitizeDisplayName(fallbackName)
                 val deviceHash = authManager.deviceHash()
 
-                // Primary path: atomic server RPC enforces device bans AND records last_device_hash
+                // Primary path: atomic server RPC enforces strict latest version, device bans & server-HMAC device tokens
                 val rpcRes = callRpc(
                     fnName = "ensure_my_profile",
                     body = JSONObject().apply {
                         put("p_display_name", cleanName)
                         put("p_device_hash", deviceHash)
+                        put("p_version_code", com.example.BuildConfig.VERSION_CODE)
+                        put("p_version_name", com.example.BuildConfig.VERSION_NAME)
                     }
                 )
                 if (rpcRes.isSuccess) {
@@ -49,7 +51,9 @@ class SupabaseOnlineRepository(
                     }
                 } else {
                     val errMsg = rpcRes.exceptionOrNull()?.message.orEmpty()
-                    if (errMsg.contains("DEVICE_BANNED", ignoreCase = true)) {
+                    if (errMsg.contains("DEVICE_BANNED", ignoreCase = true) ||
+                        errMsg.contains("VERSION_MISMATCH", ignoreCase = true)
+                    ) {
                         throw IllegalStateException(errMsg)
                     }
                 }
@@ -76,7 +80,6 @@ class SupabaseOnlineRepository(
                         put("display_name", cleanName)
                         put("avatar_data", AvatarPresets.DEFAULT_KEY)
                         put("online", true)
-                        put("last_device_hash", deviceHash)
                     }
                     val resp = postRest("profiles", payload, prefer = "return=representation")
                     if (resp.isSuccess) {
@@ -89,14 +92,15 @@ class SupabaseOnlineRepository(
                             shortId = candidateId,
                             displayName = cleanName,
                             avatarData = AvatarPresets.DEFAULT_KEY,
-                            online = true,
-                            lastDeviceHash = deviceHash
+                            online = true
                         )
                     } else {
                         val err = resp.exceptionOrNull()
                         lastError = err
                         val errMsg = err?.message.orEmpty()
-                        if (errMsg.contains("DEVICE_BANNED", ignoreCase = true)) {
+                        if (errMsg.contains("DEVICE_BANNED", ignoreCase = true) ||
+                            errMsg.contains("VERSION_MISMATCH", ignoreCase = true)
+                        ) {
                             throw IllegalStateException(errMsg)
                         }
                         if (errMsg.contains("409") || errMsg.contains("duplicate key", ignoreCase = true) || errMsg.contains("23505")) {
@@ -122,6 +126,8 @@ class SupabaseOnlineRepository(
             body = JSONObject().apply {
                 put("p_display_name", cleanName)
                 put("p_device_hash", authManager.deviceHash())
+                put("p_version_code", com.example.BuildConfig.VERSION_CODE)
+                put("p_version_name", com.example.BuildConfig.VERSION_NAME)
             }
         )
         if (rpcRes.isFailure) return null
@@ -750,6 +756,63 @@ class SupabaseOnlineRepository(
                     members.add(parseMemberState(o))
                 }
                 members.sortedBy { it.displayName.lowercase() } to rttMs
+            }
+        }
+
+    /**
+     * Single-RPC lobby liveness & roster check during live WebSocket matches (zero 65KB avatar re-downloads).
+     * Falls back cleanly to ultra-lean REST column projection if the RPC is not yet installed.
+     */
+    suspend fun fetchLobbyHeartbeat(lobbyId: String): Result<Pair<MultiplayerLobby, List<PlayerMatchState>>?> =
+        withContext(Dispatchers.IO) {
+            runCatching {
+                val rpc = callRpc(
+                    fnName = "get_lobby_heartbeat",
+                    body = JSONObject().apply { put("p_lobby_id", lobbyId) }
+                )
+                if (rpc.isSuccess) {
+                    val raw = rpc.getOrThrow().trim()
+                    if (raw.isBlank() || raw == "null") return@runCatching null
+                    val obj = parseSingleObject(raw) ?: return@runCatching null
+                    if (obj.optBoolean("closed", false)) return@runCatching null
+                    val lobbyObj = obj.optJSONObject("lobby") ?: return@runCatching null
+                    val membersArr = obj.optJSONArray("members") ?: JSONArray()
+                    val members = ArrayList<PlayerMatchState>(membersArr.length())
+                    for (i in 0 until membersArr.length()) {
+                        val mo = membersArr.optJSONObject(i) ?: continue
+                        members.add(parseMemberState(mo))
+                    }
+                    val sorted = members.sortedBy { it.displayName.lowercase() }
+                    return@runCatching parseLobby(lobbyObj, sorted.map { it.userId }) to sorted
+                }
+
+                // Lean fallback omitting avatar_data & equipped_skins blobs
+                val lobbyRaw = getRest(
+                    table = "lobbies",
+                    query = mapOf(
+                        "select" to "id,host_uid,host_name,map_id,mode,rounds_to_win,allow_bots,status",
+                        "id" to "eq.$lobbyId",
+                        "limit" to "1"
+                    )
+                ).getOrThrow()
+                val lobbyArr = JSONArray(lobbyRaw)
+                if (lobbyArr.length() == 0) return@runCatching null
+
+                val membersRaw = getRest(
+                    table = "lobby_members",
+                    query = mapOf(
+                        "select" to "user_id,short_id,display_name,level,team,kills,deaths,dead",
+                        "lobby_id" to "eq.$lobbyId"
+                    )
+                ).getOrThrow()
+                val membersArr = JSONArray(membersRaw)
+                val members = ArrayList<PlayerMatchState>(membersArr.length())
+                for (i in 0 until membersArr.length()) {
+                    val o = membersArr.optJSONObject(i) ?: continue
+                    members.add(parseMemberState(o))
+                }
+                val sorted = members.sortedBy { it.displayName.lowercase() }
+                parseLobby(lobbyArr.getJSONObject(0), sorted.map { it.userId }) to sorted
             }
         }
 

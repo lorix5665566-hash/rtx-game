@@ -2,6 +2,7 @@ package com.example.model
 
 import android.content.Context
 import android.net.Uri
+import com.example.security.LocalSecureVault
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -148,7 +149,7 @@ data class SlotAssetInfo(
  * via zero-permission Android SAF (ActivityResultContracts.OpenDocument).
  */
 class ModelAssetRegistry(private val context: Context) {
-    private val prefs = context.getSharedPreferences("vanguard_glb_registry", Context.MODE_PRIVATE)
+    private val vault = LocalSecureVault(context, "vanguard_glb_registry")
     private val customDir = File(context.filesDir, "custom_models").apply { mkdirs() }
 
     private val _revision = MutableStateFlow(0)
@@ -265,7 +266,7 @@ class ModelAssetRegistry(private val context: Context) {
             tmp.renameTo(dest)
 
             val label = (friendlyName ?: "Sketchfab_${slot.name}.glb").take(42)
-            prefs.edit().putString("name_${slot.name}", label).apply()
+            vault.putString("name_${slot.name}", label)
             com.example.engine.FilamentAssetCache.invalidateSlot(slot)
             refreshState()
             "Модель «$label» (${bytes.size / 1024} КБ) подключена к слоту «${slot.titleRu}»!"
@@ -275,7 +276,7 @@ class ModelAssetRegistry(private val context: Context) {
     fun resetSlotToBundled(slot: ModelSlot) {
         val f = customFileFor(slot)
         if (f.exists()) f.delete()
-        prefs.edit().remove("name_${slot.name}").apply()
+        vault.remove("name_${slot.name}")
         com.example.engine.FilamentAssetCache.invalidateSlot(slot)
         refreshState()
     }
@@ -284,7 +285,7 @@ class ModelAssetRegistry(private val context: Context) {
         ModelSlot.entries.forEach { slot ->
             val f = customFileFor(slot)
             if (f.exists()) f.delete()
-            prefs.edit().remove("name_${slot.name}").apply()
+            vault.remove("name_${slot.name}")
         }
         com.example.engine.FilamentAssetCache.clear()
         refreshState()
@@ -310,7 +311,7 @@ class ModelAssetRegistry(private val context: Context) {
         return ModelSlot.entries.map { slot ->
             val f = customFileFor(slot)
             if (f.exists() && f.length() > 32L) {
-                val label = prefs.getString("name_${slot.name}", f.name) ?: f.name
+                val label = vault.getString("name_${slot.name}", f.name) ?: f.name
                 SlotAssetInfo(
                     slot = slot,
                     isCustomImported = true,

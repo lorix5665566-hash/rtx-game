@@ -48,8 +48,8 @@ fun isValidPlayerShortId(raw: String): Boolean {
 data class ClientAccessStatus(
     val allowed: Boolean = true,
     val updateRequired: Boolean = false,
-    val minVersionCode: Int = 8,
-    val latestVersionName: String = "0.08beta",
+    val minVersionCode: Int = 9,
+    val latestVersionName: String = "0.09beta",
     val updateMessage: String = "",
     val deviceBanned: Boolean = false,
     val banReason: String = "",

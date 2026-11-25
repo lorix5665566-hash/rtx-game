@@ -1454,12 +1454,13 @@ fun BannedAccountScreen(
 }
 
 /**
- * Full-screen mandatory update blocker when the client build is older than server `min_version_code`.
+ * Full-screen mandatory version blocker when client build is outdated or differs from server latest version.
  */
 @Composable
 fun UpdateRequiredScreen(
     accessStatus: ClientAccessStatus,
-    onRetry: () -> Unit
+    onRetry: () -> Unit,
+    onSignOut: (() -> Unit)? = null
 ) {
     Box(
         modifier = Modifier
@@ -1482,12 +1483,12 @@ fun UpdateRequiredScreen(
             ) {
                 Icon(
                     imageVector = Icons.Default.SystemUpdate,
-                    contentDescription = "Требуется обновление",
+                    contentDescription = "Неверная версия",
                     tint = TacticalAmber,
                     modifier = Modifier.size(54.dp)
                 )
                 Text(
-                    text = "ТРЕБУЕТСЯ ОБНОВЛЕНИЕ",
+                    text = "ВЕРСИЯ НЕ АКТУАЛЬНА",
                     fontSize = 18.sp,
                     fontWeight = FontWeight.Black,
                     color = TacticalAmber,
@@ -1502,25 +1503,41 @@ fun UpdateRequiredScreen(
                 )
                 Text(
                     text = accessStatus.updateMessage.ifBlank {
-                        "Для входа в игру и онлайн-матчи необходимо установить самую последнюю версию Vanguard RTX."
+                        "Ваша версия устарела или отличается от актуальной. Для входа и регистрации установите последнюю версию Vanguard RTX."
                     },
                     fontSize = 13.sp,
                     color = TextPrimary,
                     textAlign = TextAlign.Center
                 )
                 Spacer(Modifier.height(4.dp))
-                Button(
-                    onClick = onRetry,
-                    colors = ButtonDefaults.buttonColors(containerColor = TacticalAmber, contentColor = ObsidianVoid),
-                    shape = CutCornerShape(topStart = 8.dp, bottomEnd = 8.dp),
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .height(48.dp)
-                        .testTag("update_required_retry")
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(10.dp)
                 ) {
-                    Icon(Icons.Default.Refresh, contentDescription = null, modifier = Modifier.size(18.dp))
-                    Spacer(Modifier.width(8.dp))
-                    Text("ПРОВЕРИТЬ ВЕРСИЮ", fontWeight = FontWeight.Black, fontSize = 12.sp)
+                    Button(
+                        onClick = onRetry,
+                        colors = ButtonDefaults.buttonColors(containerColor = TacticalAmber, contentColor = ObsidianVoid),
+                        shape = CutCornerShape(topStart = 8.dp, bottomEnd = 8.dp),
+                        modifier = Modifier
+                            .weight(1f)
+                            .height(48.dp)
+                            .testTag("update_required_retry")
+                    ) {
+                        Icon(Icons.Default.Refresh, contentDescription = null, modifier = Modifier.size(18.dp))
+                        Spacer(Modifier.width(6.dp))
+                        Text("ПРОВЕРИТЬ", fontWeight = FontWeight.Black, fontSize = 12.sp)
+                    }
+                    if (onSignOut != null) {
+                        OutlinedButton(
+                            onClick = onSignOut,
+                            border = BorderStroke(1.dp, TextSecondary.copy(alpha = 0.6f)),
+                            modifier = Modifier
+                                .height(48.dp)
+                                .testTag("update_required_signout")
+                        ) {
+                            Text("ВЫЙТИ", color = TextPrimary, fontWeight = FontWeight.Bold, fontSize = 11.5.sp)
+                        }
+                    }
                 }
             }
         }

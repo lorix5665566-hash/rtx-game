@@ -96,8 +96,7 @@ class FilamentGameplayController(
     private val bulletHolePool = ArrayList<LoadedGlbModel>(48)
     private val bulletTracerPool = ArrayList<LoadedGlbModel>(12)
 
-    // Mirage Palace climbable sandstone stairs (11 steps) + breakable CT-Mid iron grate (12 bars/frame)
-    private val mirageStairPool = ArrayList<LoadedGlbModel>(11)
+    // Mirage breakable CT-Mid iron grate (12 bars/frame)
     private val mirageGratePool = ArrayList<LoadedGlbModel>(12)
     private var miragePropsPlacedMap: ArenaMapId? = null
     private var lastMirageGrateBroken: Boolean = false
@@ -266,12 +265,6 @@ class FilamentGameplayController(
             FilamentSceneHelpers.configureViewmodelRenderables(engine, tr)
             bulletTracerPool.add(tr)
         }
-        val stairBuf = FilamentSceneHelpers.createUnitBoxGlbBuffer(
-            baseR = 0.78f, baseG = 0.67f, baseB = 0.50f, metallic = 0.04f, roughness = 0.86f
-        )
-        mirageStairPool.addAll(
-            FilamentSceneHelpers.loadInstancedGlb(assetLoader, resourceLoader, stairBuf, count = 11)
-        )
         val grateBuf = FilamentSceneHelpers.createUnitBoxGlbBuffer(
             baseR = 0.24f, baseG = 0.27f, baseB = 0.30f, metallic = 0.85f, roughness = 0.34f
         )
@@ -381,20 +374,6 @@ class FilamentGameplayController(
             miragePropsPlacedMap = loadedMapId
             lastMirageGrateBroken = grateBroken
             val tm = engine.transformManager
-            for (i in 0 until mirageStairPool.size) {
-                val m = mirageStairPool[i]
-                FilamentSceneHelpers.setAssetVisible(scene, m, isMirage)
-                if (isMirage) {
-                    val t = i.toFloat() / (mirageStairPool.size - 1).coerceAtLeast(1)
-                    val sx = 8.65f + t * 4.35f
-                    val stepTop = -0.20f + ((i + 1).toFloat() / mirageStairPool.size) * 2.62f
-                    val height = (stepTop - (-0.30f)).coerceAtLeast(0.24f)
-                    Matrix.setIdentityM(tmpMat, 0)
-                    Matrix.translateM(tmpMat, 0, sx, -0.30f + height * 0.5f, 23.6f)
-                    Matrix.scaleM(tmpMat, 0, 0.46f, height, 1.85f)
-                    tm.setTransform(tm.getInstance(m.rootEntity), tmpMat)
-                }
-            }
             val grateVisible = isMirage && !grateBroken
             val barrier = gameEngine.world.breakableBarriers.firstOrNull { it.id == "mirage_ct_mid_grate" }
             for (i in 0 until mirageGratePool.size) {
@@ -483,7 +462,6 @@ class FilamentGameplayController(
         tPool.asReversed().forEach { destroyModel(it) }; tPool.clear()
         bulletHolePool.asReversed().forEach { destroyModel(it) }; bulletHolePool.clear()
         bulletTracerPool.asReversed().forEach { destroyModel(it) }; bulletTracerPool.clear()
-        mirageStairPool.asReversed().forEach { destroyModel(it) }; mirageStairPool.clear()
         mirageGratePool.asReversed().forEach { destroyModel(it) }; mirageGratePool.clear()
 
         runCatching { resourceLoader.destroy() }

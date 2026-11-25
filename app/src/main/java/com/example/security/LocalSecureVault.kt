@@ -1,0 +1,165 @@
+package com.example.security
+
+import android.content.Context
+import android.content.SharedPreferences
+import android.security.keystore.KeyGenParameterSpec
+import android.security.keystore.KeyProperties
+import android.util.Base64
+import java.security.KeyStore
+import java.security.MessageDigest
+import java.security.SecureRandom
+import javax.crypto.Cipher
+import javax.crypto.KeyGenerator
+import javax.crypto.SecretKey
+import javax.crypto.spec.GCMParameterSpec
+
+/**
+ * Hardware-backed AES-256-GCM encrypted key-value store backed by AndroidKeyStore.
+ * Guarantees zero plaintext user data, session tokens, settings, stats, or identifiers on disk,
+ * with zero encryption keys stored in source code or SharedPreferences.
+ */
+class LocalSecureVault(
+    context: Context,
+    prefsName: String
+) {
+    private val prefs: SharedPreferences =
+        context.applicationContext.getSharedPreferences(prefsName, Context.MODE_PRIVATE)
+    private val secureRandom = SecureRandom()
+
+    fun getString(key: String, defaultValue: String? = null): String? = synchronized(lock) {
+        val hashedKey = hashKey(key)
+        val raw = prefs.getString(hashedKey, null)
+        if (raw != null) {
+            return decodeCiphertext(raw) ?: defaultValue
+        }
+
+        // Transparent one-way migration from legacy plaintext keys -> encrypted + immediate scrub
+        val legacy = runCatching { prefs.getString(key, null) }.getOrNull()
+        if (legacy != null) {
+            putString(key, legacy)
+            return legacy
+        }
+        return defaultValue
+    }
+
+    fun putString(key: String, value: String) = synchronized(lock) {
+        val hashedKey = hashKey(key)
+        val encrypted = encryptValue(value)
+        prefs.edit()
+            .putString(hashedKey, encrypted)
+            .remove(key)
+            .apply()
+    }
+
+    fun getInt(key: String, defaultValue: Int): Int = synchronized(lock) {
+        val decrypted = getString(key, null)
+        if (decrypted != null) {
+            return decrypted.toIntOrNull() ?: defaultValue
+        }
+        if (prefs.contains(key)) {
+            val legacy = runCatching { prefs.getInt(key, defaultValue) }.getOrDefault(defaultValue)
+            putInt(key, legacy)
+            prefs.edit().remove(key).apply()
+            return legacy
+        }
+        return defaultValue
+    }
+
+    fun putInt(key: String, value: Int) {
+        putString(key, value.toString())
+    }
+
+    fun getLong(key: String, defaultValue: Long): Long = synchronized(lock) {
+        val decrypted = getString(key, null)
+        if (decrypted != null) {
+            return decrypted.toLongOrNull() ?: defaultValue
+        }
+        if (prefs.contains(key)) {
+            val legacy = runCatching { prefs.getLong(key, defaultValue) }.getOrDefault(defaultValue)
+            putLong(key, legacy)
+            prefs.edit().remove(key).apply()
+            return legacy
+        }
+        return defaultValue
+    }
+
+    fun putLong(key: String, value: Long) {
+        putString(key, value.toString())
+    }
+
+    fun remove(key: String) = synchronized(lock) {
+        prefs.edit()
+            .remove(hashKey(key))
+            .remove(key)
+            .apply()
+    }
+
+    fun clear() = synchronized(lock) {
+        prefs.edit().clear().apply()
+    }
+
+    private fun hashKey(rawKey: String): String {
+        val digest = MessageDigest.getInstance("SHA-256")
+            .digest("vanguard_vault_k1:$rawKey".toByteArray(Charsets.UTF_8))
+        return "k_" + digest.take(16).joinToString("") { "%02x".format(it) }
+    }
+
+    private fun encryptValue(plainText: String): String {
+        val key = getOrCreateKey()
+        val iv = ByteArray(GCM_IV_BYTES).also { secureRandom.nextBytes(it) }
+        val cipher = Cipher.getInstance(TRANSFORMATION)
+        cipher.init(Cipher.ENCRYPT_MODE, key, GCMParameterSpec(GCM_TAG_BITS, iv))
+        val cipherBytes = cipher.doFinal(plainText.toByteArray(Charsets.UTF_8))
+        val ivB64 = Base64.encodeToString(iv, Base64.NO_WRAP)
+        val ctB64 = Base64.encodeToString(cipherBytes, Base64.NO_WRAP)
+        return "$PREFIX$ivB64:$ctB64"
+    }
+
+    private fun decodeCiphertext(stored: String): String? {
+        if (!stored.startsWith(PREFIX)) return null
+        val payload = stored.removePrefix(PREFIX)
+        val sep = payload.indexOf(':')
+        if (sep <= 0 || sep >= payload.lastIndex) return null
+        return runCatching {
+            val iv = Base64.decode(payload.substring(0, sep), Base64.NO_WRAP)
+            val ct = Base64.decode(payload.substring(sep + 1), Base64.NO_WRAP)
+            val cipher = Cipher.getInstance(TRANSFORMATION)
+            cipher.init(Cipher.DECRYPT_MODE, getOrCreateKey(), GCMParameterSpec(GCM_TAG_BITS, iv))
+            String(cipher.doFinal(ct), Charsets.UTF_8)
+        }.getOrNull()
+    }
+
+    private fun getOrCreateKey(): SecretKey {
+        cachedSecretKey?.let { return it }
+        val ks = KeyStore.getInstance(ANDROID_KEYSTORE).apply { load(null) }
+        val existing = ks.getKey(KEY_ALIAS, null) as? SecretKey
+        if (existing != null) {
+            cachedSecretKey = existing
+            return existing
+        }
+        val keyGen = KeyGenerator.getInstance(KeyProperties.KEY_ALGORITHM_AES, ANDROID_KEYSTORE)
+        val spec = KeyGenParameterSpec.Builder(
+            KEY_ALIAS,
+            KeyProperties.PURPOSE_ENCRYPT or KeyProperties.PURPOSE_DECRYPT
+        )
+            .setBlockModes(KeyProperties.BLOCK_MODE_GCM)
+            .setEncryptionPaddings(KeyProperties.ENCRYPTION_PADDING_NONE)
+            .setKeySize(256)
+            .build()
+        keyGen.init(spec)
+        return keyGen.generateKey().also { cachedSecretKey = it }
+    }
+
+    companion object {
+        private const val ANDROID_KEYSTORE = "AndroidKeyStore"
+        private const val KEY_ALIAS = "vanguard_rtx_master_aes256_v1"
+        private const val TRANSFORMATION = "AES/GCM/NoPadding"
+        private const val GCM_IV_BYTES = 12
+        private const val GCM_TAG_BITS = 128
+        private const val PREFIX = "enc_v2:"
+        private val lock = Any()
+
+        @Volatile
+        private var cachedSecretKey: SecretKey? = null
+    }
+}

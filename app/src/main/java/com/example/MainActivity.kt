@@ -356,7 +356,13 @@ fun VanguardRtxApp(
     if (clientAccessStatus.updateRequired) {
         UpdateRequiredScreen(
             accessStatus = clientAccessStatus,
-            onRetry = onlineVm::checkClientAccessNow
+            onRetry = onlineVm::checkClientAccessNow,
+            onSignOut = {
+                scope.launch {
+                    onlineVm.setOfflineAndLeaveBeforeSignOut()
+                    authManager.logout()
+                }
+            }
         )
         return
     }

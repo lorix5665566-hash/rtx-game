@@ -1,13 +1,14 @@
 package com.example.model
 
 import android.content.Context
+import com.example.security.LocalSecureVault
 import org.json.JSONObject
 
 class SettingsRepository(context: Context) {
-    private val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+    private val vault = LocalSecureVault(context, PREFS_NAME)
 
     fun loadSettings(): GameSettings {
-        val raw = prefs.getString(KEY_SETTINGS, null) ?: return GameSettings()
+        val raw = vault.getString(KEY_SETTINGS, null) ?: return GameSettings()
         return runCatching {
             val root = JSONObject(raw)
             val gfxObj = root.optJSONObject("graphics")
@@ -125,15 +126,15 @@ class SettingsRepository(context: Context) {
                 }
             })
         }
-        prefs.edit().putString(KEY_SETTINGS, root.toString()).apply()
+        vault.putString(KEY_SETTINGS, root.toString())
     }
 
     fun loadStats(): PlayerStats {
         return PlayerStats(
-            bestScore = prefs.getInt(KEY_BEST_SCORE, 0),
-            totalKills = prefs.getInt(KEY_TOTAL_KILLS, 0),
-            totalHeadshots = prefs.getInt(KEY_TOTAL_HEADSHOTS, 0),
-            gamesPlayed = prefs.getInt(KEY_GAMES_PLAYED, 0)
+            bestScore = vault.getInt(KEY_BEST_SCORE, 0),
+            totalKills = vault.getInt(KEY_TOTAL_KILLS, 0),
+            totalHeadshots = vault.getInt(KEY_TOTAL_HEADSHOTS, 0),
+            gamesPlayed = vault.getInt(KEY_GAMES_PLAYED, 0)
         )
     }
 
@@ -145,12 +146,10 @@ class SettingsRepository(context: Context) {
             totalHeadshots = current.totalHeadshots + headshots,
             gamesPlayed = current.gamesPlayed + 1
         )
-        prefs.edit()
-            .putInt(KEY_BEST_SCORE, updated.bestScore)
-            .putInt(KEY_TOTAL_KILLS, updated.totalKills)
-            .putInt(KEY_TOTAL_HEADSHOTS, updated.totalHeadshots)
-            .putInt(KEY_GAMES_PLAYED, updated.gamesPlayed)
-            .apply()
+        vault.putInt(KEY_BEST_SCORE, updated.bestScore)
+        vault.putInt(KEY_TOTAL_KILLS, updated.totalKills)
+        vault.putInt(KEY_TOTAL_HEADSHOTS, updated.totalHeadshots)
+        vault.putInt(KEY_GAMES_PLAYED, updated.gamesPlayed)
         return updated
     }
 

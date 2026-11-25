@@ -70,7 +70,6 @@ class FilamentLobbyController(
     private var ctCharModel: LoadedGlbModel? = null
     private var ak47WeaponModel: LoadedGlbModel? = null
     private var m4WeaponModel: LoadedGlbModel? = null
-    private val mirageStairPool = ArrayList<LoadedGlbModel>(11)
     private val mirageGratePool = ArrayList<LoadedGlbModel>(12)
     private var miragePropsMap: ArenaMapId? = null
 
@@ -179,16 +178,6 @@ class FilamentLobbyController(
             registry.loadBundledAssetBuffer(ModelSlot.WEAPON_M4A1_S.bundledAssetPath)
         )
 
-        val stairBuf = FilamentSceneHelpers.createUnitBoxGlbBuffer(
-            baseR = 0.78f, baseG = 0.68f, baseB = 0.54f,
-            metallic = 0.0f, roughness = 0.88f
-        )
-        repeat(11) {
-            stairBuf.rewind()
-            FilamentSceneHelpers.loadGlb(assetLoader, resourceLoader, stairBuf)?.let {
-                mirageStairPool.add(it)
-            }
-        }
         val grateBuf = FilamentSceneHelpers.createUnitBoxGlbBuffer(
             baseR = 0.24f, baseG = 0.27f, baseB = 0.30f,
             metallic = 0.85f, roughness = 0.36f
@@ -243,20 +232,6 @@ class FilamentLobbyController(
         if (miragePropsMap == loadedMap) return
         miragePropsMap = loadedMap
         val tm = engine.transformManager
-        for (i in 0 until mirageStairPool.size) {
-            val m = mirageStairPool[i]
-            FilamentSceneHelpers.setAssetVisible(scene, m, isMirage)
-            if (isMirage) {
-                val t = i.toFloat() / (mirageStairPool.size - 1).coerceAtLeast(1)
-                val sx = 8.65f + t * 4.35f
-                val stepTop = -0.20f + ((i + 1).toFloat() / mirageStairPool.size) * 2.62f
-                val height = (stepTop - (-0.30f)).coerceAtLeast(0.24f)
-                Matrix.setIdentityM(tmpMat, 0)
-                Matrix.translateM(tmpMat, 0, sx, -0.30f + height * 0.5f, 23.6f)
-                Matrix.scaleM(tmpMat, 0, 0.46f, height, 1.85f)
-                tm.setTransform(tm.getInstance(m.rootEntity), tmpMat)
-            }
-        }
         val barrier = activeWorld.breakableBarriers.firstOrNull { it.id == "mirage_ct_mid_grate" }
         for (i in 0 until mirageGratePool.size) {
             val m = mirageGratePool[i]
@@ -324,7 +299,6 @@ class FilamentLobbyController(
         destroyModel(ctCharModel); ctCharModel = null
         destroyModel(ak47WeaponModel); ak47WeaponModel = null
         destroyModel(m4WeaponModel); m4WeaponModel = null
-        mirageStairPool.asReversed().forEach { destroyModel(it) }; mirageStairPool.clear()
         mirageGratePool.asReversed().forEach { destroyModel(it) }; mirageGratePool.clear()
 
         runCatching { resourceLoader.destroy() }

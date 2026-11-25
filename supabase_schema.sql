@@ -1,26 +1,136 @@
 -- ============================================================================
--- Vanguard RTX v0.08beta — Supabase Cloud Multiplayer, Progression & Skins Schema
+-- Vanguard RTX v0.09beta — Supabase Cloud Multiplayer, Security & Skins Schema
 -- Paste this entire script into Supabase Dashboard -> SQL Editor -> Run.
 -- Also set: Authentication -> Providers -> Email -> Confirm email = OFF
 -- ============================================================================
 
 create extension if not exists pgcrypto;
 
--- 0. Global App Version Policy (enforces latest build entry!)
+-- ----------------------------------------------------------------------------
+-- S0. Server-Only Master Key Vault (never exposed to PostgREST / anon / auth)
+-- ----------------------------------------------------------------------------
+create schema if not exists private_security;
+revoke all on schema private_security from public, anon, authenticated;
+
+create table if not exists private_security.server_keys (
+    id integer primary key default 1 check (id = 1),
+    aes_key text not null default encode(gen_random_bytes(32), 'hex'),
+    hmac_key bytea not null default gen_random_bytes(32),
+    created_at timestamptz not null default now()
+);
+
+revoke all on all tables in schema private_security from public, anon, authenticated;
+
+insert into private_security.server_keys (id)
+values (1)
+on conflict (id) do nothing;
+
+create or replace function private_security.normalize_device_token(p_raw text)
+returns text
+language plpgsql
+security definer
+set search_path = public, extensions, private_security
+as $$
+declare
+    v_clean text := lower(left(trim(coalesce(p_raw, '')), 128));
+    v_hmac_key bytea;
+begin
+    if v_clean = '' then
+        return '';
+    end if;
+    -- Already a server-derived HMAC device token ('srv1:' + 64 hex chars)
+    if v_clean ~ '^srv1:[0-9a-f]{64}$' then
+        return v_clean;
+    end if;
+
+    select hmac_key into v_hmac_key
+    from private_security.server_keys
+    where id = 1;
+
+    if v_hmac_key is null then
+        insert into private_security.server_keys (id) values (1) on conflict (id) do nothing;
+        select hmac_key into v_hmac_key from private_security.server_keys where id = 1;
+    end if;
+
+    return 'srv1:' || encode(hmac(convert_to(v_clean, 'utf8'), v_hmac_key, 'sha256'), 'hex');
+end;
+$$;
+
+create or replace function private_security.seal_text(p_plain text)
+returns text
+language plpgsql
+security definer
+set search_path = public, extensions, private_security
+as $$
+declare
+    v_aes_key text;
+    v_clean text := coalesce(p_plain, '');
+begin
+    if v_clean = '' then
+        return '';
+    end if;
+    select aes_key into v_aes_key
+    from private_security.server_keys
+    where id = 1;
+
+    if v_aes_key is null then
+        insert into private_security.server_keys (id) values (1) on conflict (id) do nothing;
+        select aes_key into v_aes_key from private_security.server_keys where id = 1;
+    end if;
+
+    return 'enc1:' || encode(pgp_sym_encrypt(v_clean, v_aes_key, 'cipher-algo=aes256'), 'base64');
+end;
+$$;
+
+create or replace function private_security.unseal_text(p_cipher text)
+returns text
+language plpgsql
+security definer
+set search_path = public, extensions, private_security
+as $$
+declare
+    v_aes_key text;
+    v_raw text := coalesce(p_cipher, '');
+begin
+    if v_raw = '' then
+        return '';
+    end if;
+    if left(v_raw, 5) <> 'enc1:' then
+        return v_raw;
+    end if;
+    select aes_key into v_aes_key
+    from private_security.server_keys
+    where id = 1;
+    if v_aes_key is null then
+        return '';
+    end if;
+    return pgp_sym_decrypt(decode(substr(v_raw, 6), 'base64'), v_aes_key);
+exception when others then
+    return '';
+end;
+$$;
+
+revoke all on function private_security.normalize_device_token(text) from public, anon, authenticated;
+revoke all on function private_security.seal_text(text) from public, anon, authenticated;
+revoke all on function private_security.unseal_text(text) from public, anon, authenticated;
+
+-- ----------------------------------------------------------------------------
+-- 0. Global App Version Policy (enforces exact latest build v0.09beta!)
+-- ----------------------------------------------------------------------------
 create table if not exists public.app_config (
     id integer primary key default 1 check (id = 1),
-    min_version_code integer not null default 8,
-    latest_version_name text not null default '0.08beta',
-    update_message text not null default 'Доступно обязательное обновление Vanguard RTX v0.08beta. Установите последнюю версию игры.',
+    min_version_code integer not null default 9,
+    latest_version_name text not null default '0.09beta',
+    update_message text not null default 'Доступна только последняя версия Vanguard RTX v0.09beta. Обновите игру, чтобы войти или зарегистрироваться.',
     updated_at timestamptz not null default now()
 );
 
 insert into public.app_config (id, min_version_code, latest_version_name, update_message)
 values (
     1,
-    8,
-    '0.08beta',
-    'Доступно обязательное обновление Vanguard RTX v0.08beta. Установите последнюю версию игры.'
+    9,
+    '0.09beta',
+    'Доступна только последняя версия Vanguard RTX v0.09beta. Обновите игру, чтобы войти или зарегистрироваться.'
 )
 on conflict (id) do update
 set min_version_code = greatest(public.app_config.min_version_code, excluded.min_version_code),
@@ -28,16 +138,23 @@ set min_version_code = greatest(public.app_config.min_version_code, excluded.min
         when public.app_config.min_version_code <= excluded.min_version_code then excluded.latest_version_name
         else public.app_config.latest_version_name
     end,
+    update_message = case
+        when public.app_config.min_version_code <= excluded.min_version_code then excluded.update_message
+        else public.app_config.update_message
+    end,
     updated_at = now();
 
--- 0b. Hardware / Device Bans (prevents banned devices from logging in or creating new accounts!)
+-- 0b. Hardware / Device Bans (stores server-HMAC device tokens + encrypted ban reason)
 create table if not exists public.banned_devices (
     device_hash text primary key check (char_length(device_hash) between 16 and 128),
     reason text not null default '' check (char_length(reason) <= 160),
+    reason_enc text not null default '',
     banned_uid uuid,
     banned_short_id text not null default '',
     banned_at timestamptz not null default now()
 );
+
+alter table public.banned_devices add column if not exists reason_enc text not null default '';
 
 -- 1. Player Profiles (unique 6-digit ID or reserved 'developer' admin ID)
 create table if not exists public.profiles (
@@ -57,6 +174,7 @@ create table if not exists public.profiles (
     banned boolean not null default false,
     ban_reason text not null default '' check (char_length(ban_reason) <= 120),
     last_device_hash text not null default '' check (char_length(last_device_hash) <= 128),
+    encrypted_vault text not null default '',
     updated_at timestamptz not null default now()
 );
 
@@ -70,6 +188,7 @@ alter table public.profiles add column if not exists coins integer not null defa
 alter table public.profiles add column if not exists owned_skins jsonb not null default '[]'::jsonb;
 alter table public.profiles add column if not exists equipped_skins jsonb not null default '{}'::jsonb;
 alter table public.profiles add column if not exists last_device_hash text not null default '';
+alter table public.profiles add column if not exists encrypted_vault text not null default '';
 
 alter table public.app_config enable row level security;
 alter table public.banned_devices enable row level security;
@@ -130,6 +249,8 @@ create table if not exists public.friendships (
     check (user_id <> friend_uid)
 );
 
+create index if not exists idx_friendships_friend_uid on public.friendships(friend_uid);
+
 -- 4. Online Lobbies (1v1 / party + optional bots)
 create table if not exists public.lobbies (
     id uuid primary key default gen_random_uuid(),
@@ -143,6 +264,8 @@ create table if not exists public.lobbies (
     created_at timestamptz not null default now(),
     updated_at timestamptz not null default now()
 );
+
+create index if not exists idx_lobbies_status_updated on public.lobbies(status, updated_at);
 
 -- 5. Lobby Members & Live Match Sync State
 create table if not exists public.lobby_members (
@@ -194,6 +317,11 @@ create table if not exists public.lobby_invites (
 );
 
 create index if not exists idx_lobby_invites_to_uid on public.lobby_invites(to_uid, status);
+create index if not exists idx_lobby_invites_lobby_target on public.lobby_invites(lobby_id, to_uid, status);
+
+-- High-throughput partial indexes for live server queries
+create index if not exists idx_profiles_online_true on public.profiles(online, last_seen_at) where online = true;
+create index if not exists idx_profiles_banned_device on public.profiles(last_device_hash) where banned = true;
 
 -- ============================================================================
 -- Enable Row Level Security (RLS) on every table
@@ -221,7 +349,9 @@ create policy "profiles_insert_own" on public.profiles
         and banned = false
         and not exists (
             select 1 from public.banned_devices bd
-            where bd.device_hash = lower(trim(coalesce(nullif(last_device_hash, ''), auth.jwt() -> 'user_metadata' ->> 'device_hash', '')))
+            where bd.device_hash = private_security.normalize_device_token(
+                coalesce(nullif(last_device_hash, ''), auth.jwt() -> 'user_metadata' ->> 'device_hash', '')
+            )
         )
     );
 
@@ -343,7 +473,7 @@ $$;
 
 -- ============================================================================
 -- Anti-Tamper Trigger on Profiles
--- Protects short_id, banned, ban_reason, xp, level, coins, owned_skins
+-- Protects short_id, banned, ban_reason, xp, level, coins, owned_skins, vault
 -- ============================================================================
 create or replace function public.prevent_non_admin_profile_tamper()
 returns trigger
@@ -358,8 +488,9 @@ begin
         if new.short_id is distinct from old.short_id then
             raise exception 'Forbidden: short_id cannot be modified directly';
         end if;
-        if new.last_device_hash is distinct from old.last_device_hash then
-            raise exception 'Forbidden: device hash must be updated via server RPCs';
+        if new.last_device_hash is distinct from old.last_device_hash
+           or new.encrypted_vault is distinct from old.encrypted_vault then
+            raise exception 'Forbidden: encrypted security fields must be updated via server RPCs';
         end if;
         if new.xp is distinct from old.xp
            or new.level is distinct from old.level
@@ -379,34 +510,42 @@ create trigger trg_prevent_non_admin_profile_tamper
     for each row
     execute function public.prevent_non_admin_profile_tamper();
 
--- Enforce hardware device-ban BEFORE inserting any new player profile (direct REST or RPC)
+-- Enforce server-side HMAC device token + ban check BEFORE inserting any profile
 create or replace function public.enforce_device_ban_on_profile_insert()
 returns trigger
 language plpgsql
 security definer
-set search_path = public
+set search_path = public, extensions, private_security
 as $$
 declare
     v_meta_hash text;
-    v_hash text;
+    v_raw_hash text;
+    v_token text;
     v_reason text;
     v_banned_acc public.profiles%rowtype;
 begin
-    v_hash := lower(left(trim(coalesce(new.last_device_hash, '')), 128));
-    if v_hash = '' then
-        select lower(left(trim(coalesce(raw_user_meta_data ->> 'device_hash', '')), 128))
+    v_raw_hash := trim(coalesce(new.last_device_hash, ''));
+    if v_raw_hash = '' then
+        select trim(coalesce(raw_user_meta_data ->> 'device_hash', ''))
         into v_meta_hash
         from auth.users
         where id = new.user_id;
-        v_hash := coalesce(v_meta_hash, '');
+        v_raw_hash := coalesce(v_meta_hash, '');
     end if;
-    new.last_device_hash := v_hash;
 
-    if new.short_id <> 'developer' and v_hash <> '' then
-        select coalesce(nullif(reason, ''), 'Устройство заблокировано администратором.')
+    v_token := private_security.normalize_device_token(v_raw_hash);
+    new.last_device_hash := v_token;
+    if v_token <> '' and trim(coalesce(new.encrypted_vault, '')) = '' then
+        new.encrypted_vault := private_security.seal_text(
+            jsonb_build_object('device_token', v_token, 'created_at', now())::text
+        );
+    end if;
+
+    if new.short_id <> 'developer' and v_token <> '' then
+        select coalesce(nullif(private_security.unseal_text(reason_enc), ''), nullif(reason, ''), 'Устройство заблокировано администратором.')
         into v_reason
         from public.banned_devices
-        where device_hash = v_hash
+        where device_hash = v_token
         limit 1;
         if found then
             raise exception 'DEVICE_BANNED: %', v_reason;
@@ -416,12 +555,12 @@ begin
         from public.profiles
         where banned = true
           and short_id <> 'developer'
-          and lower(trim(last_device_hash)) = v_hash
+          and last_device_hash = v_token
         limit 1;
         if found then
             v_reason := coalesce(nullif(v_banned_acc.ban_reason, ''), 'Устройство связано с заблокированным аккаунтом.');
-            insert into public.banned_devices (device_hash, reason, banned_uid, banned_short_id, banned_at)
-            values (v_hash, left(v_reason, 160), v_banned_acc.user_id, v_banned_acc.short_id, now())
+            insert into public.banned_devices (device_hash, reason, reason_enc, banned_uid, banned_short_id, banned_at)
+            values (v_token, left(v_reason, 160), private_security.seal_text(v_reason), v_banned_acc.user_id, v_banned_acc.short_id, now())
             on conflict (device_hash) do nothing;
             raise exception 'DEVICE_BANNED: %', v_reason;
         end if;
@@ -436,10 +575,15 @@ create trigger trg_enforce_device_ban_on_profile_insert
     for each row
     execute function public.enforce_device_ban_on_profile_insert();
 
--- Migrate legacy admin short_id '932760' -> 'developer', backfill device hashes & auto-ban devices of banned accounts
+-- Migrate legacy admin short_id '932760' -> 'developer', upgrade raw hashes -> HMAC tokens, scrub auth metadata & encrypt vaults
 do $$
+declare
+    v_dev_rec record;
+    v_prof_rec record;
+    v_norm text;
 begin
     perform set_config('app.trusted_rpc', '1', true);
+
     if exists (select 1 from public.profiles where short_id = '932760')
        and not exists (select 1 from public.profiles where short_id = 'developer') then
         update public.profiles
@@ -451,19 +595,69 @@ begin
         where short_id = '932760';
     end if;
 
-    -- Recover device hashes from auth signup metadata wherever profiles.last_device_hash is empty
+    -- Recover any raw legacy device hashes from auth metadata first, then scrub them from auth.users
     update public.profiles p
-    set last_device_hash = lower(left(trim(u.raw_user_meta_data ->> 'device_hash'), 128))
+    set last_device_hash = private_security.normalize_device_token(u.raw_user_meta_data ->> 'device_hash')
     from auth.users u
     where u.id = p.user_id
       and trim(coalesce(p.last_device_hash, '')) = ''
       and trim(coalesce(u.raw_user_meta_data ->> 'device_hash', '')) <> '';
 
+    update auth.users
+    set raw_user_meta_data = raw_user_meta_data - 'device_hash'
+    where raw_user_meta_data ? 'device_hash';
+
+    -- Convert all plaintext/unkeyed profiles.last_device_hash to server-HMAC tokens + encrypted_vault
+    for v_prof_rec in
+        select user_id, last_device_hash, encrypted_vault
+        from public.profiles
+        where trim(coalesce(last_device_hash, '')) <> ''
+           or trim(coalesce(encrypted_vault, '')) <> ''
+    loop
+        v_norm := private_security.normalize_device_token(v_prof_rec.last_device_hash);
+        update public.profiles
+        set last_device_hash = v_norm,
+            encrypted_vault = case
+                when trim(coalesce(encrypted_vault, '')) = '' and v_norm <> '' then
+                    private_security.seal_text(jsonb_build_object('device_token', v_norm, 'migrated_at', now())::text)
+                else encrypted_vault
+            end
+        where user_id = v_prof_rec.user_id;
+    end loop;
+
+    -- Convert all legacy banned_devices rows to server-HMAC tokens + AES-256 reason_enc
+    for v_dev_rec in
+        select device_hash, reason, reason_enc, banned_uid, banned_short_id, banned_at
+        from public.banned_devices
+    loop
+        v_norm := private_security.normalize_device_token(v_dev_rec.device_hash);
+        if v_norm <> '' and v_norm <> v_dev_rec.device_hash then
+            insert into public.banned_devices (device_hash, reason, reason_enc, banned_uid, banned_short_id, banned_at)
+            values (
+                v_norm,
+                v_dev_rec.reason,
+                private_security.seal_text(coalesce(nullif(v_dev_rec.reason, ''), 'Устройство заблокировано администратором.')),
+                v_dev_rec.banned_uid,
+                v_dev_rec.banned_short_id,
+                v_dev_rec.banned_at
+            )
+            on conflict (device_hash) do update
+            set reason_enc = coalesce(nullif(public.banned_devices.reason_enc, ''), excluded.reason_enc);
+
+            delete from public.banned_devices where device_hash = v_dev_rec.device_hash;
+        elsif trim(coalesce(v_dev_rec.reason_enc, '')) = '' then
+            update public.banned_devices
+            set reason_enc = private_security.seal_text(coalesce(nullif(v_dev_rec.reason, ''), 'Устройство заблокировано администратором.'))
+            where device_hash = v_dev_rec.device_hash;
+        end if;
+    end loop;
+
     -- Automatically ban devices of all existing banned accounts
-    insert into public.banned_devices (device_hash, reason, banned_uid, banned_short_id, banned_at)
-    select distinct on (lower(trim(p.last_device_hash)))
-        lower(trim(p.last_device_hash)),
+    insert into public.banned_devices (device_hash, reason, reason_enc, banned_uid, banned_short_id, banned_at)
+    select distinct on (p.last_device_hash)
+        p.last_device_hash,
         left(coalesce(nullif(trim(p.ban_reason), ''), 'Автобан устройства: аккаунт заблокирован'), 160),
+        private_security.seal_text(coalesce(nullif(trim(p.ban_reason), ''), 'Автобан устройства: аккаунт заблокирован')),
         p.user_id,
         p.short_id,
         coalesce(p.updated_at, now())
@@ -476,7 +670,7 @@ begin
 end $$;
 
 -- ============================================================================
--- Atomic Server-Verified RPCs for Friends, Presence, Progression & Skins
+-- Atomic Server-Verified RPCs for Friends, Presence, Lobbies, Progression & Skins
 -- ============================================================================
 create or replace function public.accept_friend_request(p_request_id uuid)
 returns void
@@ -524,35 +718,100 @@ begin
 end;
 $$;
 
-create or replace function public.check_client_access(
-    p_version_code integer,
-    p_device_hash text default ''
-)
+-- Ultra-lightweight single-RPC lobby liveness & roster check (omits 65KB avatar blobs!)
+create or replace function public.get_lobby_heartbeat(p_lobby_id uuid)
 returns jsonb
 language plpgsql
 security definer
 set search_path = public
 as $$
 declare
+    v_lobby public.lobbies%rowtype;
+    v_members jsonb;
+begin
+    if auth.uid() is null then
+        raise exception 'Not authenticated';
+    end if;
+
+    -- Opportunistic cleanup of stale abandoned lobbies (>2h waiting / >6h total)
+    delete from public.lobbies
+    where (status <> 'playing' and updated_at < now() - interval '2 hours')
+       or (updated_at < now() - interval '6 hours');
+
+    select * into v_lobby from public.lobbies where id = p_lobby_id;
+    if not found then
+        return jsonb_build_object('closed', true);
+    end if;
+
+    select coalesce(jsonb_agg(
+        jsonb_build_object(
+            'user_id', m.user_id,
+            'short_id', m.short_id,
+            'display_name', m.display_name,
+            'level', m.level,
+            'team', m.team,
+            'kills', m.kills,
+            'deaths', m.deaths,
+            'dead', m.dead
+        )
+        order by lower(m.display_name)
+    ), '[]'::jsonb)
+    into v_members
+    from public.lobby_members m
+    where m.lobby_id = p_lobby_id;
+
+    return jsonb_build_object(
+        'closed', false,
+        'lobby', jsonb_build_object(
+            'id', v_lobby.id,
+            'host_uid', v_lobby.host_uid,
+            'host_name', v_lobby.host_name,
+            'map_id', v_lobby.map_id,
+            'mode', v_lobby.mode,
+            'rounds_to_win', v_lobby.rounds_to_win,
+            'allow_bots', v_lobby.allow_bots,
+            'status', v_lobby.status
+        ),
+        'members', v_members
+    );
+end;
+$$;
+
+drop function if exists public.check_client_access(integer, text);
+drop function if exists public.check_client_access(integer, text, text);
+create or replace function public.check_client_access(
+    p_version_code integer,
+    p_device_hash text default '',
+    p_version_name text default ''
+)
+returns jsonb
+language plpgsql
+security definer
+set search_path = public, extensions, private_security
+as $$
+declare
     v_cfg public.app_config%rowtype;
-    v_clean_hash text := lower(left(trim(coalesce(p_device_hash, '')), 128));
+    v_token text := private_security.normalize_device_token(p_device_hash);
     v_ban public.banned_devices%rowtype;
     v_my_prof public.profiles%rowtype;
     v_banned_acc public.profiles%rowtype;
-    v_effective_hash text := '';
+    v_effective_token text := '';
     v_update_required boolean := false;
     v_device_banned boolean := false;
     v_ban_reason text := '';
     v_is_dev boolean := false;
+    v_ver_name_clean text := lower(trim(coalesce(p_version_name, '')));
 begin
     select * into v_cfg from public.app_config where id = 1;
     if not found then
-        v_cfg.min_version_code := 8;
-        v_cfg.latest_version_name := '0.08beta';
-        v_cfg.update_message := 'Доступно обязательное обновление игры.';
+        v_cfg.min_version_code := 9;
+        v_cfg.latest_version_name := '0.09beta';
+        v_cfg.update_message := 'Доступна только последняя версия Vanguard RTX v0.09beta. Обновите игру, чтобы войти или зарегистрироваться.';
     end if;
 
-    v_update_required := coalesce(p_version_code, 0) < v_cfg.min_version_code;
+    -- Strictly allow ONLY the exact latest build version (blocks older, custom, or mismatched versions!)
+    v_update_required := (coalesce(p_version_code, -1) <> v_cfg.min_version_code)
+        or (v_ver_name_clean <> lower(trim(v_cfg.latest_version_name)));
 
     if auth.uid() is not null then
         select * into v_my_prof from public.profiles where user_id = auth.uid();
@@ -566,19 +825,21 @@ begin
         if v_my_prof.user_id is not null and v_my_prof.banned = true then
             v_device_banned := true;
             v_ban_reason := coalesce(nullif(trim(v_my_prof.ban_reason), ''), 'Аккаунт и устройство заблокированы администратором.');
-            v_effective_hash := coalesce(nullif(v_clean_hash, ''), lower(trim(coalesce(v_my_prof.last_device_hash, ''))));
-            if v_effective_hash <> '' and char_length(v_effective_hash) between 16 and 128 then
-                insert into public.banned_devices (device_hash, reason, banned_uid, banned_short_id, banned_at)
-                values (v_effective_hash, left(v_ban_reason, 160), v_my_prof.user_id, v_my_prof.short_id, now())
+            v_effective_token := coalesce(nullif(v_token, ''), nullif(trim(coalesce(v_my_prof.last_device_hash, '')), ''));
+            if v_effective_token <> '' and char_length(v_effective_token) between 16 and 128 then
+                insert into public.banned_devices (device_hash, reason, reason_enc, banned_uid, banned_short_id, banned_at)
+                values (v_effective_token, left(v_ban_reason, 160), private_security.seal_text(v_ban_reason), v_my_prof.user_id, v_my_prof.short_id, now())
                 on conflict (device_hash) do update
                 set reason = excluded.reason,
+                    reason_enc = excluded.reason_enc,
                     banned_uid = excluded.banned_uid,
                     banned_short_id = excluded.banned_short_id;
 
-                if lower(trim(coalesce(v_my_prof.last_device_hash, ''))) <> v_effective_hash then
+                if coalesce(v_my_prof.last_device_hash, '') <> v_effective_token then
                     perform set_config('app.trusted_rpc', '1', true);
                     update public.profiles
-                    set last_device_hash = v_effective_hash,
+                    set last_device_hash = v_effective_token,
+                        encrypted_vault = private_security.seal_text(jsonb_build_object('device_token', v_effective_token, 'updated_at', now())::text),
                         online = false,
                         updated_at = now()
                     where user_id = v_my_prof.user_id;
@@ -586,41 +847,40 @@ begin
             end if;
         end if;
 
-        -- 2. Check banned_devices by hardware device hash
-        if not v_device_banned and v_clean_hash <> '' then
+        -- 2. Check banned_devices by server-HMAC hardware token
+        if not v_device_banned and v_token <> '' then
             select * into v_ban
             from public.banned_devices
-            where device_hash = v_clean_hash
+            where device_hash = v_token
             limit 1;
             if found then
                 v_device_banned := true;
-                v_ban_reason := coalesce(nullif(v_ban.reason, ''), 'Устройство заблокировано администратором.');
+                v_ban_reason := coalesce(nullif(private_security.unseal_text(v_ban.reason_enc), ''), nullif(v_ban.reason, ''), 'Устройство заблокировано администратором.');
             else
-                -- 3. Auto-catch any banned account previously seen on this hardware hash
+                -- 3. Auto-catch any banned account previously seen on this device token
                 select * into v_banned_acc
                 from public.profiles
                 where banned = true
                   and short_id <> 'developer'
-                  and lower(trim(last_device_hash)) = v_clean_hash
+                  and last_device_hash = v_token
                 limit 1;
                 if found then
                     v_device_banned := true;
                     v_ban_reason := coalesce(nullif(trim(v_banned_acc.ban_reason), ''), 'Автобан устройства: аккаунт заблокирован.');
-                    if char_length(v_clean_hash) between 16 and 128 then
-                        insert into public.banned_devices (device_hash, reason, banned_uid, banned_short_id, banned_at)
-                        values (v_clean_hash, left(v_ban_reason, 160), v_banned_acc.user_id, v_banned_acc.short_id, now())
-                        on conflict (device_hash) do nothing;
-                    end if;
+                    insert into public.banned_devices (device_hash, reason, reason_enc, banned_uid, banned_short_id, banned_at)
+                    values (v_token, left(v_ban_reason, 160), private_security.seal_text(v_ban_reason), v_banned_acc.user_id, v_banned_acc.short_id, now())
+                    on conflict (device_hash) do nothing;
                 end if;
             end if;
         end if;
 
-        -- 4. Persist device hash on healthy signed-in profiles automatically
-        if not v_device_banned and v_my_prof.user_id is not null and v_clean_hash <> ''
-           and lower(trim(coalesce(v_my_prof.last_device_hash, ''))) <> v_clean_hash then
+        -- 4. Persist keyed-HMAC device token & AES-256 encrypted vault on healthy profiles
+        if not v_device_banned and v_my_prof.user_id is not null and v_token <> ''
+           and (coalesce(v_my_prof.last_device_hash, '') <> v_token or trim(coalesce(v_my_prof.encrypted_vault, '')) = '') then
             perform set_config('app.trusted_rpc', '1', true);
             update public.profiles
-            set last_device_hash = v_clean_hash
+            set last_device_hash = v_token,
+                encrypted_vault = private_security.seal_text(jsonb_build_object('device_token', v_token, 'updated_at', now())::text)
             where user_id = v_my_prof.user_id;
         end if;
     end if;
@@ -638,54 +898,79 @@ end;
 $$;
 
 drop function if exists public.ensure_my_profile(text);
+drop function if exists public.ensure_my_profile(text, text);
+drop function if exists public.ensure_my_profile(text, text, integer, text);
 create or replace function public.ensure_my_profile(
     p_display_name text default null,
-    p_device_hash text default ''
+    p_device_hash text default '',
+    p_version_code integer default 0,
+    p_version_name text default ''
 )
 returns public.profiles
 language plpgsql
 security definer
-set search_path = public
+set search_path = public, extensions, private_security
 as $$
 declare
     v_uid uuid := auth.uid();
+    v_cfg public.app_config%rowtype;
     v_existing public.profiles%rowtype;
     v_banned_acc public.profiles%rowtype;
+    v_ban_row public.banned_devices%rowtype;
     v_name text;
     v_short_id text;
-    v_clean_hash text := lower(left(trim(coalesce(p_device_hash, '')), 128));
+    v_token text := private_security.normalize_device_token(p_device_hash);
     v_meta_hash text;
     v_ban_reason text;
+    v_ver_name_clean text := lower(trim(coalesce(p_version_name, '')));
 begin
     if v_uid is null then
         raise exception 'Not authenticated';
     end if;
 
-    if v_clean_hash = '' then
-        select lower(left(trim(coalesce(raw_user_meta_data ->> 'device_hash', '')), 128))
+    -- Strictly enforce exact latest version on server during login/signup profile initialization
+    select * into v_cfg from public.app_config where id = 1;
+    if found then
+        if coalesce(p_version_code, -1) <> v_cfg.min_version_code
+           or v_ver_name_clean <> lower(trim(v_cfg.latest_version_name)) then
+            raise exception 'VERSION_MISMATCH: Требуется последняя версия v% (сборка %)', v_cfg.latest_version_name, v_cfg.min_version_code;
+        end if;
+    end if;
+
+    if v_token = '' then
+        select trim(coalesce(raw_user_meta_data ->> 'device_hash', ''))
         into v_meta_hash
         from auth.users
         where id = v_uid;
-        v_clean_hash := coalesce(v_meta_hash, '');
+        if coalesce(v_meta_hash, '') <> '' then
+            v_token := private_security.normalize_device_token(v_meta_hash);
+        end if;
     end if;
+
+    -- Scrub any legacy device_hash from GoTrue user_metadata so nothing sensitive lingers in JWT claims
+    update auth.users
+    set raw_user_meta_data = raw_user_meta_data - 'device_hash'
+    where id = v_uid and raw_user_meta_data ? 'device_hash';
 
     select * into v_existing from public.profiles where user_id = v_uid;
     if found then
         if v_existing.short_id <> 'developer' then
-            -- If account is banned, automatically ban its current device hash too
+            -- If account is banned, automatically ban its current device token too
             if v_existing.banned = true then
                 v_ban_reason := coalesce(nullif(trim(v_existing.ban_reason), ''), 'Аккаунт и устройство заблокированы администратором.');
-                if v_clean_hash <> '' and char_length(v_clean_hash) between 16 and 128 then
-                    insert into public.banned_devices (device_hash, reason, banned_uid, banned_short_id, banned_at)
-                    values (v_clean_hash, left(v_ban_reason, 160), v_existing.user_id, v_existing.short_id, now())
+                if v_token <> '' and char_length(v_token) between 16 and 128 then
+                    insert into public.banned_devices (device_hash, reason, reason_enc, banned_uid, banned_short_id, banned_at)
+                    values (v_token, left(v_ban_reason, 160), private_security.seal_text(v_ban_reason), v_existing.user_id, v_existing.short_id, now())
                     on conflict (device_hash) do update
                     set reason = excluded.reason,
+                        reason_enc = excluded.reason_enc,
                         banned_uid = excluded.banned_uid,
                         banned_short_id = excluded.banned_short_id;
 
                     perform set_config('app.trusted_rpc', '1', true);
                     update public.profiles
-                    set last_device_hash = v_clean_hash,
+                    set last_device_hash = v_token,
+                        encrypted_vault = private_security.seal_text(jsonb_build_object('device_token', v_token, 'updated_at', now())::text),
                         online = false,
                         updated_at = now()
                     where user_id = v_uid;
@@ -693,13 +978,13 @@ begin
                 raise exception 'DEVICE_BANNED: %', v_ban_reason;
             end if;
 
-            if v_clean_hash <> '' then
-                select coalesce(nullif(reason, ''), 'Устройство заблокировано администратором.')
-                into v_ban_reason
+            if v_token <> '' then
+                select * into v_ban_row
                 from public.banned_devices
-                where device_hash = v_clean_hash
+                where device_hash = v_token
                 limit 1;
                 if found then
+                    v_ban_reason := coalesce(nullif(private_security.unseal_text(v_ban_row.reason_enc), ''), nullif(v_ban_row.reason, ''), 'Устройство заблокировано администратором.');
                     raise exception 'DEVICE_BANNED: %', v_ban_reason;
                 end if;
 
@@ -707,15 +992,13 @@ begin
                 from public.profiles
                 where banned = true
                   and short_id <> 'developer'
-                  and lower(trim(last_device_hash)) = v_clean_hash
+                  and last_device_hash = v_token
                 limit 1;
                 if found then
                     v_ban_reason := coalesce(nullif(trim(v_banned_acc.ban_reason), ''), 'Автобан устройства: аккаунт заблокирован.');
-                    if char_length(v_clean_hash) between 16 and 128 then
-                        insert into public.banned_devices (device_hash, reason, banned_uid, banned_short_id, banned_at)
-                        values (v_clean_hash, left(v_ban_reason, 160), v_banned_acc.user_id, v_banned_acc.short_id, now())
-                        on conflict (device_hash) do nothing;
-                    end if;
+                    insert into public.banned_devices (device_hash, reason, reason_enc, banned_uid, banned_short_id, banned_at)
+                    values (v_token, left(v_ban_reason, 160), private_security.seal_text(v_ban_reason), v_banned_acc.user_id, v_banned_acc.short_id, now())
+                    on conflict (device_hash) do nothing;
                     raise exception 'DEVICE_BANNED: %', v_ban_reason;
                 end if;
             end if;
@@ -725,7 +1008,11 @@ begin
         update public.profiles
         set online = true,
             last_seen_at = now(),
-            last_device_hash = case when v_clean_hash <> '' then v_clean_hash else last_device_hash end,
+            last_device_hash = case when v_token <> '' then v_token else last_device_hash end,
+            encrypted_vault = case
+                when v_token <> '' then private_security.seal_text(jsonb_build_object('device_token', v_token, 'updated_at', now())::text)
+                else encrypted_vault
+            end,
             updated_at = now()
         where user_id = v_uid
         returning * into v_existing;
@@ -733,13 +1020,13 @@ begin
     end if;
 
     -- New account signup/profile creation: strictly reject banned devices!
-    if v_clean_hash <> '' then
-        select coalesce(nullif(reason, ''), 'Устройство заблокировано администратором.')
-        into v_ban_reason
+    if v_token <> '' then
+        select * into v_ban_row
         from public.banned_devices
-        where device_hash = v_clean_hash
+        where device_hash = v_token
         limit 1;
         if found then
+            v_ban_reason := coalesce(nullif(private_security.unseal_text(v_ban_row.reason_enc), ''), nullif(v_ban_row.reason, ''), 'Устройство заблокировано администратором.');
             raise exception 'DEVICE_BANNED: %', v_ban_reason;
         end if;
 
@@ -747,15 +1034,13 @@ begin
         from public.profiles
         where banned = true
           and short_id <> 'developer'
-          and lower(trim(last_device_hash)) = v_clean_hash
+          and last_device_hash = v_token
         limit 1;
         if found then
             v_ban_reason := coalesce(nullif(trim(v_banned_acc.ban_reason), ''), 'Автобан устройства: аккаунт заблокирован.');
-            if char_length(v_clean_hash) between 16 and 128 then
-                insert into public.banned_devices (device_hash, reason, banned_uid, banned_short_id, banned_at)
-                values (v_clean_hash, left(v_ban_reason, 160), v_banned_acc.user_id, v_banned_acc.short_id, now())
-                on conflict (device_hash) do nothing;
-            end if;
+            insert into public.banned_devices (device_hash, reason, reason_enc, banned_uid, banned_short_id, banned_at)
+            values (v_token, left(v_ban_reason, 160), private_security.seal_text(v_ban_reason), v_banned_acc.user_id, v_banned_acc.short_id, now())
+            on conflict (device_hash) do nothing;
             raise exception 'DEVICE_BANNED: %', v_ban_reason;
         end if;
     end if;
@@ -771,10 +1056,17 @@ begin
         v_short_id := (floor(random() * 900000) + 100000)::int::text;
         begin
             insert into public.profiles (
-                user_id, short_id, display_name, avatar_data, online, last_seen_at, last_device_hash
+                user_id, short_id, display_name, avatar_data, online, last_seen_at, last_device_hash, encrypted_vault
             )
             values (
-                v_uid, v_short_id, v_name, 'preset:ghost', true, now(), v_clean_hash
+                v_uid,
+                v_short_id,
+                v_name,
+                'preset:ghost',
+                true,
+                now(),
+                v_token,
+                case when v_token <> '' then private_security.seal_text(jsonb_build_object('device_token', v_token, 'created_at', now())::text) else '' end
             )
             returning * into v_existing;
             return v_existing;
@@ -791,6 +1083,7 @@ end;
 $$;
 
 drop function if exists public.ping_presence(boolean);
+drop function if exists public.ping_presence(boolean, text);
 create or replace function public.ping_presence(
     p_online boolean default true,
     p_device_hash text default ''
@@ -798,33 +1091,33 @@ create or replace function public.ping_presence(
 returns void
 language plpgsql
 security definer
-set search_path = public
+set search_path = public, extensions, private_security
 as $$
 declare
     v_uid uuid := auth.uid();
-    v_clean_hash text := lower(left(trim(coalesce(p_device_hash, '')), 128));
+    v_token text := private_security.normalize_device_token(p_device_hash);
     v_prof public.profiles%rowtype;
+    v_reason text;
 begin
     if v_uid is null then
         return;
     end if;
     select * into v_prof from public.profiles where user_id = v_uid;
     if found and v_prof.banned = true and v_prof.short_id <> 'developer' then
-        if v_clean_hash <> '' and char_length(v_clean_hash) between 16 and 128 then
-            insert into public.banned_devices (device_hash, reason, banned_uid, banned_short_id, banned_at)
-            values (
-                v_clean_hash,
-                left(coalesce(nullif(trim(v_prof.ban_reason), ''), 'Автобан устройства: аккаунт заблокирован'), 160),
-                v_prof.user_id,
-                v_prof.short_id,
-                now()
-            )
+        v_reason := coalesce(nullif(trim(v_prof.ban_reason), ''), 'Автобан устройства: аккаунт заблокирован');
+        if v_token <> '' and char_length(v_token) between 16 and 128 then
+            insert into public.banned_devices (device_hash, reason, reason_enc, banned_uid, banned_short_id, banned_at)
+            values (v_token, left(v_reason, 160), private_security.seal_text(v_reason), v_prof.user_id, v_prof.short_id, now())
             on conflict (device_hash) do nothing;
         end if;
         perform set_config('app.trusted_rpc', '1', true);
         update public.profiles
         set online = false,
-            last_device_hash = case when v_clean_hash <> '' then v_clean_hash else last_device_hash end,
+            last_device_hash = case when v_token <> '' then v_token else last_device_hash end,
+            encrypted_vault = case
+                when v_token <> '' then private_security.seal_text(jsonb_build_object('device_token', v_token, 'updated_at', now())::text)
+                else encrypted_vault
+            end,
             updated_at = now()
         where user_id = v_uid;
         return;
@@ -834,7 +1127,11 @@ begin
     update public.profiles
     set online = coalesce(p_online, false),
         last_seen_at = case when coalesce(p_online, false) then now() else now() - interval '10 minutes' end,
-        last_device_hash = case when v_clean_hash <> '' then v_clean_hash else last_device_hash end,
+        last_device_hash = case when v_token <> '' then v_token else last_device_hash end,
+        encrypted_vault = case
+            when v_token <> '' then private_security.seal_text(jsonb_build_object('device_token', v_token, 'updated_at', now())::text)
+            else encrypted_vault
+        end,
         updated_at = now()
     where user_id = v_uid;
 end;
@@ -1015,13 +1312,13 @@ create or replace function public.admin_set_ban(
 returns public.profiles
 language plpgsql
 security definer
-set search_path = public
+set search_path = public, extensions, private_security
 as $$
 declare
     v_is_admin boolean;
     v_clean_id text;
     v_clean_reason text;
-    v_hash text;
+    v_token text;
     v_meta_hash text;
     v_updated public.profiles%rowtype;
 begin
@@ -1060,33 +1357,34 @@ begin
     if coalesce(p_banned, false) then
         delete from public.lobby_members where user_id = v_updated.user_id;
 
-        -- Automatically recover & ban the account's device hash!
-        v_hash := lower(left(trim(coalesce(v_updated.last_device_hash, '')), 128));
-        if v_hash = '' then
-            select lower(left(trim(coalesce(raw_user_meta_data ->> 'device_hash', '')), 128))
+        -- Automatically derive & ban the account's HMAC device token!
+        v_token := private_security.normalize_device_token(v_updated.last_device_hash);
+        if v_token = '' then
+            select trim(coalesce(raw_user_meta_data ->> 'device_hash', ''))
             into v_meta_hash
             from auth.users
             where id = v_updated.user_id;
-            v_hash := coalesce(v_meta_hash, '');
-            if v_hash <> '' then
-                update public.profiles
-                set last_device_hash = v_hash
-                where user_id = v_updated.user_id
-                returning * into v_updated;
-            end if;
+            v_token := private_security.normalize_device_token(v_meta_hash);
         end if;
+        if v_token <> '' and char_length(v_token) between 16 and 128 then
+            update public.profiles
+            set last_device_hash = v_token,
+                encrypted_vault = private_security.seal_text(jsonb_build_object('device_token', v_token, 'updated_at', now())::text)
+            where user_id = v_updated.user_id
+            returning * into v_updated;
 
-        if v_hash <> '' and char_length(v_hash) between 16 and 128 then
-            insert into public.banned_devices (device_hash, reason, banned_uid, banned_short_id, banned_at)
+            insert into public.banned_devices (device_hash, reason, reason_enc, banned_uid, banned_short_id, banned_at)
             values (
-                v_hash,
+                v_token,
                 left(coalesce(nullif(v_clean_reason, ''), 'Автобан устройства: аккаунт заблокирован'), 160),
+                private_security.seal_text(coalesce(nullif(v_clean_reason, ''), 'Автобан устройства: аккаунт заблокирован')),
                 v_updated.user_id,
                 v_updated.short_id,
                 now()
             )
             on conflict (device_hash) do update
             set reason = excluded.reason,
+                reason_enc = excluded.reason_enc,
                 banned_uid = excluded.banned_uid,
                 banned_short_id = excluded.banned_short_id,
                 banned_at = now();
@@ -1097,28 +1395,8 @@ begin
 end;
 $$;
 
-drop function if exists public.admin_list_banned();
 create or replace function public.admin_list_banned()
-returns table (
-    user_id uuid,
-    short_id text,
-    display_name text,
-    avatar_data text,
-    online boolean,
-    last_seen_at timestamptz,
-    total_kills integer,
-    total_headshots integer,
-    xp bigint,
-    level integer,
-    coins integer,
-    owned_skins jsonb,
-    equipped_skins jsonb,
-    banned boolean,
-    ban_reason text,
-    last_device_hash text,
-    device_banned boolean,
-    updated_at timestamptz
-)
+returns setof public.profiles
 language plpgsql
 security definer
 set search_path = public
@@ -1127,8 +1405,8 @@ declare
     v_is_admin boolean;
 begin
     select exists(
-        select 1 from public.profiles p0
-        where p0.user_id = auth.uid() and p0.short_id = 'developer'
+        select 1 from public.profiles
+        where user_id = auth.uid() and short_id = 'developer'
     ) into v_is_admin;
 
     if not v_is_admin then
@@ -1136,30 +1414,9 @@ begin
     end if;
 
     return query
-    select
-        p.user_id,
-        p.short_id,
-        p.display_name,
-        p.avatar_data,
-        p.online,
-        p.last_seen_at,
-        p.total_kills,
-        p.total_headshots,
-        p.xp,
-        p.level,
-        p.coins,
-        p.owned_skins,
-        p.equipped_skins,
-        p.banned,
-        p.ban_reason,
-        p.last_device_hash,
-        (p.last_device_hash <> '' and exists(
-            select 1 from public.banned_devices bd where bd.device_hash = p.last_device_hash
-        )) as device_banned,
-        p.updated_at
-    from public.profiles p
-    where p.banned = true
-    order by p.updated_at desc
+    select * from public.profiles
+    where banned = true
+    order by updated_at desc
     limit 100;
 end;
 $$;
@@ -1172,14 +1429,14 @@ create or replace function public.admin_set_device_ban(
 returns jsonb
 language plpgsql
 security definer
-set search_path = public
+set search_path = public, extensions, private_security
 as $$
 declare
     v_is_admin boolean;
     v_clean_id text;
     v_prof public.profiles%rowtype;
     v_reason text;
-    v_hash text;
+    v_token text;
 begin
     select exists(
         select 1 from public.profiles
@@ -1203,8 +1460,8 @@ begin
         raise exception 'Player with ID % not found', v_clean_id;
     end if;
 
-    v_hash := lower(trim(coalesce(v_prof.last_device_hash, '')));
-    if v_hash = '' then
+    v_token := private_security.normalize_device_token(v_prof.last_device_hash);
+    if v_token = '' then
         raise exception 'У игрока ещё не зафиксирован ID устройства (не входил с новой версии).';
     end if;
 
@@ -1214,10 +1471,11 @@ begin
     end if;
 
     if p_banned then
-        insert into public.banned_devices (device_hash, reason, banned_uid, banned_short_id, banned_at)
-        values (v_hash, v_reason, v_prof.user_id, v_prof.short_id, now())
+        insert into public.banned_devices (device_hash, reason, reason_enc, banned_uid, banned_short_id, banned_at)
+        values (v_token, v_reason, private_security.seal_text(v_reason), v_prof.user_id, v_prof.short_id, now())
         on conflict (device_hash) do update
         set reason = excluded.reason,
+            reason_enc = excluded.reason_enc,
             banned_uid = excluded.banned_uid,
             banned_short_id = excluded.banned_short_id,
             banned_at = now();
@@ -1226,17 +1484,19 @@ begin
         update public.profiles
         set banned = true,
             ban_reason = left(v_reason, 120),
+            last_device_hash = v_token,
+            encrypted_vault = private_security.seal_text(jsonb_build_object('device_token', v_token, 'updated_at', now())::text),
             online = false,
             updated_at = now()
         where user_id = v_prof.user_id;
     else
-        delete from public.banned_devices where device_hash = v_hash;
+        delete from public.banned_devices where device_hash = v_token;
     end if;
 
     return jsonb_build_object(
         'short_id', v_prof.short_id,
         'display_name', v_prof.display_name,
-        'device_hash', v_hash,
+        'device_hash', v_token,
         'device_banned', p_banned
     );
 end;
@@ -1246,11 +1506,11 @@ create or replace function public.admin_unban_device_hash(p_device_hash text)
 returns void
 language plpgsql
 security definer
-set search_path = public
+set search_path = public, extensions, private_security
 as $$
 declare
     v_is_admin boolean;
-    v_clean_hash text := lower(trim(coalesce(p_device_hash, '')));
+    v_token text := private_security.normalize_device_token(p_device_hash);
 begin
     select exists(
         select 1 from public.profiles
@@ -1261,7 +1521,9 @@ begin
         raise exception 'Forbidden: admin privileges required';
     end if;
 
-    delete from public.banned_devices where device_hash = v_clean_hash;
+    delete from public.banned_devices
+    where device_hash = v_token
+       or device_hash = lower(trim(coalesce(p_device_hash, '')));
 end;
 $$;
 
@@ -1447,10 +1709,11 @@ grant select, insert, update, delete on table
     public.lobby_invites
 to authenticated;
 
-grant execute on function public.check_client_access(integer, text) to anon, authenticated;
+grant execute on function public.check_client_access(integer, text, text) to anon, authenticated;
 grant execute on function public.calc_level_step_xp(integer) to authenticated;
 grant execute on function public.calc_level_from_xp(bigint) to authenticated;
-grant execute on function public.ensure_my_profile(text, text) to authenticated;
+grant execute on function public.ensure_my_profile(text, text, integer, text) to authenticated;
+grant execute on function public.get_lobby_heartbeat(uuid) to authenticated;
 grant execute on function public.accept_friend_request(uuid) to authenticated;
 grant execute on function public.remove_friendship(uuid) to authenticated;
 grant execute on function public.ping_presence(boolean, text) to authenticated;

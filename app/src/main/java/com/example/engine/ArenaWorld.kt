@@ -307,7 +307,6 @@ class ArenaWorld(
      */
     private fun computeOpenLobbyFraming(preferredAnchors: List<Pair<Float, Float>>): LobbyFraming {
         fun isZoneFlatAndWallFree(px: Float, pz: Float, refY: Float, radius: Float, maxSlope: Float, lowOff: Float, highOff: Float): Boolean {
-            if (mapId == ArenaMapId.MIRAGE && px in 7.8f..14.0f && pz in 21.8f..25.4f) return false
             val h = sampleNearestFloorHeight(px, pz, refY, maxStepUp = 1.0f, maxDrop = 1.0f) ?: return false
             if (abs(h - refY) > maxSlope) return false
             val yLow = min(refY, h) + lowOff
@@ -372,9 +371,6 @@ class ArenaWorld(
         }
 
         for ((idx, stand) in candidateStands.withIndex()) {
-            if (mapId == ArenaMapId.MIRAGE && stand.first in 7.8f..14.0f && stand.second in 21.8f..25.4f) {
-                continue
-            }
             val standY = sampleFloorHeight(stand.first, stand.second) ?: continue
             if (!isZoneFlatAndWallFree(stand.first, stand.second, standY, radius = 0.85f, maxSlope = 0.16f, lowOff = 0.30f, highOff = 1.85f)) {
                 continue
@@ -814,7 +810,6 @@ class ArenaWorld(
     /**
      * 1) Seals interior single/multi-cell floor holes in l0/l1 layers via neighbor interpolation.
      * 2) Strips stray isolated/floating phantom torso-height wall bits that snag players in mid-air.
-     * 3) On Mirage: builds the climbable Site-A Palace staircase ramp + doorway bridge & carves headroom.
      */
     private fun cleanMapGeometryAndApplyMirageFeatures() {
         if (floorLayers.isEmpty()) return
@@ -855,53 +850,7 @@ class ArenaWorld(
             }
         }
 
-        // B. Mirage climbable A-House / Palace staircase (x: 8.6..13.2, z: 22.7..24.5) + doorway bridge
-        if (mapId == ArenaMapId.MIRAGE) {
-            val l0 = floorLayers[0]
-            val l1 = floorLayers.getOrNull(1)
-            val startX = 8.6f
-            val endX = 13.2f
-            val startY = -0.20f
-            val endY = 2.42f
-            for (gz in 0 until gridSize) {
-                val wz = gridMin + (gz + 0.5f) * (gridSpan / gridSize)
-                for (gx in 0 until gridSize) {
-                    val wx = gridMin + (gx + 0.5f) * (gridSpan / gridSize)
-                    val cell = gz * gridSize + gx
-                    if (wx in startX..endX && wz in 22.6f..24.6f) {
-                        val t = ((wx - startX) / (endX - startX)).coerceIn(0f, 1f)
-                        val rampH = ((startY + t * (endY - startY)) * heightScale).toInt()
-                        l0[cell] = rampH
-                        if (l1 != null) l1[cell] = rampH
-                    } else if (wx in 15.1f..19.2f && wz in 25.1f..27.3f) {
-                        val palaceH = (endY * heightScale).toInt()
-                        if (l1 != null && l1[cell] == missingVal) l1[cell] = palaceH
-                        if (l0[cell] == missingVal) l0[cell] = palaceH
-                    }
-                }
-            }
-            // Carve clean stair headroom in wallBits so player can walk & jump freely into Palace
-            wallBits?.let { bits ->
-                for (gz in 0 until wallSize) {
-                    val wz = wallMin + (gz + 0.5f) * (wallSpan / wallSize)
-                    for (gx in 0 until wallSize) {
-                        val wx = wallMin + (gx + 0.5f) * (wallSpan / wallSize)
-                        val idx = gz * wallSize + gx
-                        if (wx in 8.4f..19.3f && wz in 22.7f..24.6f) {
-                            val t = ((wx - startX) / (endX - startX)).coerceIn(0f, 1f)
-                            val stairH = startY + t * (endY - startY)
-                            val clearMask = buildVerticalMask(stairH + 0.28f, stairH + 2.05f)
-                            bits[idx] = bits[idx] and clearMask.inv()
-                        } else if (wx in 15.1f..19.2f && wz in 25.1f..27.2f) {
-                            val clearMask = buildVerticalMask(2.55f, 4.55f)
-                            bits[idx] = bits[idx] and clearMask.inv()
-                        }
-                    }
-                }
-            }
-        }
-
-        // C. Strip phantom isolated/floating torso wall snags in wallBits (cells with open air at feet AND <=1 supporting cardinal wall)
+        // B. Strip phantom isolated/floating torso wall snags in wallBits (cells with open air at feet AND <=1 supporting cardinal wall)
         val bits = wallBits ?: return
         if (wallSize <= 2) return
         val snapshot = bits.copyOf()

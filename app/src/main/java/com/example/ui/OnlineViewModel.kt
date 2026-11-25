@@ -29,6 +29,8 @@ import com.example.online.SupabaseAuthManager
 import com.example.online.SupabaseOnlineRepository
 import com.example.online.SupabaseRealtimeClient
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.async
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -207,7 +209,14 @@ class OnlineViewModel(
                 }
                 .onFailure { err ->
                     val msg = err.localizedMessage ?: "Не удалось загрузить или создать ID профиля"
-                    if (msg.contains("DEVICE_BANNED", ignoreCase = true)) {
+                    if (msg.contains("VERSION_MISMATCH", ignoreCase = true)) {
+                        _clientAccessStatus.value = _clientAccessStatus.value.copy(
+                            allowed = false,
+                            updateRequired = true,
+                            checked = true
+                        )
+                        leaveActiveLobby()
+                    } else if (msg.contains("DEVICE_BANNED", ignoreCase = true)) {
                         _clientAccessStatus.value = _clientAccessStatus.value.copy(
                             allowed = false,
                             deviceBanned = true,
@@ -215,6 +224,7 @@ class OnlineViewModel(
                                 .ifBlank { "Устройство заблокировано администратором." },
                             checked = true
                         )
+                        leaveActiveLobby()
                     }
                     _profileState.value = OnlineUiState.Error(msg)
                 }
@@ -634,7 +644,14 @@ class OnlineViewModel(
                 }
                 .onFailure { err ->
                     val msg = err.localizedMessage ?: "Не удалось загрузить или создать ID профиля"
-                    if (msg.contains("DEVICE_BANNED", ignoreCase = true)) {
+                    if (msg.contains("VERSION_MISMATCH", ignoreCase = true)) {
+                        _clientAccessStatus.value = _clientAccessStatus.value.copy(
+                            allowed = false,
+                            updateRequired = true,
+                            checked = true
+                        )
+                        leaveActiveLobby()
+                    } else if (msg.contains("DEVICE_BANNED", ignoreCase = true)) {
                         _clientAccessStatus.value = _clientAccessStatus.value.copy(
                             allowed = false,
                             deviceBanned = true,
@@ -642,14 +659,15 @@ class OnlineViewModel(
                                 .ifBlank { "Устройство заблокировано администратором." },
                             checked = true
                         )
+                        leaveActiveLobby()
                     }
                     _profileState.value = OnlineUiState.Error(msg)
                 }
 
-            // Periodic background cloud sync + strict 15s foreground presence heartbeat + version/device checks!
+            // Periodic background cloud sync + 15s presence heartbeat + strict version/device gate
             var pollCycle = 0
             while (isActive) {
-                delay(3_500L)
+                delay(7_500L)
                 pollCycle++
                 val nowElapsed = android.os.SystemClock.elapsedRealtime()
                 if (isAppForeground && nowElapsed - lastPresenceHeartbeatMs >= 15_000L) {
@@ -671,7 +689,14 @@ class OnlineViewModel(
                             }
                             .onFailure { err ->
                                 val msg = err.localizedMessage ?: "Не удалось загрузить или создать ID профиля"
-                                if (msg.contains("DEVICE_BANNED", ignoreCase = true)) {
+                                if (msg.contains("VERSION_MISMATCH", ignoreCase = true)) {
+                                    _clientAccessStatus.value = _clientAccessStatus.value.copy(
+                                        allowed = false,
+                                        updateRequired = true,
+                                        checked = true
+                                    )
+                                    leaveActiveLobby()
+                                } else if (msg.contains("DEVICE_BANNED", ignoreCase = true)) {
                                     _clientAccessStatus.value = _clientAccessStatus.value.copy(
                                         allowed = false,
                                         deviceBanned = true,
@@ -679,6 +704,7 @@ class OnlineViewModel(
                                             .ifBlank { "Устройство заблокировано администратором." },
                                         checked = true
                                     )
+                                    leaveActiveLobby()
                                 }
                                 _profileState.value = OnlineUiState.Error(msg)
                             }
@@ -704,22 +730,28 @@ class OnlineViewModel(
 
     fun refreshSocialData() {
         viewModelScope.launch {
-            repository.fetchFriends(currentUserId)
-                .onSuccess { _friendsState.value = OnlineUiState.Success(it) }
-                .onFailure { err ->
-                    if (_friendsState.value is OnlineUiState.Loading) {
-                        _friendsState.value = OnlineUiState.Error(
-                            err.localizedMessage ?: "Ошибка загрузки списка друзей"
-                        )
+            coroutineScope {
+                val friendsJob = async { repository.fetchFriends(currentUserId) }
+                val requestsJob = async { repository.fetchFriendRequests(currentUserId) }
+                val invitesJob = async { repository.fetchIncomingInvites(currentUserId) }
+
+                friendsJob.await()
+                    .onSuccess { _friendsState.value = OnlineUiState.Success(it) }
+                    .onFailure { err ->
+                        if (_friendsState.value is OnlineUiState.Loading) {
+                            _friendsState.value = OnlineUiState.Error(
+                                err.localizedMessage ?: "Ошибка загрузки списка друзей"
+                            )
+                        }
                     }
-                }
-            repository.fetchFriendRequests(currentUserId)
-                .onSuccess { (incoming, outgoing) ->
-                    _incomingRequests.value = incoming
-                    _outgoingRequests.value = outgoing
-                }
-            repository.fetchIncomingInvites(currentUserId)
-                .onSuccess { _incomingInvites.value = it }
+                requestsJob.await()
+                    .onSuccess { (incoming, outgoing) ->
+                        _incomingRequests.value = incoming
+                        _outgoingRequests.value = outgoing
+                    }
+                invitesJob.await()
+                    .onSuccess { _incomingInvites.value = it }
+            }
         }
     }
 
@@ -1014,10 +1046,10 @@ class OnlineViewModel(
             activeSkinId = activeSkinId
         )
 
-        // 2. Database mirror: immediate ONLY if WebSocket failed; otherwise lightweight 2.2s mirror
+        // 2. Database mirror: immediate ONLY if WebSocket failed; otherwise lightweight 4.5s mirror
         //    so HTTP overhead never competes with live WebSocket combat sockets!
         val nowMs = android.os.SystemClock.elapsedRealtime()
-        val needsDbSync = !sentViaWs || (nowMs - lastDbMirrorMs >= 2_200L)
+        val needsDbSync = !sentViaWs || (nowMs - lastDbMirrorMs >= 4_500L)
         if (!needsDbSync) return
         if (!tickInFlight.compareAndSet(false, true)) return
         lastDbMirrorMs = nowMs
@@ -1086,10 +1118,10 @@ class OnlineViewModel(
                 val wsLive = realtimeClient.isJoined
 
                 if (inMatch && wsLive) {
-                    // WebSocket handles 30Hz state/hit/bomb sync; keep lightweight DB snapshot every 1.6s
-                    repository.fetchLobbySnapshot(lobbyId)
-                        .onSuccess { snapshot ->
-                            if (snapshot == null) {
+                    // WebSocket handles real-time state/hit/bomb sync; run lean heartbeat RPC without 65KB avatars
+                    repository.fetchLobbyHeartbeat(lobbyId)
+                        .onSuccess { hb ->
+                            if (hb == null) {
                                 _statusBanner.value = "Хост закрыл лобби."
                                 realtimeClient.disconnect()
                                 _activeLobbyId.value = null
@@ -1098,7 +1130,7 @@ class OnlineViewModel(
                                 _pingMs.value = 0
                                 return@launch
                             }
-                            if (snapshot.second.none { it.userId == currentUserId }) {
+                            if (hb.second.none { it.userId == currentUserId }) {
                                 realtimeClient.disconnect()
                                 _activeLobbyId.value = null
                                 _activeLobby.value = null
@@ -1107,23 +1139,41 @@ class OnlineViewModel(
                                 _kickedMessage.value = "Вы были исключены из матча."
                                 return@launch
                             }
-                            _activeLobby.value = snapshot.first
-                            _lobbyMemberStates.value = snapshot.second
+                            if (_activeLobby.value != hb.first) {
+                                _activeLobby.value = hb.first
+                            }
+                            val currentRoster = _lobbyMemberStates.value
+                            val currentUids = currentRoster.map { it.userId }.toSet()
+                            val hbUids = hb.second.map { it.userId }.toSet()
+                            if (currentUids != hbUids) {
+                                // Only fetch full snapshot when roster changes so joiners get avatar/skins once
+                                repository.fetchLobbySnapshot(lobbyId).onSuccess { full ->
+                                    if (full != null) {
+                                        _activeLobby.value = full.first
+                                        _lobbyMemberStates.value = full.second
+                                    }
+                                }
+                            }
                         }
-                    delay(1_600L)
-                } else if (inMatch && matchTickCount % 20 != 0) {
+                    delay(3_500L)
+                } else if (inMatch && matchTickCount % 25 != 0) {
                     // Automatic fast PostgREST fallback when WebSocket is reconnecting
                     repository.fetchLobbyMembersFast(lobbyId)
                         .onSuccess { (fastMembers, rttMs) ->
                             recordRtt(rttMs)
                             val cachedAvatars = _lobbyMemberStates.value.associate { it.userId to it.avatarData }
+                            val cachedSkins = _lobbyMemberStates.value.associate { it.userId to it.equippedSkins }
                             _lobbyMemberStates.value = fastMembers.map { m ->
-                                val preserved = cachedAvatars[m.userId]
-                                if (!preserved.isNullOrBlank()) m.copy(avatarData = preserved) else m
+                                val preservedAvatar = cachedAvatars[m.userId]
+                                val preservedSkins = cachedSkins[m.userId]
+                                m.copy(
+                                    avatarData = if (!preservedAvatar.isNullOrBlank()) preservedAvatar else m.avatarData,
+                                    equippedSkins = if (!preservedSkins.isNullOrEmpty()) preservedSkins else m.equippedSkins
+                                )
                             }
                         }
                     matchTickCount++
-                    delay(55L)
+                    delay(75L)
                 } else {
                     val t0 = android.os.SystemClock.elapsedRealtime()
                     repository.fetchLobbySnapshot(lobbyId)
@@ -1141,15 +1191,17 @@ class OnlineViewModel(
                                 _pingMs.value = 0
                                 return@launch
                             }
-                            _activeLobby.value = snapshot.first
+                            if (_activeLobby.value != snapshot.first) {
+                                _activeLobby.value = snapshot.first
+                            }
                             _lobbyMemberStates.value = snapshot.second
                         }
                     if (_activeLobby.value?.status == "playing") {
                         matchTickCount++
-                        delay(if (realtimeClient.isJoined) 1_600L else 55L)
+                        delay(if (realtimeClient.isJoined) 3_500L else 75L)
                     } else {
                         matchTickCount = 0
-                        delay(500L)
+                        delay(650L)
                     }
                 }
             }

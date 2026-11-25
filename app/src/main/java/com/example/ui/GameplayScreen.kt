@@ -196,75 +196,82 @@ fun GameplayScreen(
         }
     }
 
-    // Ultra-responsive 50Hz (20ms) TCP_NODELAY Realtime WebSocket publish loop with instant flush on shots, hits, C4 bomb, weapon swaps, or death!
+    // Low-overhead 35Hz (28ms) TCP_NODELAY Realtime WebSocket publish loop running off the Main/Compose thread!
     LaunchedEffect(activeLobbyId, engine.matchConfig.isMultiplayer) {
         val lobbyId = activeLobbyId
         if (!engine.matchConfig.isMultiplayer || lobbyId.isNullOrBlank()) return@LaunchedEffect
-        var lastSentHitSeq = 0
-        var lastSentBombSeq = 0
-        var lastSentMatchSeq = 0
-        var lastSentWeapon = ""
-        var lastSentDead = false
-        var lastSentShooting = false
-        var lastSendTimeMs = 0L
-        while (true) {
-            val nowMs = android.os.SystemClock.elapsedRealtime()
-            val snap = engine.latestHud
-            val hit = engine.lastOutgoingHit
-            val bombEv = engine.latestBombSync
-            val matchEv = engine.latestMatchSync
-            val shootingNow = engine.muzzleFlashTimer > 0.05f
-            val hasNewHit = hit != null && hit.seq > lastSentHitSeq
-            val hasNewBomb = bombEv != null && bombEv.seq > lastSentBombSeq
-            val hasNewMatch = matchEv != null && matchEv.seq > lastSentMatchSeq
-            val weaponChanged = snap.activeWeapon.name != lastSentWeapon
-            val deadChanged = snap.isPlayerDead != lastSentDead
-            val shotStarted = shootingNow && !lastSentShooting
-            val timeElapsed = (nowMs - lastSendTimeMs) >= 20L
+        kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Default) {
+            var lastSentHitSeq = 0
+            var lastSentBombSeq = 0
+            var lastSentMatchSeq = 0
+            var lastSentWeapon = ""
+            var lastSentDead = false
+            var lastSentShooting = false
+            var lastSendTimeMs = 0L
+            var lastKeyframeMs = 0L
+            while (true) {
+                val nowMs = android.os.SystemClock.elapsedRealtime()
+                val snap = engine.latestHud
+                val hit = engine.lastOutgoingHit
+                val bombEv = engine.latestBombSync
+                val matchEv = engine.latestMatchSync
+                val shootingNow = engine.muzzleFlashTimer > 0.05f
+                val hasNewHit = hit != null && hit.seq > lastSentHitSeq
+                val hasNewBomb = bombEv != null && bombEv.seq > lastSentBombSeq
+                val hasNewMatch = matchEv != null && matchEv.seq > lastSentMatchSeq
+                val weaponChanged = snap.activeWeapon.name != lastSentWeapon
+                val deadChanged = snap.isPlayerDead != lastSentDead
+                val shotStarted = shootingNow && !lastSentShooting
+                val isMovingNow = engine.moveSpeedRatio > 0.1f
+                val minIntervalMs = if (isMovingNow || shootingNow || !snap.isPlayerDead) 28L else 180L
+                val timeElapsed = (nowMs - lastSendTimeMs) >= minIntervalMs
 
-            if (hasNewBomb && bombEv != null) {
-                lastSentBombSeq = bombEv.seq
-                onPublishBombSync(lobbyId, bombEv)
-            }
-            if (hasNewMatch && matchEv != null) {
-                lastSentMatchSeq = matchEv.seq
-                onPublishMatchSync(lobbyId, matchEv)
-            }
-            val outgoingKillFeeds = engine.drainOutgoingKillFeeds()
-            for (kfEv in outgoingKillFeeds) {
-                onPublishKillFeed(lobbyId, kfEv)
-            }
+                if (hasNewBomb && bombEv != null) {
+                    lastSentBombSeq = bombEv.seq
+                    onPublishBombSync(lobbyId, bombEv)
+                }
+                if (hasNewMatch && matchEv != null) {
+                    lastSentMatchSeq = matchEv.seq
+                    onPublishMatchSync(lobbyId, matchEv)
+                }
+                val outgoingKillFeeds = engine.drainOutgoingKillFeeds()
+                for (kfEv in outgoingKillFeeds) {
+                    onPublishKillFeed(lobbyId, kfEv)
+                }
 
-            if (hasNewHit || hasNewBomb || hasNewMatch || weaponChanged || deadChanged || shotStarted || timeElapsed) {
-                val hitToSend = if (hasNewHit && hit != null) {
-                    lastSentHitSeq = hit.seq
-                    hit
-                } else null
-                lastSentWeapon = snap.activeWeapon.name
-                lastSentDead = snap.isPlayerDead
-                lastSentShooting = shootingNow
-                lastSendTimeMs = nowMs
-                onPublishLiveState(
-                    lobbyId,
-                    snap.playerSide,
-                    engine.playerX,
-                    engine.playerY,
-                    engine.playerZ,
-                    Math.toDegrees(engine.playerYawRad.toDouble()).toFloat(),
-                    Math.toDegrees(engine.playerPitchRad.toDouble()).toFloat(),
-                    snap.hp,
-                    snap.isPlayerDead,
-                    engine.moveSpeedRatio > 0.1f,
-                    shootingNow,
-                    snap.activeWeapon.name,
-                    snap.kills,
-                    snap.deaths,
-                    hitToSend,
-                    engine.latestBombSync,
-                    engine.latestMatchSync
-                )
+                if (hasNewHit || hasNewBomb || hasNewMatch || weaponChanged || deadChanged || shotStarted || timeElapsed) {
+                    val hitToSend = if (hasNewHit && hit != null) {
+                        lastSentHitSeq = hit.seq
+                        hit
+                    } else null
+                    val sendKeyframe = (nowMs - lastKeyframeMs) >= 2_000L
+                    if (sendKeyframe) lastKeyframeMs = nowMs
+                    lastSentWeapon = snap.activeWeapon.name
+                    lastSentDead = snap.isPlayerDead
+                    lastSentShooting = shootingNow
+                    lastSendTimeMs = nowMs
+                    onPublishLiveState(
+                        lobbyId,
+                        snap.playerSide,
+                        engine.playerX,
+                        engine.playerY,
+                        engine.playerZ,
+                        Math.toDegrees(engine.playerYawRad.toDouble()).toFloat(),
+                        Math.toDegrees(engine.playerPitchRad.toDouble()).toFloat(),
+                        snap.hp,
+                        snap.isPlayerDead,
+                        isMovingNow,
+                        shootingNow,
+                        snap.activeWeapon.name,
+                        snap.kills,
+                        snap.deaths,
+                        hitToSend,
+                        if (sendKeyframe) bombEv else null,
+                        if (sendKeyframe) matchEv else null
+                    )
+                }
+                delay(14L)
             }
-            delay(8L)
         }
     }
 
