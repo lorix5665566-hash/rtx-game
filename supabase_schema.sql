@@ -672,6 +672,7 @@ end $$;
 -- ============================================================================
 -- Atomic Server-Verified RPCs for Friends, Presence, Lobbies, Progression & Skins
 -- ============================================================================
+drop function if exists public.accept_friend_request(uuid);
 create or replace function public.accept_friend_request(p_request_id uuid)
 returns void
 language plpgsql
@@ -705,6 +706,7 @@ begin
 end;
 $$;
 
+drop function if exists public.remove_friendship(uuid);
 create or replace function public.remove_friendship(p_friend_uid uuid)
 returns void
 language plpgsql
@@ -719,6 +721,7 @@ end;
 $$;
 
 -- Ultra-lightweight single-RPC lobby liveness & roster check (omits 65KB avatar blobs!)
+drop function if exists public.get_lobby_heartbeat(uuid);
 create or replace function public.get_lobby_heartbeat(p_lobby_id uuid)
 returns jsonb
 language plpgsql
@@ -1137,6 +1140,7 @@ begin
 end;
 $$;
 
+drop function if exists public.award_kill_xp(integer, integer);
 create or replace function public.award_kill_xp(
     p_kills integer default 1,
     p_headshots integer default 0
@@ -1189,6 +1193,7 @@ begin
 end;
 $$;
 
+drop function if exists public.open_skin_case(text, integer);
 create or replace function public.open_skin_case(
     p_skin_id text,
     p_duplicate_refund integer default 45
@@ -1246,6 +1251,7 @@ begin
 end;
 $$;
 
+drop function if exists public.equip_weapon_skin(text, text);
 create or replace function public.equip_weapon_skin(
     p_weapon text,
     p_skin_id text default ''
@@ -1304,6 +1310,8 @@ $$;
 -- ============================================================================
 -- Admin Moderation, EXP Booster & Skin Granter (Strictly gated to 'developer')
 -- ============================================================================
+drop function if exists public.admin_set_ban(text, boolean);
+drop function if exists public.admin_set_ban(text, boolean, text);
 create or replace function public.admin_set_ban(
     p_target_short_id text,
     p_banned boolean,
@@ -1395,6 +1403,7 @@ begin
 end;
 $$;
 
+drop function if exists public.admin_list_banned();
 create or replace function public.admin_list_banned()
 returns setof public.profiles
 language plpgsql
@@ -1421,6 +1430,8 @@ begin
 end;
 $$;
 
+drop function if exists public.admin_set_device_ban(text, boolean);
+drop function if exists public.admin_set_device_ban(text, boolean, text);
 create or replace function public.admin_set_device_ban(
     p_target_short_id text,
     p_banned boolean,
@@ -1502,6 +1513,7 @@ begin
 end;
 $$;
 
+drop function if exists public.admin_unban_device_hash(text);
 create or replace function public.admin_unban_device_hash(p_device_hash text)
 returns void
 language plpgsql
@@ -1527,6 +1539,7 @@ begin
 end;
 $$;
 
+drop function if exists public.admin_list_banned_devices();
 create or replace function public.admin_list_banned_devices()
 returns setof public.banned_devices
 language plpgsql
@@ -1552,6 +1565,7 @@ begin
 end;
 $$;
 
+drop function if exists public.admin_kick_member(uuid, uuid);
 create or replace function public.admin_kick_member(
     p_lobby_id uuid,
     p_target_uid uuid
@@ -1582,6 +1596,7 @@ begin
 end;
 $$;
 
+drop function if exists public.admin_grant_xp(text, integer);
 create or replace function public.admin_grant_xp(
     p_target_short_id text,
     p_xp_amount integer
@@ -1643,6 +1658,7 @@ begin
 end;
 $$;
 
+drop function if exists public.admin_grant_skins(text, text[]);
 create or replace function public.admin_grant_skins(
     p_target_short_id text,
     p_skin_ids text[]
