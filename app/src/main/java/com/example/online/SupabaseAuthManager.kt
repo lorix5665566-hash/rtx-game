@@ -406,20 +406,22 @@ class SupabaseAuthManager(context: Context) {
     }
 
     private fun saveSession(session: SupabaseSession) {
-        val serialized = JSONObject().apply {
-            put(KEY_UID, session.userId)
-            put(KEY_ACCESS, session.accessToken)
-            put(KEY_REFRESH, session.refreshToken)
-            put(KEY_EXPIRES_AT, session.expiresAtSec)
-            put(KEY_LOGIN_NAME, session.loginName)
-        }.toString()
-        vault.putString(KEY_SESSION_BLOB, serialized)
-        // Scrub any legacy plaintext individual keys
-        vault.remove(KEY_UID)
-        vault.remove(KEY_ACCESS)
-        vault.remove(KEY_REFRESH)
-        vault.remove(KEY_EXPIRES_AT)
-        vault.remove(KEY_LOGIN_NAME)
+        runCatching {
+            val serialized = JSONObject().apply {
+                put(KEY_UID, session.userId)
+                put(KEY_ACCESS, session.accessToken)
+                put(KEY_REFRESH, session.refreshToken)
+                put(KEY_EXPIRES_AT, session.expiresAtSec)
+                put(KEY_LOGIN_NAME, session.loginName)
+            }.toString()
+            vault.putString(KEY_SESSION_BLOB, serialized)
+            // Scrub any legacy plaintext individual keys
+            vault.remove(KEY_UID)
+            vault.remove(KEY_ACCESS)
+            vault.remove(KEY_REFRESH)
+            vault.remove(KEY_EXPIRES_AT)
+            vault.remove(KEY_LOGIN_NAME)
+        }
         _session.value = session
     }
 
