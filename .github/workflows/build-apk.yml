@@ -10,6 +10,8 @@ permissions:
 jobs:
   build-apk:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
 
     steps:
       - name: Checkout repository
@@ -76,14 +78,29 @@ jobs:
           if-no-files-found: error
 
       - name: Publish direct APK to GitHub Releases
-        continue-on-error: true
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.RELEASE_TOKEN || github.token }}
         run: |
+          TAG_FALLBACK="build-${{ github.run_number }}"
+          NOTES="Автоматическая сборка Vanguard RTX v0.08beta (#${{ github.run_number }}). Нажмите на файл Vanguard-RTX.apk ниже, чтобы скачать и установить на Android."
           if gh release view latest >/dev/null 2>&1; then
-            gh release upload latest Vanguard-RTX.apk --clobber
+            if gh release upload latest Vanguard-RTX.apk --clobber; then
+              echo "Updated 'latest' release successfully."
+              exit 0
+            fi
+            echo "::warning::Could not overwrite 'latest' release (possible Read-only workflow permissions or immutable release). Trying new release tag $TAG_FALLBACK..."
           else
-            gh release create latest Vanguard-RTX.apk \
-              --title "Vanguard RTX (APK)" \
-              --notes "Автоматическая сборка Vanguard RTX. Нажмите на файл Vanguard-RTX.apk ниже, чтобы скачать и установить на Android."
+            if gh release create latest Vanguard-RTX.apk --title "Vanguard RTX (APK)" --notes "$NOTES"; then
+              echo "Created 'latest' release successfully."
+              exit 0
+            fi
           fi
+
+          if gh release create "$TAG_FALLBACK" Vanguard-RTX.apk --title "Vanguard RTX v0.08beta (#${{ github.run_number }})" --notes "$NOTES"; then
+            echo "Published APK under release tag $TAG_FALLBACK."
+            exit 0
+          fi
+
+          echo "::error::GitHub blocked release upload (HTTP 403). Enable 'Read and write permissions' in Repo Settings -> Actions -> General -> Workflow permissions, or add a PAT as secret RELEASE_TOKEN."
+          exit 1
+
