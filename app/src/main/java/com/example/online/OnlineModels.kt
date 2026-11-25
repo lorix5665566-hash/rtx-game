@@ -45,6 +45,25 @@ fun isValidPlayerShortId(raw: String): Boolean {
     return clean == ADMIN_SHORT_ID || Regex("^[1-9][0-9]{5}$").matches(clean)
 }
 
+data class ClientAccessStatus(
+    val allowed: Boolean = true,
+    val updateRequired: Boolean = false,
+    val minVersionCode: Int = 8,
+    val latestVersionName: String = "0.08beta",
+    val updateMessage: String = "",
+    val deviceBanned: Boolean = false,
+    val banReason: String = "",
+    val checked: Boolean = false
+)
+
+data class BannedDeviceEntry(
+    val deviceHash: String = "",
+    val reason: String = "",
+    val bannedUid: String = "",
+    val bannedShortId: String = "",
+    val bannedAt: String = ""
+)
+
 /**
  * Cloud human player profile stored in Supabase.
  * Regular players have a permanent unique 6-digit numeric ID; admin has exclusive 'developer' ID.
@@ -65,7 +84,9 @@ data class PlayerProfile(
     val ownedSkins: List<String> = emptyList(),
     val equippedSkins: Map<String, String> = emptyMap(),
     val banned: Boolean = false,
-    val banReason: String = ""
+    val banReason: String = "",
+    val lastDeviceHash: String = "",
+    val deviceBanned: Boolean = false
 ) {
     val isAdmin: Boolean
         get() = shortId.equals(ADMIN_SHORT_ID, ignoreCase = true)

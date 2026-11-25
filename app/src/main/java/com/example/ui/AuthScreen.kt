@@ -48,6 +48,7 @@ import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -68,6 +69,7 @@ import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import com.example.online.AuthActionResult
+import com.example.online.ClientAccessStatus
 import com.example.online.SupabaseAuthManager
 import com.example.online.SupabaseConfig
 import com.example.online.SupabaseSession
@@ -99,10 +101,39 @@ fun AuthScreen(
     var confirmPasswordInput by remember { mutableStateOf("") }
     var showPassword by remember { mutableStateOf(false) }
     var isSubmitting by remember { mutableStateOf(false) }
+    var accessStatus by remember { mutableStateOf<ClientAccessStatus?>(null) }
     var errorMessage by remember {
         mutableStateOf(
             if (authManager.isConfigured) null else SupabaseConfig.MISSING_CONFIG_MESSAGE
         )
+    }
+
+    LaunchedEffect(Unit) {
+        accessStatus = authManager.checkClientAccess()
+    }
+
+    val currentAccess = accessStatus
+    if (currentAccess != null && currentAccess.updateRequired) {
+        UpdateRequiredScreen(
+            accessStatus = currentAccess,
+            onRetry = {
+                scope.launch {
+                    accessStatus = authManager.checkClientAccess()
+                }
+            }
+        )
+        return
+    }
+    if (currentAccess != null && currentAccess.deviceBanned) {
+        DeviceBannedScreen(
+            banReason = currentAccess.banReason,
+            onRetry = {
+                scope.launch {
+                    accessStatus = authManager.checkClientAccess()
+                }
+            }
+        )
+        return
     }
 
     fun submit() {
@@ -114,6 +145,12 @@ fun AuthScreen(
         val pass = passwordInput
         val confirm = confirmPasswordInput
         scope.launch {
+            val freshAccess = authManager.checkClientAccess()
+            accessStatus = freshAccess
+            if (freshAccess.updateRequired || freshAccess.deviceBanned) {
+                isSubmitting = false
+                return@launch
+            }
             val result = if (currentMode == AuthMode.REGISTER) {
                 authManager.register(login, pass, confirm)
             } else {
@@ -122,7 +159,10 @@ fun AuthScreen(
             isSubmitting = false
             when (result) {
                 is AuthActionResult.Success -> onAuthSuccess(result.session)
-                is AuthActionResult.Error -> errorMessage = result.message
+                is AuthActionResult.Error -> {
+                    errorMessage = result.message
+                    accessStatus = authManager.checkClientAccess()
+                }
             }
         }
     }

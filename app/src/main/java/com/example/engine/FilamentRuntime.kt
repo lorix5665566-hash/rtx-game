@@ -211,6 +211,71 @@ object FilamentSceneHelpers {
         }
     }
 
+    fun createUnitBoxGlbBuffer(
+        baseR: Float,
+        baseG: Float,
+        baseB: Float,
+        metallic: Float,
+        roughness: Float
+    ): ByteBuffer {
+        // 24 vertices (4 per face for crisp flat normals), 36 u16 indices, interleaved pos(3f)+norm(3f) = 24 bytes/vert
+        val positions = floatArrayOf(
+            // +Z
+            -0.5f, -0.5f,  0.5f,  0.5f, -0.5f,  0.5f,  0.5f,  0.5f,  0.5f, -0.5f,  0.5f,  0.5f,
+            // -Z
+             0.5f, -0.5f, -0.5f, -0.5f, -0.5f, -0.5f, -0.5f,  0.5f, -0.5f,  0.5f,  0.5f, -0.5f,
+            // +Y
+            -0.5f,  0.5f,  0.5f,  0.5f,  0.5f,  0.5f,  0.5f,  0.5f, -0.5f, -0.5f,  0.5f, -0.5f,
+            // -Y
+            -0.5f, -0.5f, -0.5f,  0.5f, -0.5f, -0.5f,  0.5f, -0.5f,  0.5f, -0.5f, -0.5f,  0.5f,
+            // +X
+             0.5f, -0.5f,  0.5f,  0.5f, -0.5f, -0.5f,  0.5f,  0.5f, -0.5f,  0.5f,  0.5f,  0.5f,
+            // -X
+            -0.5f, -0.5f, -0.5f, -0.5f, -0.5f,  0.5f, -0.5f,  0.5f,  0.5f, -0.5f,  0.5f, -0.5f
+        )
+        val normals = floatArrayOf(
+            0f, 0f, 1f,  0f, 0f, 1f,  0f, 0f, 1f,  0f, 0f, 1f,
+            0f, 0f, -1f, 0f, 0f, -1f, 0f, 0f, -1f, 0f, 0f, -1f,
+            0f, 1f, 0f,  0f, 1f, 0f,  0f, 1f, 0f,  0f, 1f, 0f,
+            0f, -1f, 0f, 0f, -1f, 0f, 0f, -1f, 0f, 0f, -1f, 0f,
+            1f, 0f, 0f,  1f, 0f, 0f,  1f, 0f, 0f,  1f, 0f, 0f,
+            -1f, 0f, 0f, -1f, 0f, 0f, -1f, 0f, 0f, -1f, 0f, 0f
+        )
+        val indices = shortArrayOf(
+            0, 1, 2, 0, 2, 3,
+            4, 5, 6, 4, 6, 7,
+            8, 9, 10, 8, 10, 11,
+            12, 13, 14, 12, 14, 15,
+            16, 17, 18, 16, 18, 19,
+            20, 21, 22, 20, 22, 23
+        )
+        val posBytes = positions.size * 4
+        val normBytes = normals.size * 4
+        val idxBytes = indices.size * 2
+        val binLen = (posBytes + normBytes + idxBytes + 3) and -4
+        val json = """{"asset":{"version":"2.0"},"scene":0,"scenes":[{"nodes":[0]}],"nodes":[{"mesh":0}],"meshes":[{"primitives":[{"attributes":{"POSITION":0,"NORMAL":1},"indices":2,"material":0}]}],"materials":[{"pbrMetallicRoughness":{"baseColorFactor":[$baseR,$baseG,$baseB,1.0],"metallicFactor":$metallic,"roughnessFactor":$roughness}}],"buffers":[{"byteLength":$binLen}],"bufferViews":[{"buffer":0,"byteOffset":0,"byteLength":$posBytes,"target":34962},{"buffer":0,"byteOffset":$posBytes,"byteLength":$normBytes,"target":34962},{"buffer":0,"byteOffset":${posBytes + normBytes},"byteLength":$idxBytes,"target":34963}],"accessors":[{"bufferView":0,"componentType":5126,"count":24,"type":"VEC3","min":[-0.5,-0.5,-0.5],"max":[0.5,0.5,0.5]},{"bufferView":1,"componentType":5126,"count":24,"type":"VEC3"},{"bufferView":2,"componentType":5123,"count":36,"type":"SCALAR"}]}"""
+        val rawJson = json.toByteArray(Charsets.UTF_8)
+        val jsonPad = (4 - (rawJson.size % 4)) % 4
+        val jsonLen = rawJson.size + jsonPad
+        val totalLen = 12 + 8 + jsonLen + 8 + binLen
+        val out = ByteBuffer.allocateDirect(totalLen).order(ByteOrder.LITTLE_ENDIAN)
+        out.putInt(0x46546C67)
+        out.putInt(2)
+        out.putInt(totalLen)
+        out.putInt(jsonLen)
+        out.putInt(0x4E4F534A)
+        out.put(rawJson)
+        repeat(jsonPad) { out.put(0x20.toByte()) }
+        out.putInt(binLen)
+        out.putInt(0x004E4942)
+        for (f in positions) out.putFloat(f)
+        for (f in normals) out.putFloat(f)
+        for (s in indices) out.putShort(s)
+        while (out.position() < totalLen) out.put(0.toByte())
+        out.flip()
+        return out
+    }
+
     /**
      * Loads a single .GLB into ONE shared GPU FilamentAsset (sharing all textures, vertex buffers,
      * index buffers, and compiled materials) and instantiates [count] independent FilamentInstances

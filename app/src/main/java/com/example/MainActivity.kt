@@ -49,6 +49,7 @@ import com.example.ui.AppScreen
 import com.example.ui.AuthScreen
 import com.example.ui.BannedAccountScreen
 import com.example.ui.ControlEditorScreen
+import com.example.ui.DeviceBannedScreen
 import com.example.ui.FriendsOverlay
 import com.example.ui.GameViewModel
 import com.example.ui.GameplayScreen
@@ -59,6 +60,7 @@ import com.example.ui.OnlineUiState
 import com.example.ui.OnlineViewModel
 import com.example.ui.ProfileCustomizationOverlay
 import com.example.ui.SettingsScreen
+import com.example.ui.UpdateRequiredScreen
 import com.example.ui.theme.ResponsiveUiProvider
 import com.example.ui.theme.TacticalAmber
 import com.example.ui.theme.TacticalSurface
@@ -289,6 +291,8 @@ fun VanguardRtxApp(
     val lobbyMemberStates by onlineVm.lobbyMemberStates.collectAsStateWithLifecycle()
     val pingMs by onlineVm.pingMs.collectAsStateWithLifecycle()
     val bannedAccounts by onlineVm.bannedAccounts.collectAsStateWithLifecycle()
+    val bannedDevices by onlineVm.bannedDevices.collectAsStateWithLifecycle()
+    val clientAccessStatus by onlineVm.clientAccessStatus.collectAsStateWithLifecycle()
     val adminBusy by onlineVm.adminBusy.collectAsStateWithLifecycle()
     val adminStatus by onlineVm.adminStatus.collectAsStateWithLifecycle()
     val kickedMessage by onlineVm.kickedMessage.collectAsStateWithLifecycle()
@@ -298,6 +302,7 @@ fun VanguardRtxApp(
 
     val isAdmin = playerProfile?.isAdmin == true
     val isBanned = (playerProfile?.banned == true) || !localBanNotice.isNullOrBlank()
+    val isLockedOut = isBanned || clientAccessStatus.updateRequired || clientAccessStatus.deviceBanned
 
     var isFriendsOpen by rememberSaveable { mutableStateOf(false) }
     var isProfileOpen by rememberSaveable { mutableStateOf(false) }
@@ -335,9 +340,9 @@ fun VanguardRtxApp(
         }
     }
 
-    // Force exit and lock out immediately if account is banned
-    LaunchedEffect(isBanned) {
-        if (isBanned) {
+    // Force exit and lock out immediately if account/device is banned or update is required
+    LaunchedEffect(isLockedOut) {
+        if (isLockedOut) {
             isFriendsOpen = false
             isProfileOpen = false
             isAdminPanelOpen = false
@@ -346,6 +351,28 @@ fun VanguardRtxApp(
                 vm.exitToMainMenu()
             }
         }
+    }
+
+    if (clientAccessStatus.updateRequired) {
+        UpdateRequiredScreen(
+            accessStatus = clientAccessStatus,
+            onRetry = onlineVm::checkClientAccessNow
+        )
+        return
+    }
+
+    if (clientAccessStatus.deviceBanned) {
+        DeviceBannedScreen(
+            banReason = clientAccessStatus.banReason.ifBlank { localBanNotice.orEmpty() },
+            onRetry = onlineVm::checkClientAccessNow,
+            onSignOut = {
+                scope.launch {
+                    onlineVm.setOfflineAndLeaveBeforeSignOut()
+                    authManager.logout()
+                }
+            }
+        )
+        return
     }
 
     if (isBanned) {
@@ -549,6 +576,13 @@ fun VanguardRtxApp(
 
             is AppScreen.Settings -> SettingsScreen(
                 settings = settings,
+                isAdmin = isAdmin,
+                onOpenAdminPanel = {
+                    if (isAdmin) {
+                        isAdminPanelOpen = true
+                        onlineVm.refreshBannedAccounts()
+                    }
+                },
                 onApplyPreset = vm::applyGraphicsPreset,
                 onUpdateGraphics = vm::updateGraphics,
                 onUpdateSensitivity = vm::updateSensitivity,
@@ -686,6 +720,7 @@ fun VanguardRtxApp(
                 lobbyMembers = lobbyMemberStates,
                 scoreboardRows = vm.engine.latestHud.scoreboardRows,
                 bannedAccounts = bannedAccounts,
+                bannedDevices = bannedDevices,
                 isBusy = adminBusy,
                 statusMessage = adminStatus,
                 onRefreshBanned = onlineVm::refreshBannedAccounts,
@@ -695,6 +730,10 @@ fun VanguardRtxApp(
                 },
                 onBanAccount = onlineVm::adminBanAccount,
                 onUnbanAccount = onlineVm::adminUnbanAccount,
+                onSetDeviceBanByAccount = { shortId, banned ->
+                    onlineVm.adminSetDeviceBanByAccount(shortId, banned)
+                },
+                onUnbanDeviceHash = onlineVm::adminUnbanDeviceHash,
                 onGrantXp = onlineVm::adminGrantXp,
                 onGrantSkins = onlineVm::adminGrantSkins,
                 onClearStatus = onlineVm::clearAdminStatus,

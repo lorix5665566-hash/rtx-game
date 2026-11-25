@@ -27,6 +27,23 @@ data class BombsiteZone(
         x in minX..maxX && z in minZ..maxZ
 }
 
+data class BreakableBarrier(
+    val id: String,
+    val minX: Float,
+    val maxX: Float,
+    val minY: Float,
+    val maxY: Float,
+    val minZ: Float,
+    val maxZ: Float,
+    val maxHp: Float = 45f,
+    @Volatile var hp: Float = maxHp,
+    @Volatile var broken: Boolean = false
+) {
+    val centerX: Float get() = (minX + maxX) * 0.5f
+    val centerY: Float get() = (minY + maxY) * 0.5f
+    val centerZ: Float get() = (minZ + maxZ) * 0.5f
+}
+
 data class BotOperative(
     val id: Int,
     val name: String,
@@ -115,11 +132,24 @@ class ArenaWorld(
 
     // Precomputed coarse A* navigation grid (72x72 ≈ 1.42m per cell)
     private val navSize: Int = 72
-    private val navWalkable = BooleanArray(navSize * navSize)
-    private val navFloorY = FloatArray(navSize * navSize) { Float.NaN }
+    private val navTotal: Int = navSize * navSize
+    private val navWalkable = BooleanArray(navTotal)
+    private val navFloorY = FloatArray(navTotal) { Float.NaN }
     // Bitmask of passable 8-neighbors per nav cell (pre-validated for step height & wall clearance)
-    private val navEdgeMask = IntArray(navSize * navSize)
+    private val navEdgeMask = IntArray(navTotal)
 
+    // Preallocated A* scratch buffers (eliminates ~80KB heap churn per pathfind call)
+    private val navLock = Any()
+    private val navGScore = FloatArray(navTotal) { Float.POSITIVE_INFINITY }
+    private val navFScore = FloatArray(navTotal) { Float.POSITIVE_INFINITY }
+    private val navCameFrom = IntArray(navTotal) { -1 }
+    private val navClosed = BooleanArray(navTotal)
+    private val navTouched = BooleanArray(navTotal)
+    private val navTouchedList = IntArray(navTotal)
+    private var navTouchedCount = 0
+    private val navHeap = IntArray(navTotal)
+
+    val breakableBarriers: List<BreakableBarrier>
     val bombsites: List<BombsiteZone>
     val tSpawns: List<Pair<Float, Float>>
     val ctSpawns: List<Pair<Float, Float>>
@@ -133,32 +163,50 @@ class ArenaWorld(
 
     init {
         loadMultiLayerFloors(context, mapId.floorsAssetPath)
+        cleanMapGeometryAndApplyMirageFeatures()
         buildNavGrid()
 
         when (mapId) {
             ArenaMapId.MIRAGE -> {
+                val grateBaseY = sampleFloorHeight(-17.7f, 12.6f) ?: -1.65f
+                breakableBarriers = listOf(
+                    BreakableBarrier(
+                        id = "mirage_ct_mid_grate",
+                        minX = -19.35f,
+                        maxX = -16.05f,
+                        minY = grateBaseY - 0.10f,
+                        maxY = grateBaseY + 2.35f,
+                        minZ = 12.38f,
+                        maxZ = 12.84f,
+                        maxHp = 45f
+                    )
+                )
                 bombsites = listOf(
                     BombsiteZone("A", 3.5f, 15.5f, 16.5f, 28.5f, 9.7f, 23.8f),
                     BombsiteZone("B", -33.0f, -21.5f, -29.5f, -18.0f, -28.0f, -24.0f)
                 )
-                tSpawns = listOf(
-                    39.1f to -4.6f,
-                    38.2f to -7.8f,
-                    39.8f to -10.5f,
-                    37.4f to -13.2f,
-                    36.2f to -5.5f
-                ).map { snapToNearestWalkable(it.first, it.second) }
+                tSpawns = snapTeamSpawns(
+                    listOf(
+                        39.1f to -4.6f,
+                        38.2f to -7.8f,
+                        39.8f to -10.5f,
+                        37.4f to -13.2f,
+                        36.2f to -5.5f
+                    )
+                )
 
-                ctSpawns = listOf(
-                    -18.5f to 24.5f,
-                    -15.0f to 23.0f,
-                    -12.0f to 25.5f,
-                    -20.5f to 19.5f,
-                    -16.5f to 17.5f
-                ).map { snapToNearestWalkable(it.first, it.second) }
+                ctSpawns = snapTeamSpawns(
+                    listOf(
+                        -18.5f to 24.5f,
+                        -17.5f to 21.5f,
+                        -19.5f to 22.0f,
+                        -20.5f to 19.5f,
+                        -16.5f to 17.5f
+                    )
+                )
 
                 tAttackRoutes = listOf(
-                    // Route 0 -> Site A via A Ramp
+                    // Route 0 -> Site A via A Ramp & A Palace
                     listOf(33.0f to 8.0f, 24.0f to 16.0f, 16.4f to 21.3f, 9.7f to 23.8f),
                     // Route 1 -> Site A via Mid -> Connector
                     listOf(24.0f to -3.5f, 10.0f to -3.5f, 2.0f to 5.5f, 5.7f to 13.4f, 9.7f to 23.8f),
@@ -169,7 +217,7 @@ class ArenaWorld(
 
                 ctDefenseRoutes = listOf(
                     listOf(-4.1f to 29.4f, 5.7f to 13.4f, 9.7f to 23.8f),
-                    listOf(-12.0f to 10.0f, -8.8f to -3.8f, 0.2f to 2.4f),
+                    listOf(-17.7f to 12.6f, -12.0f to 6.0f, -8.8f to -3.8f, 0.2f to 2.4f),
                     listOf(-22.0f to 5.0f, -24.0f to -5.0f, -28.0f to -24.0f)
                 ).map { route -> route.map { snapToNearestWalkable(it.first, it.second) } }
 
@@ -188,25 +236,30 @@ class ArenaWorld(
             }
 
             ArenaMapId.DUST2 -> {
+                breakableBarriers = emptyList()
                 bombsites = listOf(
                     BombsiteZone("A", 21.0f, 34.5f, -41.0f, -28.0f, 27.9f, -34.2f),
                     BombsiteZone("B", -34.0f, -21.0f, -46.5f, -34.0f, -26.9f, -41.1f)
                 )
-                tSpawns = listOf(
-                    -1.7f to 48.8f,
-                    2.5f to 47.0f,
-                    -6.0f to 47.5f,
-                    0.5f to 44.5f,
-                    -4.5f to 44.0f
-                ).map { snapToNearestWalkable(it.first, it.second) }
+                tSpawns = snapTeamSpawns(
+                    listOf(
+                        -1.7f to 48.8f,
+                        2.5f to 47.0f,
+                        -2.5f to 45.8f,
+                        0.5f to 44.5f,
+                        -4.5f to 44.0f
+                    )
+                )
 
-                ctSpawns = listOf(
-                    17.6f to -28.0f,
-                    12.5f to -27.0f,
-                    9.5f to -24.0f,
-                    15.0f to -22.0f,
-                    6.0f to -28.0f
-                ).map { snapToNearestWalkable(it.first, it.second) }
+                ctSpawns = snapTeamSpawns(
+                    listOf(
+                        17.6f to -28.0f,
+                        12.5f to -27.0f,
+                        14.5f to -26.5f,
+                        11.0f to -26.0f,
+                        16.0f to -29.5f
+                    )
+                )
 
                 tAttackRoutes = listOf(
                     // Route 0 -> Site A via Long A
@@ -526,7 +579,6 @@ class ArenaWorld(
             return listOf(goalX to goalZ)
         }
 
-        val total = navSize * navSize
         val startCell = findNearestWalkableNavCell(startX, startZ)
         val goalCell = findNearestWalkableNavCell(goalX, goalZ)
         if (startCell == goalCell) return listOf(goalX to goalZ)
@@ -534,115 +586,127 @@ class ArenaWorld(
         val goalGx = goalCell % navSize
         val goalGz = goalCell / navSize
 
-        val gScore = FloatArray(total) { Float.POSITIVE_INFINITY }
-        val fScore = FloatArray(total) { Float.POSITIVE_INFINITY }
-        val cameFrom = IntArray(total) { -1 }
-        val closed = BooleanArray(total)
-        val inOpen = BooleanArray(total)
-
-        // Binary min-heap of cell indices ordered by fScore
-        val heap = IntArray(total)
-        var heapSize = 0
-
-        fun heapPush(cell: Int) {
-            var i = heapSize++
-            heap[i] = cell
-            while (i > 0) {
-                val p = (i - 1) ushr 1
-                if (fScore[heap[i]] < fScore[heap[p]]) {
-                    val tmp = heap[p]; heap[p] = heap[i]; heap[i] = tmp
-                    i = p
-                } else break
-            }
-        }
-
-        fun heapPop(): Int {
-            val top = heap[0]
-            heapSize--
-            if (heapSize > 0) {
-                heap[0] = heap[heapSize]
-                var i = 0
-                while (true) {
-                    val l = (i shl 1) + 1
-                    val r = l + 1
-                    var smallest = i
-                    if (l < heapSize && fScore[heap[l]] < fScore[heap[smallest]]) smallest = l
-                    if (r < heapSize && fScore[heap[r]] < fScore[heap[smallest]]) smallest = r
-                    if (smallest != i) {
-                        val tmp = heap[i]; heap[i] = heap[smallest]; heap[smallest] = tmp
-                        i = smallest
-                    } else break
-                }
-            }
-            return top
-        }
-
         fun heuristic(cell: Int): Float {
             val dx = abs((cell % navSize) - goalGx).toFloat()
             val dz = abs((cell / navSize) - goalGz).toFloat()
             return (dx + dz) + (1.4142f - 2f) * min(dx, dz)
         }
 
-        gScore[startCell] = 0f
-        fScore[startCell] = heuristic(startCell)
-        inOpen[startCell] = true
-        heapPush(startCell)
-
         var bestReachable = startCell
-        var bestReachableH = fScore[startCell]
-        var expansions = 0
-        val maxExpansions = 1800
+        val rawPoints = ArrayList<Pair<Float, Float>>(32)
 
-        while (heapSize > 0 && expansions < maxExpansions) {
-            val cur = heapPop()
-            if (closed[cur]) continue
-            closed[cur] = true
-            expansions++
-
-            if (cur == goalCell) {
-                bestReachable = goalCell
-                break
+        synchronized(navLock) {
+            // Reset only previously touched cells (O(expansions) instead of O(navTotal * 5))
+            for (k in 0 until navTouchedCount) {
+                val c = navTouchedList[k]
+                navGScore[c] = Float.POSITIVE_INFINITY
+                navFScore[c] = Float.POSITIVE_INFINITY
+                navCameFrom[c] = -1
+                navClosed[c] = false
+                navTouched[c] = false
             }
+            navTouchedCount = 0
 
-            val hCur = heuristic(cur)
-            if (hCur < bestReachableH) {
-                bestReachableH = hCur
-                bestReachable = cur
-            }
-
-            val curGx = cur % navSize
-            val curGz = cur / navSize
-            val edgeMask = navEdgeMask[cur]
-            if (edgeMask == 0) continue
-
-            for (dir in 0 until 8) {
-                if ((edgeMask and (1 shl dir)) == 0) continue
-                val nx = curGx + NAV_DX[dir]
-                val nz = curGz + NAV_DZ[dir]
-                val nCell = nz * navSize + nx
-                if (closed[nCell]) continue
-
-                val stepCost = if (NAV_DX[dir] != 0 && NAV_DZ[dir] != 0) 1.4142f else 1.0f
-                val tentativeG = gScore[cur] + stepCost
-                if (tentativeG < gScore[nCell]) {
-                    cameFrom[nCell] = cur
-                    gScore[nCell] = tentativeG
-                    fScore[nCell] = tentativeG + heuristic(nCell) * 1.08f
-                    inOpen[nCell] = true
-                    heapPush(nCell)
+            fun touch(cell: Int) {
+                if (!navTouched[cell]) {
+                    navTouched[cell] = true
+                    navTouchedList[navTouchedCount++] = cell
                 }
             }
+
+            var heapSize = 0
+            fun heapPush(cell: Int) {
+                var i = heapSize++
+                navHeap[i] = cell
+                while (i > 0) {
+                    val p = (i - 1) ushr 1
+                    if (navFScore[navHeap[i]] < navFScore[navHeap[p]]) {
+                        val tmp = navHeap[p]; navHeap[p] = navHeap[i]; navHeap[i] = tmp
+                        i = p
+                    } else break
+                }
+            }
+
+            fun heapPop(): Int {
+                val top = navHeap[0]
+                heapSize--
+                if (heapSize > 0) {
+                    navHeap[0] = navHeap[heapSize]
+                    var i = 0
+                    while (true) {
+                        val l = (i shl 1) + 1
+                        val r = l + 1
+                        var smallest = i
+                        if (l < heapSize && navFScore[navHeap[l]] < navFScore[navHeap[smallest]]) smallest = l
+                        if (r < heapSize && navFScore[navHeap[r]] < navFScore[navHeap[smallest]]) smallest = r
+                        if (smallest != i) {
+                            val tmp = navHeap[i]; navHeap[i] = navHeap[smallest]; navHeap[smallest] = tmp
+                            i = smallest
+                        } else break
+                    }
+                }
+                return top
+            }
+
+            touch(startCell)
+            navGScore[startCell] = 0f
+            navFScore[startCell] = heuristic(startCell)
+            heapPush(startCell)
+
+            var bestReachableH = navFScore[startCell]
+            var expansions = 0
+            val maxExpansions = 1800
+
+            while (heapSize > 0 && expansions < maxExpansions) {
+                val cur = heapPop()
+                if (navClosed[cur]) continue
+                navClosed[cur] = true
+                expansions++
+
+                if (cur == goalCell) {
+                    bestReachable = goalCell
+                    break
+                }
+
+                val hCur = heuristic(cur)
+                if (hCur < bestReachableH) {
+                    bestReachableH = hCur
+                    bestReachable = cur
+                }
+
+                val curGx = cur % navSize
+                val curGz = cur / navSize
+                val edgeMask = navEdgeMask[cur]
+                if (edgeMask == 0) continue
+
+                for (dir in 0 until 8) {
+                    if ((edgeMask and (1 shl dir)) == 0) continue
+                    val nx = curGx + NAV_DX[dir]
+                    val nz = curGz + NAV_DZ[dir]
+                    val nCell = nz * navSize + nx
+                    if (navClosed[nCell]) continue
+
+                    val stepCost = if (NAV_DX[dir] != 0 && NAV_DZ[dir] != 0) 1.4142f else 1.0f
+                    val tentativeG = navGScore[cur] + stepCost
+                    if (tentativeG < navGScore[nCell]) {
+                        touch(nCell)
+                        navCameFrom[nCell] = cur
+                        navGScore[nCell] = tentativeG
+                        navFScore[nCell] = tentativeG + heuristic(nCell) * 1.08f
+                        heapPush(nCell)
+                    }
+                }
+            }
+
+            var trace = bestReachable
+            var safety = 0
+            while (trace != -1 && trace != startCell && safety < 256) {
+                rawPoints.add(navCellToWorldX(trace % navSize) to navCellToWorldZ(trace / navSize))
+                trace = navCameFrom[trace]
+                safety++
+            }
         }
 
-        // Reconstruct raw cell chain
-        val rawPoints = ArrayList<Pair<Float, Float>>()
-        var trace = bestReachable
-        var safety = 0
-        while (trace != -1 && trace != startCell && safety < 256) {
-            rawPoints.add(navCellToWorldX(trace % navSize) to navCellToWorldZ(trace / navSize))
-            trace = cameFrom[trace]
-            safety++
-        }
         rawPoints.reverse()
         if (bestReachable == goalCell) {
             rawPoints.add(goalX to goalZ)
@@ -650,7 +714,7 @@ class ArenaWorld(
         if (rawPoints.isEmpty()) return listOf(goalX to goalZ)
 
         // String-pulling path smoothing so bots move cleanly down corridors
-        val smoothed = ArrayList<Pair<Float, Float>>()
+        val smoothed = ArrayList<Pair<Float, Float>>(rawPoints.size)
         var anchorX = startX
         var anchorZ = startZ
         var i = 0
@@ -736,14 +800,138 @@ class ArenaWorld(
         }
     }
 
-    private fun buildVerticalMask(minY: Float, maxY: Float): Int {
-        val s0 = floor((minY - wallMinY) / wallStepY).toInt().coerceIn(0, 31)
-        val s1 = floor((maxY - wallMinY) / wallStepY).toInt().coerceIn(0, 31)
-        var mask = 0
-        for (bit in s0..s1) {
-            mask = mask or (1 shl bit)
+    /**
+     * 1) Seals interior single/multi-cell floor holes in l0/l1 layers via neighbor interpolation.
+     * 2) Strips stray isolated/floating phantom torso-height wall bits that snag players in mid-air.
+     * 3) On Mirage: builds the climbable Site-A Palace staircase ramp + doorway bridge & carves headroom.
+     */
+    private fun cleanMapGeometryAndApplyMirageFeatures() {
+        if (floorLayers.isEmpty()) return
+
+        // A. Seal enclosed floor holes across l0 and l1
+        val holeLayers = floorLayers.take(2)
+        for (layer in holeLayers) {
+            val copy = IntArray(layer.size)
+            repeat(3) {
+                System.arraycopy(layer, 0, copy, 0, layer.size)
+                for (gz in 1 until gridSize - 1) {
+                    val rowOff = gz * gridSize
+                    for (gx in 1 until gridSize - 1) {
+                        val idx = rowOff + gx
+                        if (copy[idx] != missingVal) continue
+                        var sum = 0
+                        var count = 0
+                        var minV = Int.MAX_VALUE
+                        var maxV = Int.MIN_VALUE
+                        for (dz in -1..1) {
+                            val nRow = (gz + dz) * gridSize
+                            for (dx in -1..1) {
+                                if (dx == 0 && dz == 0) continue
+                                val v = copy[nRow + gx + dx]
+                                if (v != missingVal) {
+                                    sum += v
+                                    count++
+                                    if (v < minV) minV = v
+                                    if (v > maxV) maxV = v
+                                }
+                            }
+                        }
+                        if (count >= 4 && (maxV - minV) <= 68) {
+                            layer[idx] = sum / count
+                        }
+                    }
+                }
+            }
         }
-        return mask
+
+        // B. Mirage climbable A-House / Palace staircase (x: 8.6..13.2, z: 22.7..24.5) + doorway bridge
+        if (mapId == ArenaMapId.MIRAGE) {
+            val l0 = floorLayers[0]
+            val l1 = floorLayers.getOrNull(1)
+            val startX = 8.6f
+            val endX = 13.2f
+            val startY = -0.20f
+            val endY = 2.42f
+            for (gz in 0 until gridSize) {
+                val wz = gridMin + (gz + 0.5f) * (gridSpan / gridSize)
+                for (gx in 0 until gridSize) {
+                    val wx = gridMin + (gx + 0.5f) * (gridSpan / gridSize)
+                    val cell = gz * gridSize + gx
+                    if (wx in startX..endX && wz in 22.6f..24.6f) {
+                        val t = ((wx - startX) / (endX - startX)).coerceIn(0f, 1f)
+                        val rampH = ((startY + t * (endY - startY)) * heightScale).toInt()
+                        l0[cell] = rampH
+                        if (l1 != null) l1[cell] = rampH
+                    } else if (wx in 15.1f..19.2f && wz in 25.1f..27.3f) {
+                        val palaceH = (endY * heightScale).toInt()
+                        if (l1 != null && l1[cell] == missingVal) l1[cell] = palaceH
+                        if (l0[cell] == missingVal) l0[cell] = palaceH
+                    }
+                }
+            }
+            // Carve clean stair headroom in wallBits so player can walk & jump freely into Palace
+            wallBits?.let { bits ->
+                for (gz in 0 until wallSize) {
+                    val wz = wallMin + (gz + 0.5f) * (wallSpan / wallSize)
+                    for (gx in 0 until wallSize) {
+                        val wx = wallMin + (gx + 0.5f) * (wallSpan / wallSize)
+                        val idx = gz * wallSize + gx
+                        if (wx in 8.4f..19.3f && wz in 22.7f..24.6f) {
+                            val t = ((wx - startX) / (endX - startX)).coerceIn(0f, 1f)
+                            val stairH = startY + t * (endY - startY)
+                            val clearMask = buildVerticalMask(stairH + 0.28f, stairH + 2.05f)
+                            bits[idx] = bits[idx] and clearMask.inv()
+                        } else if (wx in 15.1f..19.2f && wz in 25.1f..27.2f) {
+                            val clearMask = buildVerticalMask(2.55f, 4.55f)
+                            bits[idx] = bits[idx] and clearMask.inv()
+                        }
+                    }
+                }
+            }
+        }
+
+        // C. Strip phantom isolated/floating torso wall snags in wallBits (cells with open air at feet AND <=1 supporting cardinal wall)
+        val bits = wallBits ?: return
+        if (wallSize <= 2) return
+        val snapshot = bits.copyOf()
+        for (gz in 1 until wallSize - 1) {
+            val wz = wallMin + (gz + 0.5f) * (wallSpan / wallSize)
+            val row = gz * wallSize
+            for (gx in 1 until wallSize - 1) {
+                val idx = row + gx
+                val cellMask = snapshot[idx]
+                if (cellMask == 0) continue
+                val wx = wallMin + (gx + 0.5f) * (wallSpan / wallSize)
+                val fh = sampleFloorHeight(wx, wz) ?: continue
+                val feetBit = floor((fh - wallMinY) / wallStepY).toInt().coerceIn(0, 31)
+                val torsoLo = (feetBit + 1).coerceIn(0, 31)
+                val torsoHi = floor((fh + 1.80f - wallMinY) / wallStepY).toInt().coerceIn(torsoLo, 31)
+                var torsoMask = 0
+                for (b in torsoLo..torsoHi) torsoMask = torsoMask or (1 shl b)
+                if ((cellMask and torsoMask) == 0) continue
+                val feetSupportMask = (1 shl feetBit) or (if (feetBit > 0) (1 shl (feetBit - 1)) else 0)
+                if ((cellMask and feetSupportMask) != 0) continue // Real wall/crate grounded on floor
+
+                var cardinalSupport = 0
+                if ((snapshot[idx - 1] and torsoMask) != 0) cardinalSupport++
+                if ((snapshot[idx + 1] and torsoMask) != 0) cardinalSupport++
+                if ((snapshot[idx - wallSize] and torsoMask) != 0) cardinalSupport++
+                if ((snapshot[idx + wallSize] and torsoMask) != 0) cardinalSupport++
+                if (cardinalSupport <= 1) {
+                    bits[idx] = cellMask and torsoMask.inv()
+                }
+            }
+        }
+    }
+
+    private fun buildVerticalMask(minY: Float, maxY: Float): Int {
+        val invStep = 1f / wallStepY
+        val s0 = floor((minY - wallMinY) * invStep).toInt().coerceIn(0, 31)
+        val s1 = floor((maxY - wallMinY) * invStep).toInt().coerceIn(0, 31)
+        // Fast O(1) contiguous bit range [s0..s1] without loop
+        val hiMask = if (s1 >= 31) -1 else ((1 shl (s1 + 1)) - 1)
+        val loMask = (1 shl s0) - 1
+        return hiMask and loMask.inv()
     }
 
     fun hasWallAt(x: Float, z: Float, minY: Float, maxY: Float): Boolean {
@@ -807,14 +995,69 @@ class ArenaWorld(
         return null
     }
 
+    fun isPositionSpawnSafe(
+        px: Float,
+        pz: Float,
+        expectedGroundY: Float? = null,
+        toleranceY: Float = 0.85f
+    ): Boolean {
+        val h = sampleFloorHeight(px, pz) ?: return false
+        if (expectedGroundY != null && abs(h - expectedGroundY) > toleranceY) return false
+        val low = h + 0.34f
+        val high = h + 1.72f
+        val r = 0.50f
+        val rDiag = r * 0.7071f
+        if (hasWallAt(px, pz, low, high) ||
+            hasWallAt(px + r, pz, low, high) ||
+            hasWallAt(px - r, pz, low, high) ||
+            hasWallAt(px, pz + r, low, high) ||
+            hasWallAt(px, pz - r, low, high) ||
+            hasWallAt(px + rDiag, pz + rDiag, low, high) ||
+            hasWallAt(px - rDiag, pz + rDiag, low, high) ||
+            hasWallAt(px + rDiag, pz - rDiag, low, high) ||
+            hasWallAt(px - rDiag, pz - rDiag, low, high)
+        ) return false
+        val f1 = sampleNearestFloorHeight(px + 0.42f, pz, h, 0.55f, 0.55f)
+        val f2 = sampleNearestFloorHeight(px - 0.42f, pz, h, 0.55f, 0.55f)
+        val f3 = sampleNearestFloorHeight(px, pz + 0.42f, h, 0.55f, 0.55f)
+        val f4 = sampleNearestFloorHeight(px, pz - 0.42f, h, 0.55f, 0.55f)
+        return f1 != null && f2 != null && f3 != null && f4 != null
+    }
+
+    private fun snapTeamSpawns(raw: List<Pair<Float, Float>>): List<Pair<Float, Float>> {
+        val ys = raw.mapNotNull { sampleFloorHeight(it.first, it.second) }.sorted()
+        val medianY = if (ys.isNotEmpty()) ys[ys.size / 2] else null
+        return raw.map { (sx, sz) ->
+            snapToNearestWalkableStrict(sx, sz, expectedGroundY = medianY)
+        }
+    }
+
+    private fun snapToNearestWalkableStrict(
+        x: Float,
+        z: Float,
+        expectedGroundY: Float? = null
+    ): Pair<Float, Float> {
+        if (isPositionSpawnSafe(x, z, expectedGroundY)) return x to z
+        for (ring in 1..24) {
+            val r = ring * 0.42f
+            for (step in 0 until 16) {
+                val ang = step * (Math.PI * 2.0 / 16.0)
+                val tx = x + cos(ang).toFloat() * r
+                val tz = z + sin(ang).toFloat() * r
+                if (isPositionSpawnSafe(tx, tz, expectedGroundY)) return tx to tz
+            }
+        }
+        return snapToNearestWalkable(x, z)
+    }
+
     fun snapToNearestWalkable(x: Float, z: Float): Pair<Float, Float> {
         fun isClear(px: Float, pz: Float): Boolean {
             val h = sampleFloorHeight(px, pz) ?: return false
-            return !hasWallAt(px, pz, h + 0.58f, h + 1.52f) &&
-                !hasWallAt(px + 0.30f, pz, h + 0.58f, h + 1.52f) &&
-                !hasWallAt(px - 0.30f, pz, h + 0.58f, h + 1.52f) &&
-                !hasWallAt(px, pz + 0.30f, h + 0.58f, h + 1.52f) &&
-                !hasWallAt(px, pz - 0.30f, h + 0.58f, h + 1.52f)
+            return !hasWallAt(px, pz, h + 0.48f, h + 1.62f) &&
+                !hasWallAt(px + 0.36f, pz, h + 0.48f, h + 1.62f) &&
+                !hasWallAt(px - 0.36f, pz, h + 0.48f, h + 1.62f) &&
+                !hasWallAt(px, pz + 0.36f, h + 0.48f, h + 1.62f) &&
+                !hasWallAt(px, pz - 0.36f, h + 0.48f, h + 1.62f)
         }
         if (isClear(x, z)) return x to z
         for (ring in 1..20) {
@@ -827,6 +1070,95 @@ class ArenaWorld(
             }
         }
         return x to z
+    }
+
+    fun resetBreakables() {
+        for (b in breakableBarriers) {
+            b.hp = b.maxHp
+            b.broken = false
+        }
+    }
+
+    fun isBreakableBroken(id: String): Boolean {
+        for (b in breakableBarriers) {
+            if (b.id == id) return b.broken
+        }
+        return true
+    }
+
+    /**
+     * Applies [damage] to a breakable barrier. Returns Pair(hitApplied, justBroken).
+     */
+    fun damageBreakableBarrier(id: String, damage: Float): Pair<Boolean, Boolean> {
+        for (b in breakableBarriers) {
+            if (b.id == id && !b.broken) {
+                b.hp = (b.hp - damage).coerceAtLeast(0f)
+                if (b.hp <= 0f) {
+                    b.broken = true
+                    return true to true
+                }
+                return true to false
+            }
+        }
+        return false to false
+    }
+
+    data class BreakableHit(
+        val barrier: BreakableBarrier,
+        val dist: Float,
+        val x: Float,
+        val y: Float,
+        val z: Float,
+        val nx: Float,
+        val ny: Float,
+        val nz: Float
+    )
+
+    fun raycastBreakable(
+        ox: Float, oy: Float, oz: Float,
+        dx: Float, dy: Float, dz: Float,
+        maxDist: Float
+    ): BreakableHit? {
+        if (breakableBarriers.isEmpty()) return null
+        var best: BreakableHit? = null
+        var bestDist = maxDist
+        for (b in breakableBarriers) {
+            if (b.broken) continue
+            val invX = if (abs(dx) > 1e-6f) 1f / dx else 1e6f
+            val invY = if (abs(dy) > 1e-6f) 1f / dy else 1e6f
+            val invZ = if (abs(dz) > 1e-6f) 1f / dz else 1e6f
+            var tx1 = (b.minX - ox) * invX
+            var tx2 = (b.maxX - ox) * invX
+            if (tx1 > tx2) { val tmp = tx1; tx1 = tx2; tx2 = tmp }
+            var ty1 = (b.minY - oy) * invY
+            var ty2 = (b.maxY - oy) * invY
+            if (ty1 > ty2) { val tmp = ty1; ty1 = ty2; ty2 = tmp }
+            var tz1 = (b.minZ - oz) * invZ
+            var tz2 = (b.maxZ - oz) * invZ
+            if (tz1 > tz2) { val tmp = tz1; tz1 = tz2; tz2 = tmp }
+
+            val tEnter = maxOf(tx1, maxOf(ty1, tz1))
+            val tExit = minOf(tx2, minOf(ty2, tz2))
+            if (tExit >= maxOf(tEnter, 0.05f) && tEnter < bestDist) {
+                val hitT = maxOf(tEnter, 0.05f)
+                val nx: Float; val ny: Float; val nz: Float
+                when {
+                    tEnter == tx1 -> { nx = if (dx > 0f) -1f else 1f; ny = 0f; nz = 0f }
+                    tEnter == ty1 -> { nx = 0f; ny = if (dy > 0f) -1f else 1f; nz = 0f }
+                    else -> { nx = 0f; ny = 0f; nz = if (dz > 0f) -1f else 1f }
+                }
+                bestDist = hitT
+                best = BreakableHit(
+                    barrier = b,
+                    dist = hitT,
+                    x = ox + dx * hitT,
+                    y = oy + dy * hitT,
+                    z = oz + dz * hitT,
+                    nx = nx, ny = ny, nz = nz
+                )
+            }
+        }
+        return best
     }
 
     /**
@@ -891,6 +1223,16 @@ class ArenaWorld(
         val isAirborne = actualFeetY > ry + 0.10f
 
         fun isBlockedByWall(px: Float, pz: Float, floorH: Float): Boolean {
+            // Check intact breakable grates/fences cleanly before grid wall checks
+            for (b in breakableBarriers) {
+                if (!b.broken &&
+                    px + radius > b.minX && px - radius < b.maxX &&
+                    pz + radius > b.minZ && pz - radius < b.maxZ &&
+                    floorH + 1.55f > b.minY && floorH + 0.20f < b.maxY
+                ) {
+                    return true
+                }
+            }
             if (wallBits == null) return false
             // Use the higher of target surface or mid-air feet so jumping clears low crates cleanly
             val effFeet = maxOf(floorH, actualFeetY)
@@ -983,28 +1325,28 @@ class ArenaWorld(
         maxDist: Float
     ): Float {
         if (floorLayers.isEmpty()) return maxDist
+        val bHit = raycastBreakable(ox, oy, oz, dx, dy, dz, maxDist)
+        val limitDist = bHit?.dist ?: maxDist
         var dist = 0.30f
-        val step = 0.20f
+        val step = 0.22f
         val maxBound = gridMin + gridSpan
-        while (dist < maxDist) {
+        while (dist < limitDist) {
             val px = ox + dx * dist
             val py = oy + dy * dist
             val pz = oz + dz * dist
             if (px < gridMin || px > maxBound || pz < gridMin || pz > maxBound) {
                 return dist
             }
-            // Exact point-height slice check so bullets pass crisply over crate tops without an invisible tall box
             if (hasWallAt(px, pz, py, py)) {
                 return dist
             }
-            // Only stop on floor if an actual floor surface exists above the ray (never block mid-air over gaps/crates!)
             val floorH = sampleNearestFloorHeight(px, pz, py, maxStepUp = 0.45f, maxDrop = 0.65f)
             if (floorH != null && py < floorH - 0.02f) {
                 return dist
             }
             dist += step
         }
-        return maxDist
+        return limitDist
     }
 
     data class WallHitResult(

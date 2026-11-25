@@ -5,6 +5,7 @@ import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.CubicBezierEasing
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -59,8 +60,15 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.clipToBounds
+import androidx.compose.ui.geometry.CornerRadius
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.Path
+import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.graphics.StrokeJoin
+import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.testTag
@@ -68,6 +76,8 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.window.DialogProperties
 import com.example.model.LevelProgression
 import com.example.model.SkinCase
 import com.example.model.SkinCatalog
@@ -121,6 +131,7 @@ fun InventoryAndCasesOverlay(
     var activeTab by remember(initialTab) { mutableIntStateOf(initialTab.coerceIn(0, 1)) }
     var selectedWeaponFilter by remember { mutableStateOf<WeaponType?>(null) }
     var expandedCaseId by remember { mutableStateOf<String?>(null) }
+    var previewSkin by remember { mutableStateOf<WeaponSkin?>(null) }
 
     // Animated roulette state
     var spinningCase by remember { mutableStateOf<SkinCase?>(null) }
@@ -131,7 +142,10 @@ fun InventoryAndCasesOverlay(
     val spinOffsetPx = remember { Animatable(0f) }
 
     BackHandler {
-        if (!isRouletteRunning) onClose()
+        when {
+            previewSkin != null -> previewSkin = null
+            !isRouletteRunning -> onClose()
+        }
     }
 
     val coins = profile?.coins ?: 0
@@ -375,6 +389,7 @@ fun InventoryAndCasesOverlay(
                                             skin = skin,
                                             isEquipped = isEquipped,
                                             isBusy = isUpdatingSkin,
+                                            onPreview = { previewSkin = skin },
                                             onToggleEquip = {
                                                 onEquipSkin(skin.weapon, if (isEquipped) null else skin.id)
                                             }
@@ -417,28 +432,6 @@ fun InventoryAndCasesOverlay(
                                 )
                             }
 
-                            // Active Roulette / Drop Reveal Stage
-                            if (spinningCase != null && rouletteStrip.isNotEmpty()) {
-                                CaseRouletteStage(
-                                    skinCase = spinningCase!!,
-                                    strip = rouletteStrip,
-                                    offsetPx = spinOffsetPx.value,
-                                    isSpinning = isRouletteRunning,
-                                    result = revealedDrop,
-                                    isUpdatingSkin = isUpdatingSkin,
-                                    onEquipNow = { skin ->
-                                        onEquipSkin(skin.weapon, skin.id)
-                                    },
-                                    onDismissStage = {
-                                        if (!isRouletteRunning) {
-                                            spinningCase = null
-                                            revealedDrop = null
-                                            rouletteStrip = emptyList()
-                                        }
-                                    }
-                                )
-                            }
-
                             // 3 Themed Cases List
                             LazyColumn(
                                 modifier = Modifier.weight(1f).fillMaxWidth(),
@@ -458,6 +451,7 @@ fun InventoryAndCasesOverlay(
                                         onToggleExpand = {
                                             expandedCaseId = if (isExpanded) null else skinCase.id
                                         },
+                                        onPreviewSkin = { skin -> previewSkin = skin },
                                         onOpenClick = {
                                             if (isOpeningCase || isRouletteRunning) return@SkinCaseCard
                                             localError = null
@@ -477,8 +471,8 @@ fun InventoryAndCasesOverlay(
                                                     rouletteStrip = strip
                                                     isRouletteRunning = true
                                                     scope.launch {
-                                                        val cardStepPx = with(density) { (118.dp + 8.dp).toPx() }
-                                                        val jitterPx = (Random.nextFloat() - 0.5f) * cardStepPx * 0.48f
+                                                        val cardStepPx = with(density) { (140.dp + 10.dp).toPx() }
+                                                        val jitterPx = (Random.nextFloat() - 0.5f) * cardStepPx * 0.42f
                                                         val targetPx = winIndex * cardStepPx + jitterPx
                                                         spinOffsetPx.snapTo(0f)
                                                         spinOffsetPx.animateTo(
@@ -504,6 +498,45 @@ fun InventoryAndCasesOverlay(
                     }
                 }
             }
+        }
+
+        // Prominent Centered Case Opening Roulette & Drop Reveal Modal
+        if (spinningCase != null && rouletteStrip.isNotEmpty()) {
+            CaseRouletteStage(
+                skinCase = spinningCase!!,
+                strip = rouletteStrip,
+                offsetPx = spinOffsetPx.value,
+                isSpinning = isRouletteRunning,
+                result = revealedDrop,
+                isUpdatingSkin = isUpdatingSkin,
+                onPreviewSkin = { skin -> previewSkin = skin },
+                onEquipNow = { skin ->
+                    onEquipSkin(skin.weapon, skin.id)
+                },
+                onDismissStage = {
+                    if (!isRouletteRunning) {
+                        spinningCase = null
+                        revealedDrop = null
+                        rouletteStrip = emptyList()
+                    }
+                }
+            )
+        }
+
+        val inspecting = previewSkin
+        if (inspecting != null) {
+            val isOwned = ownedSkinIds.contains(inspecting.id)
+            val isEquipped = equippedSkins[inspecting.weapon.name] == inspecting.id
+            SkinPreviewDialog(
+                skin = inspecting,
+                isOwned = isOwned,
+                isEquipped = isEquipped,
+                isBusy = isUpdatingSkin,
+                onToggleEquip = {
+                    onEquipSkin(inspecting.weapon, if (isEquipped) null else inspecting.id)
+                },
+                onDismiss = { previewSkin = null }
+            )
         }
     }
 }
@@ -571,6 +604,7 @@ private fun OwnedSkinCard(
     skin: WeaponSkin,
     isEquipped: Boolean,
     isBusy: Boolean,
+    onPreview: () -> Unit,
     onToggleEquip: () -> Unit
 ) {
     val m = LocalUiMetrics.current
@@ -581,36 +615,60 @@ private fun OwnedSkinCard(
             width = if (isEquipped) 1.8.dp else 1.dp,
             color = if (isEquipped) RtxEmerald else skin.rarity.accentColor.copy(alpha = 0.65f)
         ),
-        modifier = Modifier.fillMaxWidth()
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable(onClick = onPreview)
+            .testTag("owned_skin_card_${skin.id}")
     ) {
         Column(
             modifier = Modifier.padding(m.s(10f)),
             verticalArrangement = Arrangement.spacedBy(m.s(7f))
         ) {
-            // 3D material palette visual swatch + rarity badge
+            // Weapon silhouette artwork + rarity badge
             Box(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .height(m.s(50f))
+                    .height(m.s(74f))
                     .clip(RoundedCornerShape(m.s(7f)))
                     .background(
                         Brush.linearGradient(
-                            colors = listOf(skin.primaryColor, skin.secondaryColor, skin.accentColor)
+                            colors = listOf(
+                                skin.rarity.badgeBgColor,
+                                skin.primaryColor.copy(alpha = 0.36f),
+                                Color(0xFF0A101B)
+                            )
                         )
                     )
                     .border(1.dp, skin.rarity.accentColor.copy(alpha = 0.8f), RoundedCornerShape(m.s(7f)))
                     .padding(m.s(6f))
             ) {
+                WeaponSilhouetteArt(
+                    skin = skin,
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .padding(horizontal = m.s(10f), vertical = m.s(4f))
+                )
                 Text(
                     text = skin.weapon.shortLabel,
-                    fontSize = m.sp(10f),
+                    fontSize = m.sp(9.5f),
                     fontWeight = FontWeight.Black,
                     color = Color.White,
                     modifier = Modifier
                         .align(Alignment.TopStart)
                         .clip(RoundedCornerShape(4.dp))
-                        .background(Color(0xAA070B12))
+                        .background(Color(0xBB070B12))
                         .padding(horizontal = 6.dp, vertical = 2.dp)
+                )
+                Text(
+                    text = "ПРЕВЬЮ",
+                    fontSize = m.sp(8f),
+                    fontWeight = FontWeight.Bold,
+                    color = IceCyan,
+                    modifier = Modifier
+                        .align(Alignment.TopEnd)
+                        .clip(RoundedCornerShape(4.dp))
+                        .background(Color(0xBB070B12))
+                        .padding(horizontal = 5.dp, vertical = 2.dp)
                 )
                 Text(
                     text = skin.rarity.displayRu.uppercase(),
@@ -655,7 +713,7 @@ private fun OwnedSkinCard(
                 contentPadding = PaddingValues(horizontal = m.s(10f), vertical = m.s(6f)),
                 modifier = Modifier
                     .fillMaxWidth()
-                    .height(42.dp)
+                    .height(48.dp)
                     .testTag("equip_skin_${skin.id}")
             ) {
                 if (isEquipped) {
@@ -679,6 +737,7 @@ private fun SkinCaseCard(
     isBusy: Boolean,
     isExpanded: Boolean,
     onToggleExpand: () -> Unit,
+    onPreviewSkin: (WeaponSkin) -> Unit,
     onOpenClick: () -> Unit
 ) {
     val m = LocalUiMetrics.current
@@ -774,20 +833,29 @@ private fun SkinCaseCard(
                         val owned = ownedSkinIds.contains(skin.id)
                         Column(
                             modifier = Modifier
-                                .width(114.dp)
-                                .clip(RoundedCornerShape(7.dp))
+                                .width(132.dp)
+                                .clip(RoundedCornerShape(8.dp))
                                 .background(ElevatedGunmetal)
-                                .border(1.dp, skin.rarity.accentColor.copy(alpha = 0.7f), RoundedCornerShape(7.dp))
-                                .padding(6.dp),
-                            verticalArrangement = Arrangement.spacedBy(3.dp)
+                                .border(1.dp, skin.rarity.accentColor.copy(alpha = 0.75f), RoundedCornerShape(8.dp))
+                                .clickable { onPreviewSkin(skin) }
+                                .padding(7.dp)
+                                .testTag("case_pool_skin_${skin.id}"),
+                            verticalArrangement = Arrangement.spacedBy(4.dp)
                         ) {
                             Box(
                                 modifier = Modifier
                                     .fillMaxWidth()
-                                    .height(22.dp)
-                                    .clip(RoundedCornerShape(4.dp))
-                                    .background(Brush.horizontalGradient(listOf(skin.primaryColor, skin.secondaryColor, skin.accentColor)))
-                            )
+                                    .height(46.dp)
+                                    .clip(RoundedCornerShape(5.dp))
+                                    .background(
+                                        Brush.linearGradient(
+                                            listOf(skin.rarity.badgeBgColor, skin.primaryColor.copy(alpha = 0.38f), Color(0xFF0A101B))
+                                        )
+                                    )
+                                    .padding(4.dp)
+                            ) {
+                                WeaponSilhouetteArt(skin = skin, modifier = Modifier.fillMaxSize())
+                            }
                             Text(
                                 text = "${skin.weapon.shortLabel} | ${skin.nameRu}",
                                 fontSize = m.sp(8.5f),
@@ -819,142 +887,222 @@ private fun CaseRouletteStage(
     isSpinning: Boolean,
     result: CaseDropResult?,
     isUpdatingSkin: Boolean,
+    onPreviewSkin: (WeaponSkin) -> Unit,
     onEquipNow: (WeaponSkin) -> Unit,
     onDismissStage: () -> Unit
 ) {
     val m = LocalUiMetrics.current
-    Surface(
-        color = Color(0xF0090F1A),
-        shape = RoundedCornerShape(m.s(10f)),
-        border = BorderStroke(
-            width = 1.5.dp,
-            color = result?.skin?.rarity?.accentColor ?: skinCase.bannerAccentColor
-        ),
-        modifier = Modifier.fillMaxWidth()
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(Color(0xDE04070E))
+            .clickable(enabled = !isSpinning, onClick = onDismissStage)
+            .padding(horizontal = m.s(14f), vertical = m.s(12f)),
+        contentAlignment = Alignment.Center
     ) {
-        Column(
+        Surface(
+            color = Color(0xFA0B121F),
+            shape = CutCornerShape(topStart = m.s(14f), bottomEnd = m.s(14f)),
+            border = BorderStroke(
+                width = 2.dp,
+                color = result?.skin?.rarity?.accentColor ?: skinCase.bannerAccentColor
+            ),
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(m.s(10f)),
-            verticalArrangement = Arrangement.spacedBy(m.s(8f))
+                .widthIn(max = 780.dp)
+                .clickable(enabled = true, onClick = {})
         ) {
-            Text(
-                text = if (isSpinning) "ОТКРЫТИЕ: ${skinCase.nameRu.uppercase()}..." else "ВЫПАЛО ИЗ ${skinCase.nameRu.uppercase()}",
-                fontSize = m.sp(10.5f),
-                fontWeight = FontWeight.Black,
-                color = result?.skin?.rarity?.accentColor ?: TacticalAmber
-            )
-
-            // Horizontal roulette viewport with center golden pointer
-            BoxWithConstraints(
+            Column(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .height(82.dp)
-                    .clip(RoundedCornerShape(8.dp))
-                    .background(ObsidianVoid)
-                    .border(1.dp, BorderSteel, RoundedCornerShape(8.dp))
-                    .clipToBounds()
+                    .padding(m.s(14f)),
+                verticalArrangement = Arrangement.spacedBy(m.s(10f))
             ) {
-                val centerShiftPx = with(LocalDensity.current) { (maxWidth / 2 - 59.dp).toPx() }
                 Row(
-                    modifier = Modifier
-                        .fillMaxHeight()
-                        .graphicsLayer {
-                            translationX = centerShiftPx - offsetPx
-                        },
-                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    strip.forEach { item ->
-                        Column(
+                    Text(
+                        text = if (isSpinning) {
+                            "ОТКРЫТИЕ: ${skinCase.nameRu.uppercase()}..."
+                        } else {
+                            "ВЫПАЛО ИЗ ${skinCase.nameRu.uppercase()}"
+                        },
+                        fontSize = m.sp(12.5f),
+                        fontWeight = FontWeight.Black,
+                        color = result?.skin?.rarity?.accentColor ?: TacticalAmber
+                    )
+                    if (!isSpinning) {
+                        IconButton(
+                            onClick = onDismissStage,
                             modifier = Modifier
-                                .width(118.dp)
-                                .height(68.dp)
-                                .clip(RoundedCornerShape(6.dp))
-                                .background(item.rarity.badgeBgColor)
-                                .border(1.2.dp, item.rarity.accentColor, RoundedCornerShape(6.dp))
-                                .padding(6.dp),
-                            verticalArrangement = Arrangement.SpaceBetween
+                                .size(48.dp)
+                                .testTag("case_stage_top_close")
                         ) {
-                            Box(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .height(22.dp)
-                                    .clip(RoundedCornerShape(4.dp))
-                                    .background(Brush.horizontalGradient(listOf(item.primaryColor, item.secondaryColor, item.accentColor)))
-                            )
-                            Text(
-                                text = item.nameRu,
-                                fontSize = m.sp(8.5f),
-                                fontWeight = FontWeight.Black,
-                                color = Color.White,
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis
-                            )
-                            Text(
-                                text = item.weapon.shortLabel,
-                                fontSize = m.sp(8f),
-                                fontWeight = FontWeight.Bold,
-                                color = item.rarity.accentColor,
-                                maxLines = 1
-                            )
+                            Icon(Icons.Default.Close, contentDescription = "Закрыть окно кейса", tint = TextPrimary)
                         }
                     }
                 }
-                // Center indicator line
-                Box(
-                    modifier = Modifier
-                        .align(Alignment.Center)
-                        .width(2.5.dp)
-                        .fillMaxHeight()
-                        .background(TacticalAmber)
-                )
-            }
 
-            if (result != null && !isSpinning) {
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.SpaceBetween
+                // Horizontal roulette viewport with clearly visible weapon skins + golden center line
+                BoxWithConstraints(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(124.dp)
+                        .clip(RoundedCornerShape(10.dp))
+                        .background(ObsidianVoid)
+                        .border(1.2.dp, BorderSteel, RoundedCornerShape(10.dp))
+                        .clipToBounds()
                 ) {
-                    Column(modifier = Modifier.weight(1f)) {
-                        Text(
-                            text = "${result.skin.weapon.shortLabel} | ${result.skin.nameRu}",
-                            fontSize = m.sp(12.5f),
-                            fontWeight = FontWeight.Black,
-                            color = result.skin.rarity.accentColor
-                        )
-                        Text(
-                            text = if (result.wasDuplicate) {
-                                "Дубликат • Возвращено +${result.refundCoins} монет!"
-                            } else {
-                                "${result.skin.rarity.displayRu} • Добавлено в ваш инвентарь!"
+                    val centerShiftPx = with(LocalDensity.current) { (maxWidth / 2 - 70.dp).toPx() }
+                    Row(
+                        modifier = Modifier
+                            .fillMaxHeight()
+                            .graphicsLayer {
+                                translationX = centerShiftPx - offsetPx
                             },
-                            fontSize = m.sp(10f),
-                            color = if (result.wasDuplicate) TacticalAmber else RtxEmerald
-                        )
-                    }
-                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        Button(
-                            onClick = { onEquipNow(result.skin) },
-                            enabled = !isUpdatingSkin,
-                            colors = ButtonDefaults.buttonColors(containerColor = RtxEmerald, contentColor = ObsidianVoid),
-                            shape = RoundedCornerShape(6.dp),
-                            modifier = Modifier
-                                .height(42.dp)
-                                .testTag("case_drop_equip_now")
-                        ) {
-                            Text("ПРИМЕНИТЬ", fontWeight = FontWeight.Black, fontSize = m.sp(10f))
+                        horizontalArrangement = Arrangement.spacedBy(10.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        strip.forEach { item ->
+                            Column(
+                                modifier = Modifier
+                                    .width(140.dp)
+                                    .height(104.dp)
+                                    .clip(RoundedCornerShape(8.dp))
+                                    .background(
+                                        Brush.verticalGradient(
+                                            listOf(
+                                                item.rarity.badgeBgColor,
+                                                Color(0xFF0A101B)
+                                            )
+                                        )
+                                    )
+                                    .border(1.5.dp, item.rarity.accentColor, RoundedCornerShape(8.dp))
+                                    .padding(7.dp),
+                                verticalArrangement = Arrangement.SpaceBetween
+                            ) {
+                                Box(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .height(54.dp)
+                                        .clip(RoundedCornerShape(5.dp))
+                                        .background(
+                                            Brush.linearGradient(
+                                                listOf(
+                                                    item.primaryColor.copy(alpha = 0.25f),
+                                                    item.secondaryColor.copy(alpha = 0.22f),
+                                                    Color(0xFF0B111C)
+                                                )
+                                            )
+                                        )
+                                        .padding(4.dp)
+                                ) {
+                                    WeaponSilhouetteArt(skin = item, modifier = Modifier.fillMaxSize())
+                                }
+                                Text(
+                                    text = item.nameRu,
+                                    fontSize = m.sp(9f),
+                                    fontWeight = FontWeight.Black,
+                                    color = Color.White,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.SpaceBetween
+                                ) {
+                                    Text(
+                                        text = item.weapon.shortLabel,
+                                        fontSize = m.sp(8f),
+                                        fontWeight = FontWeight.Bold,
+                                        color = item.rarity.accentColor,
+                                        maxLines = 1
+                                    )
+                                    Text(
+                                        text = item.rarity.displayRu,
+                                        fontSize = m.sp(7.5f),
+                                        fontWeight = FontWeight.SemiBold,
+                                        color = TextSecondary,
+                                        maxLines = 1
+                                    )
+                                }
+                            }
                         }
-                        OutlinedButton(
-                            onClick = onDismissStage,
-                            border = BorderStroke(1.dp, BorderSteel),
-                            shape = RoundedCornerShape(6.dp),
+                    }
+                    // Center indicator beam
+                    Box(
+                        modifier = Modifier
+                            .align(Alignment.Center)
+                            .width(3.dp)
+                            .fillMaxHeight()
+                            .background(TacticalAmber)
+                    )
+                }
+
+                if (result != null && !isSpinning) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(10.dp))
+                            .background(result.skin.rarity.badgeBgColor.copy(alpha = 0.55f))
+                            .border(1.2.dp, result.skin.rarity.accentColor, RoundedCornerShape(10.dp))
+                            .clickable { onPreviewSkin(result.skin) }
+                            .padding(m.s(10f))
+                            .testTag("case_drop_preview_card"),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(10.dp)
+                    ) {
+                        Box(
                             modifier = Modifier
-                                .height(42.dp)
-                                .testTag("case_drop_close")
+                                .size(width = 112.dp, height = 64.dp)
+                                .clip(RoundedCornerShape(7.dp))
+                                .background(Color(0xCC070B12))
+                                .border(1.dp, result.skin.rarity.accentColor.copy(alpha = 0.7f), RoundedCornerShape(7.dp))
+                                .padding(6.dp)
                         ) {
-                            Text("СКРЫТЬ", color = TextPrimary, fontWeight = FontWeight.Bold, fontSize = m.sp(10f))
+                            WeaponSilhouetteArt(skin = result.skin, modifier = Modifier.fillMaxSize())
+                        }
+                        Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                            Text(
+                                text = "${result.skin.weapon.shortLabel} | ${result.skin.nameRu}",
+                                fontSize = m.sp(13f),
+                                fontWeight = FontWeight.Black,
+                                color = result.skin.rarity.accentColor
+                            )
+                            Text(
+                                text = if (result.wasDuplicate) {
+                                    "Дубликат • Возвращено +${result.refundCoins} монет!"
+                                } else {
+                                    "${result.skin.rarity.displayRu} • Нажмите для детального превью"
+                                },
+                                fontSize = m.sp(10f),
+                                color = if (result.wasDuplicate) TacticalAmber else RtxEmerald
+                            )
+                        }
+                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            Button(
+                                onClick = { onEquipNow(result.skin) },
+                                enabled = !isUpdatingSkin,
+                                colors = ButtonDefaults.buttonColors(containerColor = RtxEmerald, contentColor = ObsidianVoid),
+                                shape = RoundedCornerShape(6.dp),
+                                modifier = Modifier
+                                    .height(48.dp)
+                                    .testTag("case_drop_equip_now")
+                            ) {
+                                Text("ПРИМЕНИТЬ", fontWeight = FontWeight.Black, fontSize = m.sp(10.5f))
+                            }
+                            OutlinedButton(
+                                onClick = onDismissStage,
+                                border = BorderStroke(1.dp, BorderSteel),
+                                shape = RoundedCornerShape(6.dp),
+                                modifier = Modifier
+                                    .height(48.dp)
+                                    .testTag("case_drop_close")
+                            ) {
+                                Text("СКРЫТЬ", color = TextPrimary, fontWeight = FontWeight.Bold, fontSize = m.sp(10.5f))
+                            }
                         }
                     }
                 }
@@ -962,3 +1110,368 @@ private fun CaseRouletteStage(
         }
     }
 }
+
+@Composable
+private fun SkinPreviewDialog(
+    skin: WeaponSkin,
+    isOwned: Boolean,
+    isEquipped: Boolean,
+    isBusy: Boolean,
+    onToggleEquip: () -> Unit,
+    onDismiss: () -> Unit
+) {
+    val m = LocalUiMetrics.current
+    Dialog(
+        onDismissRequest = onDismiss,
+        properties = DialogProperties(usePlatformDefaultWidth = false)
+    ) {
+        Surface(
+            color = Color(0xFA0B121F),
+            shape = CutCornerShape(topStart = 16.dp, bottomEnd = 16.dp),
+            border = BorderStroke(1.8.dp, skin.rarity.accentColor),
+            modifier = Modifier
+                .fillMaxWidth(0.90f)
+                .widthIn(max = 640.dp)
+                .padding(16.dp)
+        ) {
+            Column(
+                modifier = Modifier.padding(16.dp),
+                verticalArrangement = Arrangement.spacedBy(12.dp)
+            ) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            Text(
+                                text = skin.weapon.shortLabel,
+                                fontSize = m.sp(10.5f),
+                                fontWeight = FontWeight.Black,
+                                color = Color.White,
+                                modifier = Modifier
+                                    .clip(RoundedCornerShape(5.dp))
+                                    .background(ElevatedGunmetal)
+                                    .border(1.dp, BorderSteel, RoundedCornerShape(5.dp))
+                                    .padding(horizontal = 8.dp, vertical = 3.dp)
+                            )
+                            Text(
+                                text = skin.rarity.displayRu.uppercase(),
+                                fontSize = m.sp(10f),
+                                fontWeight = FontWeight.Black,
+                                color = skin.rarity.accentColor,
+                                modifier = Modifier
+                                    .clip(RoundedCornerShape(5.dp))
+                                    .background(skin.rarity.badgeBgColor)
+                                    .border(1.dp, skin.rarity.accentColor, RoundedCornerShape(5.dp))
+                                    .padding(horizontal = 8.dp, vertical = 3.dp)
+                            )
+                        }
+                        Spacer(Modifier.height(4.dp))
+                        Text(
+                            text = skin.nameRu,
+                            fontSize = m.sp(17f),
+                            fontWeight = FontWeight.Black,
+                            color = TextPrimary
+                        )
+                        Text(
+                            text = skin.subtitleRu,
+                            fontSize = m.sp(11f),
+                            color = TextSecondary
+                        )
+                    }
+                    IconButton(
+                        onClick = onDismiss,
+                        modifier = Modifier
+                            .size(48.dp)
+                            .testTag("skin_preview_close")
+                    ) {
+                        Icon(Icons.Default.Close, contentDescription = "Закрыть превью", tint = TextPrimary)
+                    }
+                }
+
+                // Large PBR weapon silhouette showcase
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(164.dp)
+                        .clip(RoundedCornerShape(10.dp))
+                        .background(
+                            Brush.radialGradient(
+                                colors = listOf(
+                                    skin.rarity.accentColor.copy(alpha = 0.28f),
+                                    skin.rarity.badgeBgColor.copy(alpha = 0.72f),
+                                    ObsidianVoid
+                                )
+                            )
+                        )
+                        .border(1.2.dp, skin.rarity.accentColor.copy(alpha = 0.75f), RoundedCornerShape(10.dp))
+                        .padding(16.dp)
+                ) {
+                    WeaponSilhouetteArt(skin = skin, modifier = Modifier.fillMaxSize())
+                }
+
+                // PBR Material swatches & finish stats
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(10.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Row(
+                        modifier = Modifier
+                            .height(34.dp)
+                            .width(120.dp)
+                            .clip(RoundedCornerShape(7.dp))
+                            .border(1.dp, BorderSteel, RoundedCornerShape(7.dp))
+                    ) {
+                        Box(Modifier.weight(1f).fillMaxHeight().background(skin.primaryColor))
+                        Box(Modifier.weight(1f).fillMaxHeight().background(skin.secondaryColor))
+                        Box(Modifier.weight(0.75f).fillMaxHeight().background(skin.accentColor))
+                    }
+                    Text(
+                        text = "Металличность ${(skin.metallic * 100).toInt()}% • Шероховатость ${(skin.roughness * 100).toInt()}% • Свечение ${(skin.emissiveIntensity * 100).toInt()}%",
+                        fontSize = m.sp(9.5f),
+                        fontWeight = FontWeight.SemiBold,
+                        color = TextSecondary,
+                        modifier = Modifier.weight(1f)
+                    )
+                }
+
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(10.dp)
+                ) {
+                    if (isOwned) {
+                        Button(
+                            onClick = onToggleEquip,
+                            enabled = !isBusy,
+                            colors = ButtonDefaults.buttonColors(
+                                containerColor = if (isEquipped) ElevatedGunmetal else RtxEmerald,
+                                contentColor = if (isEquipped) RtxEmerald else ObsidianVoid
+                            ),
+                            border = if (isEquipped) BorderStroke(1.2.dp, RtxEmerald) else null,
+                            shape = CutCornerShape(topStart = 8.dp, bottomEnd = 8.dp),
+                            modifier = Modifier
+                                .weight(1f)
+                                .height(48.dp)
+                                .testTag("skin_preview_equip")
+                        ) {
+                            Text(
+                                text = if (isEquipped) "СНЯТЬ СКИН" else "ПРИМЕНИТЬ В БОЮ",
+                                fontWeight = FontWeight.Black,
+                                fontSize = m.sp(11f)
+                            )
+                        }
+                    } else {
+                        Box(
+                            modifier = Modifier
+                                .weight(1f)
+                                .height(48.dp)
+                                .clip(RoundedCornerShape(8.dp))
+                                .background(ElevatedGunmetal)
+                                .border(1.dp, BorderSteel, RoundedCornerShape(8.dp)),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Text(
+                                text = "ВЫПАДАЕТ ИЗ КЕЙСА",
+                                fontWeight = FontWeight.Bold,
+                                fontSize = m.sp(10.5f),
+                                color = TacticalAmber
+                            )
+                        }
+                    }
+
+                    OutlinedButton(
+                        onClick = onDismiss,
+                        border = BorderStroke(1.dp, BorderSteel),
+                        shape = CutCornerShape(topStart = 8.dp, bottomEnd = 8.dp),
+                        modifier = Modifier
+                            .height(48.dp)
+                            .testTag("skin_preview_dismiss")
+                    ) {
+                        Text("ЗАКРЫТЬ", color = TextPrimary, fontWeight = FontWeight.Bold, fontSize = m.sp(11f))
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+fun WeaponSilhouetteArt(
+    skin: WeaponSkin,
+    modifier: Modifier = Modifier
+) {
+    Canvas(modifier = modifier) {
+        val w = size.width
+        val h = size.height
+        val primary = skin.primaryColor
+        val secondary = skin.secondaryColor
+        val accent = skin.accentColor
+        val outlineColor = if (skin.emissiveIntensity > 0.1f) {
+            Color(skin.emissiveArgb).copy(alpha = 0.85f)
+        } else {
+            accent.copy(alpha = 0.72f)
+        }
+        val stroke = Stroke(width = (h * 0.03f).coerceIn(1.5f, 3.5f), cap = StrokeCap.Round, join = StrokeJoin.Round)
+
+        when (skin.weapon) {
+            WeaponType.KNIFE -> {
+                val blade = Path().apply {
+                    moveTo(w * 0.36f, h * 0.56f)
+                    lineTo(w * 0.88f, h * 0.34f)
+                    quadraticTo(w * 0.76f, h * 0.64f, w * 0.38f, h * 0.68f)
+                    close()
+                }
+                drawPath(blade, brush = Brush.linearGradient(listOf(primary, accent)))
+                drawPath(blade, color = outlineColor, style = stroke)
+                // Handle
+                drawRoundRect(
+                    color = secondary,
+                    topLeft = Offset(w * 0.12f, h * 0.54f),
+                    size = Size(w * 0.25f, h * 0.14f),
+                    cornerRadius = CornerRadius(h * 0.06f, h * 0.06f)
+                )
+                drawCircle(color = accent, radius = h * 0.06f, center = Offset(w * 0.14f, h * 0.61f))
+            }
+
+            WeaponType.DESERT_EAGLE, WeaponType.GLOCK_18, WeaponType.USP_S -> {
+                // Slide
+                drawRoundRect(
+                    brush = Brush.horizontalGradient(listOf(secondary, primary, accent)),
+                    topLeft = Offset(w * 0.22f, h * 0.24f),
+                    size = Size(w * 0.52f, h * 0.22f),
+                    cornerRadius = CornerRadius(h * 0.04f, h * 0.04f)
+                )
+                if (skin.weapon == WeaponType.USP_S) {
+                    // Suppressor
+                    drawRoundRect(
+                        color = secondary,
+                        topLeft = Offset(w * 0.74f, h * 0.27f),
+                        size = Size(w * 0.18f, h * 0.14f),
+                        cornerRadius = CornerRadius(h * 0.03f, h * 0.03f)
+                    )
+                }
+                // Frame & Grip
+                val grip = Path().apply {
+                    moveTo(w * 0.25f, h * 0.46f)
+                    lineTo(w * 0.42f, h * 0.46f)
+                    lineTo(w * 0.35f, h * 0.82f)
+                    lineTo(w * 0.19f, h * 0.80f)
+                    close()
+                }
+                drawPath(grip, color = secondary)
+                drawPath(grip, color = outlineColor, style = stroke)
+                // Accent barrel stripe
+                drawLine(
+                    color = accent,
+                    start = Offset(w * 0.24f, h * 0.35f),
+                    end = Offset(w * 0.72f, h * 0.35f),
+                    strokeWidth = (h * 0.04f).coerceAtLeast(2f)
+                )
+            }
+
+            WeaponType.AWP -> {
+                // Long sniper barrel
+                drawRect(
+                    color = secondary,
+                    topLeft = Offset(w * 0.58f, h * 0.37f),
+                    size = Size(w * 0.36f, h * 0.08f)
+                )
+                // Main body + stock
+                val body = Path().apply {
+                    moveTo(w * 0.06f, h * 0.44f)
+                    lineTo(w * 0.62f, h * 0.38f)
+                    lineTo(w * 0.62f, h * 0.56f)
+                    lineTo(w * 0.24f, h * 0.58f)
+                    lineTo(w * 0.08f, h * 0.70f)
+                    close()
+                }
+                drawPath(body, brush = Brush.horizontalGradient(listOf(primary, secondary, primary)))
+                drawPath(body, color = outlineColor, style = stroke)
+                // Scope
+                drawRoundRect(
+                    color = accent,
+                    topLeft = Offset(w * 0.34f, h * 0.18f),
+                    size = Size(w * 0.28f, h * 0.13f),
+                    cornerRadius = CornerRadius(h * 0.04f, h * 0.04f)
+                )
+            }
+
+            WeaponType.MP9, WeaponType.P90 -> {
+                // Compact SMG body
+                drawRoundRect(
+                    brush = Brush.horizontalGradient(listOf(primary, secondary, accent)),
+                    topLeft = Offset(w * 0.16f, h * 0.32f),
+                    size = Size(w * 0.60f, h * 0.24f),
+                    cornerRadius = CornerRadius(h * 0.06f, h * 0.06f)
+                )
+                drawRect(
+                    color = secondary,
+                    topLeft = Offset(w * 0.74f, h * 0.38f),
+                    size = Size(w * 0.16f, h * 0.09f)
+                )
+                // Vertical mag + grip
+                drawRoundRect(
+                    color = accent,
+                    topLeft = Offset(w * 0.46f, h * 0.54f),
+                    size = Size(w * 0.10f, h * 0.26f),
+                    cornerRadius = CornerRadius(3f, 3f)
+                )
+                drawRoundRect(
+                    color = secondary,
+                    topLeft = Offset(w * 0.24f, h * 0.54f),
+                    size = Size(w * 0.11f, h * 0.22f),
+                    cornerRadius = CornerRadius(3f, 3f)
+                )
+            }
+
+            else -> {
+                // AK-47 / M4A1-S Assault rifle profile
+                // Stock
+                val stock = Path().apply {
+                    moveTo(w * 0.06f, h * 0.42f)
+                    lineTo(w * 0.28f, h * 0.38f)
+                    lineTo(w * 0.28f, h * 0.54f)
+                    lineTo(w * 0.07f, h * 0.65f)
+                    close()
+                }
+                drawPath(stock, color = secondary)
+                // Receiver + handguard
+                drawRoundRect(
+                    brush = Brush.horizontalGradient(listOf(primary, accent, secondary)),
+                    topLeft = Offset(w * 0.27f, h * 0.35f),
+                    size = Size(w * 0.46f, h * 0.19f),
+                    cornerRadius = CornerRadius(h * 0.04f, h * 0.04f)
+                )
+                // Barrel / Suppressor
+                drawRect(
+                    color = secondary,
+                    topLeft = Offset(w * 0.72f, h * 0.39f),
+                    size = Size(w * (if (skin.weapon == WeaponType.M4A1_S) 0.23f else 0.19f), h * 0.09f)
+                )
+                // Curved mag + grip
+                val mag = Path().apply {
+                    moveTo(w * 0.49f, h * 0.54f)
+                    lineTo(w * 0.59f, h * 0.54f)
+                    quadraticTo(w * 0.62f, h * 0.70f, w * 0.66f, h * 0.80f)
+                    lineTo(w * 0.55f, h * 0.82f)
+                    close()
+                }
+                drawPath(mag, color = accent)
+                drawPath(mag, color = outlineColor, style = stroke)
+                drawLine(
+                    color = accent,
+                    start = Offset(w * 0.30f, h * 0.44f),
+                    end = Offset(w * 0.70f, h * 0.44f),
+                    strokeWidth = (h * 0.04f).coerceAtLeast(2f)
+                )
+            }
+        }
+    }
+}
+

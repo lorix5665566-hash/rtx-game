@@ -17,6 +17,8 @@ import com.example.model.TeamSide
 import com.example.model.WeaponSkin
 import com.example.model.WeaponType
 import com.example.online.ADMIN_SHORT_ID
+import com.example.online.BannedDeviceEntry
+import com.example.online.ClientAccessStatus
 import com.example.online.FriendEntry
 import com.example.online.FriendRequest
 import com.example.online.LobbyInvite
@@ -97,6 +99,12 @@ class OnlineViewModel(
 
     private val _bannedAccounts = MutableStateFlow<List<PlayerProfile>>(emptyList())
     val bannedAccounts: StateFlow<List<PlayerProfile>> = _bannedAccounts.asStateFlow()
+
+    private val _bannedDevices = MutableStateFlow<List<BannedDeviceEntry>>(emptyList())
+    val bannedDevices: StateFlow<List<BannedDeviceEntry>> = _bannedDevices.asStateFlow()
+
+    private val _clientAccessStatus = MutableStateFlow(ClientAccessStatus())
+    val clientAccessStatus: StateFlow<ClientAccessStatus> = _clientAccessStatus.asStateFlow()
 
     private val _adminBusy = MutableStateFlow(false)
     val adminBusy: StateFlow<Boolean> = _adminBusy.asStateFlow()
@@ -227,12 +235,26 @@ class OnlineViewModel(
         _progressionNotice.value = null
     }
 
+    fun checkClientAccessNow() {
+        viewModelScope.launch {
+            val status = authManager.checkClientAccess()
+            _clientAccessStatus.value = status
+            if (status.deviceBanned) {
+                leaveActiveLobby()
+                _localBanNotice.value = status.banReason.ifBlank { "Устройство заблокировано администратором." }
+            }
+        }
+    }
+
     /**
-     * Driven by MainActivity ON_START / ON_STOP so Friends online status reflects true presence immediately!
+     * Driven by MainActivity ON_START / ON_STOP so Friends online status & version/device ban checks stay current!
      */
     fun setAppForeground(foreground: Boolean) {
         isAppForeground = foreground
         viewModelScope.launch {
+            if (foreground) {
+                checkClientAccessNow()
+            }
             repository.setOnlineStatus(currentUserId, online = foreground)
             if (foreground) {
                 lastPresenceHeartbeatMs = android.os.SystemClock.elapsedRealtime()
@@ -433,6 +455,53 @@ class OnlineViewModel(
                 .onFailure { err ->
                     _adminStatus.value = err.localizedMessage ?: "Не удалось загрузить список банов"
                 }
+            repository.adminFetchBannedDevices()
+                .onSuccess { devices ->
+                    _bannedDevices.value = devices
+                }
+            _adminBusy.value = false
+        }
+    }
+
+    fun adminSetDeviceBanByAccount(shortIdRaw: String, banned: Boolean, reasonRaw: String = "") {
+        val me = currentProfileOrNull()
+        if (me?.isAdmin != true) return
+        val cleanId = shortIdRaw.trim().lowercase()
+        if (cleanId == ADMIN_SHORT_ID) {
+            _adminStatus.value = "Нельзя заблокировать устройство администратора."
+            return
+        }
+        viewModelScope.launch {
+            _adminBusy.value = true
+            repository.adminSetDeviceBanByAccount(cleanId, banned, reasonRaw)
+                .onSuccess { hash ->
+                    _adminStatus.value = if (banned) {
+                        "Устройство игрока ID $cleanId заблокировано (${hash.take(8)}…)."
+                    } else {
+                        "Бан устройства игрока ID $cleanId снят."
+                    }
+                    refreshBannedAccounts()
+                }
+                .onFailure { err ->
+                    _adminStatus.value = err.localizedMessage ?: "Не удалось изменить бан устройства"
+                }
+            _adminBusy.value = false
+        }
+    }
+
+    fun adminUnbanDeviceHash(deviceHash: String) {
+        val me = currentProfileOrNull()
+        if (me?.isAdmin != true) return
+        viewModelScope.launch {
+            _adminBusy.value = true
+            repository.adminUnbanDeviceHash(deviceHash)
+                .onSuccess {
+                    _adminStatus.value = "Устройство (${deviceHash.take(8)}…) разблокировано."
+                    refreshBannedAccounts()
+                }
+                .onFailure { err ->
+                    _adminStatus.value = err.localizedMessage ?: "Не удалось разбанить устройство"
+                }
             _adminBusy.value = false
         }
     }
@@ -540,6 +609,7 @@ class OnlineViewModel(
 
     private fun initializeAndStartSocialPolling() {
         viewModelScope.launch {
+            _clientAccessStatus.value = authManager.checkClientAccess()
             _profileState.value = OnlineUiState.Loading
             repository.ensurePlayerProfile(currentUserId, initialLoginName)
                 .onSuccess { profile ->
@@ -547,12 +617,20 @@ class OnlineViewModel(
                     refreshSocialData()
                 }
                 .onFailure { err ->
-                    _profileState.value = OnlineUiState.Error(
-                        err.localizedMessage ?: "Не удалось загрузить или создать ID профиля"
-                    )
+                    val msg = err.localizedMessage ?: "Не удалось загрузить или создать ID профиля"
+                    if (msg.contains("DEVICE_BANNED", ignoreCase = true)) {
+                        _clientAccessStatus.value = _clientAccessStatus.value.copy(
+                            allowed = false,
+                            deviceBanned = true,
+                            banReason = msg.substringAfter("DEVICE_BANNED:").trim()
+                                .ifBlank { "Устройство заблокировано администратором." },
+                            checked = true
+                        )
+                    }
+                    _profileState.value = OnlineUiState.Error(msg)
                 }
 
-            // Periodic background cloud sync + strict 15s foreground presence heartbeat!
+            // Periodic background cloud sync + strict 15s foreground presence heartbeat + version/device checks!
             var pollCycle = 0
             while (isActive) {
                 delay(3_500L)
@@ -561,6 +639,11 @@ class OnlineViewModel(
                 if (isAppForeground && nowElapsed - lastPresenceHeartbeatMs >= 15_000L) {
                     lastPresenceHeartbeatMs = nowElapsed
                     repository.setOnlineStatus(currentUserId, online = true)
+                    val access = authManager.checkClientAccess()
+                    _clientAccessStatus.value = access
+                    if (access.deviceBanned || access.updateRequired) {
+                        leaveActiveLobby()
+                    }
                 }
                 if (_activeLobby.value?.status != "playing") {
                     if (_profileState.value !is OnlineUiState.Success) {

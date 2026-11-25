@@ -40,6 +40,8 @@ class SoundEngine {
     private val bombBeepPcm = synthesizeBombBeep()
     private val bombPlantPcm = synthesizeBombPlantDone()
     private val bombExplodePcm = synthesizeBombExplosion()
+    private val metalHitPcm = synthesizeMetalHit()
+    private val metalBreakPcm = synthesizeMetalBreak()
 
     // Unique mechanical draw / equip sound for every weapon (safety flick, bolt rack, slide, sheath)
     private val drawAk47Pcm = synthesizeAk47Draw()
@@ -91,6 +93,8 @@ class SoundEngine {
     fun playBombBeep() = playClip(bombBeepPcm, 0.82f)
     fun playBombPlanted() = playClip(bombPlantPcm, 0.92f)
     fun playBombExplode() = playClip(bombExplodePcm, 1.0f)
+    fun playMetalHit() = playClip(metalHitPcm, 0.88f)
+    fun playMetalBreak() = playClip(metalBreakPcm, 0.96f)
 
     private fun playClip(pcm: ShortArray, gain: Float) {
         val effectiveGain = (volume * gain).coerceIn(0f, 1f)
@@ -843,6 +847,39 @@ class SoundEngine {
             lpMid += (n - lpMid) * 0.07f
             val s = tanh(((lpSub * 5.2f * exp(-t * 2.4f) + lpMid * 2.2f * exp(-t * 4.5f) + n * 0.8f * exp(-t * 18f)) * 1.4f).toDouble()).toFloat()
             out[i] = (s * Short.MAX_VALUE * 0.96f).toInt().toShort()
+        }
+        return out
+    }
+
+    private fun synthesizeMetalHit(): ShortArray {
+        val count = (sampleRate * 0.22f).toInt()
+        val out = ShortArray(count)
+        val rng = Random(6101)
+        for (i in 0 until count) {
+            val t = i.toFloat() / sampleRate
+            val clack = (rng.nextFloat() * 2f - 1f) * exp(-t * 95f) * 0.55f
+            val ring1 = sin(2.0 * PI * 1820.0 * t).toFloat() * exp(-t * 18f) * 0.55f
+            val ring2 = sin(2.0 * PI * 3260.0 * t).toFloat() * exp(-t * 26f) * 0.35f
+            val s = tanh(((clack + ring1 + ring2) * 1.15f).toDouble()).toFloat()
+            out[i] = (s * Short.MAX_VALUE * 0.88f).toInt().toShort()
+        }
+        return out
+    }
+
+    private fun synthesizeMetalBreak(): ShortArray {
+        val count = (sampleRate * 0.42f).toInt()
+        val out = ShortArray(count)
+        val rng = Random(6202)
+        var lp = 0f
+        for (i in 0 until count) {
+            val t = i.toFloat() / sampleRate
+            val n = rng.nextFloat() * 2f - 1f
+            lp += (n - lp) * 0.28f
+            val burst = lp * exp(-t * 16f) * 0.72f
+            val clangA = sin(2.0 * PI * 1420.0 * t).toFloat() * exp(-t * 10f) * 0.48f
+            val clangB = if (t > 0.055f) sin(2.0 * PI * 2740.0 * (t - 0.055f)).toFloat() * exp(-(t - 0.055f) * 14f) * 0.40f else 0f
+            val s = tanh(((burst + clangA + clangB) * 1.25f).toDouble()).toFloat()
+            out[i] = (s * Short.MAX_VALUE * 0.92f).toInt().toShort()
         }
         return out
     }

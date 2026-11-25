@@ -1,10 +1,43 @@
 -- ============================================================================
--- Vanguard RTX v0.07beta — Supabase Cloud Multiplayer, Progression & Skins Schema
+-- Vanguard RTX v0.08beta — Supabase Cloud Multiplayer, Progression & Skins Schema
 -- Paste this entire script into Supabase Dashboard -> SQL Editor -> Run.
 -- Also set: Authentication -> Providers -> Email -> Confirm email = OFF
 -- ============================================================================
 
 create extension if not exists pgcrypto;
+
+-- 0. Global App Version Policy (enforces latest build entry!)
+create table if not exists public.app_config (
+    id integer primary key default 1 check (id = 1),
+    min_version_code integer not null default 8,
+    latest_version_name text not null default '0.08beta',
+    update_message text not null default 'Доступно обязательное обновление Vanguard RTX v0.08beta. Установите последнюю версию игры.',
+    updated_at timestamptz not null default now()
+);
+
+insert into public.app_config (id, min_version_code, latest_version_name, update_message)
+values (
+    1,
+    8,
+    '0.08beta',
+    'Доступно обязательное обновление Vanguard RTX v0.08beta. Установите последнюю версию игры.'
+)
+on conflict (id) do update
+set min_version_code = greatest(public.app_config.min_version_code, excluded.min_version_code),
+    latest_version_name = case
+        when public.app_config.min_version_code <= excluded.min_version_code then excluded.latest_version_name
+        else public.app_config.latest_version_name
+    end,
+    updated_at = now();
+
+-- 0b. Hardware / Device Bans (prevents banned devices from logging in or creating new accounts!)
+create table if not exists public.banned_devices (
+    device_hash text primary key check (char_length(device_hash) between 16 and 128),
+    reason text not null default '' check (char_length(reason) <= 160),
+    banned_uid uuid,
+    banned_short_id text not null default '',
+    banned_at timestamptz not null default now()
+);
 
 -- 1. Player Profiles (unique 6-digit ID or reserved 'developer' admin ID)
 create table if not exists public.profiles (
@@ -23,6 +56,7 @@ create table if not exists public.profiles (
     equipped_skins jsonb not null default '{}'::jsonb,
     banned boolean not null default false,
     ban_reason text not null default '' check (char_length(ban_reason) <= 120),
+    last_device_hash text not null default '' check (char_length(last_device_hash) <= 128),
     updated_at timestamptz not null default now()
 );
 
@@ -35,6 +69,22 @@ alter table public.profiles add column if not exists level integer not null defa
 alter table public.profiles add column if not exists coins integer not null default 0;
 alter table public.profiles add column if not exists owned_skins jsonb not null default '[]'::jsonb;
 alter table public.profiles add column if not exists equipped_skins jsonb not null default '{}'::jsonb;
+alter table public.profiles add column if not exists last_device_hash text not null default '';
+
+alter table public.app_config enable row level security;
+alter table public.banned_devices enable row level security;
+
+drop policy if exists "app_config_public_read" on public.app_config;
+create policy "app_config_public_read"
+    on public.app_config for select
+    to anon, authenticated
+    using (true);
+
+drop policy if exists "banned_devices_no_direct_access" on public.banned_devices;
+create policy "banned_devices_no_direct_access"
+    on public.banned_devices for select
+    to authenticated
+    using (false);
 
 -- Update short_id check constraint to permit exclusive 'developer' admin ID
 do $$
@@ -304,6 +354,9 @@ begin
         if new.short_id is distinct from old.short_id then
             raise exception 'Forbidden: short_id cannot be modified directly';
         end if;
+        if new.last_device_hash is distinct from old.last_device_hash then
+            raise exception 'Forbidden: device hash must be updated via server RPCs';
+        end if;
         if new.xp is distinct from old.xp
            or new.level is distinct from old.level
            or new.coins is distinct from old.coins
@@ -387,7 +440,68 @@ begin
 end;
 $$;
 
-create or replace function public.ensure_my_profile(p_display_name text default null)
+create or replace function public.check_client_access(
+    p_version_code integer,
+    p_device_hash text default ''
+)
+returns jsonb
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+    v_cfg public.app_config%rowtype;
+    v_clean_hash text := lower(trim(coalesce(p_device_hash, '')));
+    v_ban public.banned_devices%rowtype;
+    v_update_required boolean := false;
+    v_device_banned boolean := false;
+    v_ban_reason text := '';
+    v_is_dev boolean := false;
+begin
+    select * into v_cfg from public.app_config where id = 1;
+    if not found then
+        v_cfg.min_version_code := 8;
+        v_cfg.latest_version_name := '0.08beta';
+        v_cfg.update_message := 'Доступно обязательное обновление игры.';
+    end if;
+
+    v_update_required := coalesce(p_version_code, 0) < v_cfg.min_version_code;
+
+    if auth.uid() is not null then
+        select exists(
+            select 1 from public.profiles
+            where user_id = auth.uid() and short_id = 'developer'
+        ) into v_is_dev;
+    end if;
+
+    if not v_is_dev and v_clean_hash <> '' then
+        select * into v_ban
+        from public.banned_devices
+        where device_hash = v_clean_hash
+        limit 1;
+        if found then
+            v_device_banned := true;
+            v_ban_reason := coalesce(nullif(v_ban.reason, ''), 'Устройство заблокировано администратором.');
+        end if;
+    end if;
+
+    return jsonb_build_object(
+        'allowed', (not v_update_required and not v_device_banned),
+        'update_required', v_update_required,
+        'min_version_code', v_cfg.min_version_code,
+        'latest_version_name', v_cfg.latest_version_name,
+        'update_message', v_cfg.update_message,
+        'device_banned', v_device_banned,
+        'ban_reason', v_ban_reason
+    );
+end;
+$$;
+
+drop function if exists public.ensure_my_profile(text);
+create or replace function public.ensure_my_profile(
+    p_display_name text default null,
+    p_device_hash text default ''
+)
 returns public.profiles
 language plpgsql
 security definer
@@ -398,6 +512,8 @@ declare
     v_existing public.profiles%rowtype;
     v_name text;
     v_short_id text;
+    v_clean_hash text := lower(left(trim(coalesce(p_device_hash, '')), 128));
+    v_ban_reason text;
 begin
     if v_uid is null then
         raise exception 'Not authenticated';
@@ -405,12 +521,38 @@ begin
 
     select * into v_existing from public.profiles where user_id = v_uid;
     if found then
+        if v_existing.short_id <> 'developer' and v_clean_hash <> '' then
+            select coalesce(nullif(reason, ''), 'Устройство заблокировано администратором.')
+            into v_ban_reason
+            from public.banned_devices
+            where device_hash = v_clean_hash
+            limit 1;
+            if found then
+                raise exception 'DEVICE_BANNED: %', v_ban_reason;
+            end if;
+        end if;
+
         perform set_config('app.trusted_rpc', '1', true);
         update public.profiles
-        set online = true, last_seen_at = now(), updated_at = now()
+        set online = true,
+            last_seen_at = now(),
+            last_device_hash = case when v_clean_hash <> '' then v_clean_hash else last_device_hash end,
+            updated_at = now()
         where user_id = v_uid
         returning * into v_existing;
         return v_existing;
+    end if;
+
+    -- New account signup/profile creation: strictly reject banned devices!
+    if v_clean_hash <> '' then
+        select coalesce(nullif(reason, ''), 'Устройство заблокировано администратором.')
+        into v_ban_reason
+        from public.banned_devices
+        where device_hash = v_clean_hash
+        limit 1;
+        if found then
+            raise exception 'DEVICE_BANNED: %', v_ban_reason;
+        end if;
     end if;
 
     v_name := trim(coalesce(p_display_name, ''));
@@ -423,8 +565,12 @@ begin
     for i in 1..12 loop
         v_short_id := (floor(random() * 900000) + 100000)::int::text;
         begin
-            insert into public.profiles (user_id, short_id, display_name, avatar_data, online, last_seen_at)
-            values (v_uid, v_short_id, v_name, 'preset:ghost', true, now())
+            insert into public.profiles (
+                user_id, short_id, display_name, avatar_data, online, last_seen_at, last_device_hash
+            )
+            values (
+                v_uid, v_short_id, v_name, 'preset:ghost', true, now(), v_clean_hash
+            )
             returning * into v_existing;
             return v_existing;
         exception when unique_violation then
@@ -439,7 +585,11 @@ begin
 end;
 $$;
 
-create or replace function public.ping_presence(p_online boolean default true)
+drop function if exists public.ping_presence(boolean);
+create or replace function public.ping_presence(
+    p_online boolean default true,
+    p_device_hash text default ''
+)
 returns void
 language plpgsql
 security definer
@@ -447,6 +597,7 @@ set search_path = public
 as $$
 declare
     v_uid uuid := auth.uid();
+    v_clean_hash text := lower(left(trim(coalesce(p_device_hash, '')), 128));
 begin
     if v_uid is null then
         return;
@@ -455,6 +606,7 @@ begin
     update public.profiles
     set online = coalesce(p_online, false),
         last_seen_at = case when coalesce(p_online, false) then now() else now() - interval '10 minutes' end,
+        last_device_hash = case when v_clean_hash <> '' then v_clean_hash else last_device_hash end,
         updated_at = now()
     where user_id = v_uid;
 end;
@@ -683,8 +835,176 @@ begin
 end;
 $$;
 
+drop function if exists public.admin_list_banned();
 create or replace function public.admin_list_banned()
-returns setof public.profiles
+returns table (
+    user_id uuid,
+    short_id text,
+    display_name text,
+    avatar_data text,
+    online boolean,
+    last_seen_at timestamptz,
+    total_kills integer,
+    total_headshots integer,
+    xp bigint,
+    level integer,
+    coins integer,
+    owned_skins jsonb,
+    equipped_skins jsonb,
+    banned boolean,
+    ban_reason text,
+    last_device_hash text,
+    device_banned boolean,
+    updated_at timestamptz
+)
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+    v_is_admin boolean;
+begin
+    select exists(
+        select 1 from public.profiles p0
+        where p0.user_id = auth.uid() and p0.short_id = 'developer'
+    ) into v_is_admin;
+
+    if not v_is_admin then
+        raise exception 'Forbidden: admin privileges required';
+    end if;
+
+    return query
+    select
+        p.user_id,
+        p.short_id,
+        p.display_name,
+        p.avatar_data,
+        p.online,
+        p.last_seen_at,
+        p.total_kills,
+        p.total_headshots,
+        p.xp,
+        p.level,
+        p.coins,
+        p.owned_skins,
+        p.equipped_skins,
+        p.banned,
+        p.ban_reason,
+        p.last_device_hash,
+        (p.last_device_hash <> '' and exists(
+            select 1 from public.banned_devices bd where bd.device_hash = p.last_device_hash
+        )) as device_banned,
+        p.updated_at
+    from public.profiles p
+    where p.banned = true
+    order by p.updated_at desc
+    limit 100;
+end;
+$$;
+
+create or replace function public.admin_set_device_ban(
+    p_target_short_id text,
+    p_banned boolean,
+    p_reason text default ''
+)
+returns jsonb
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+    v_is_admin boolean;
+    v_clean_id text;
+    v_prof public.profiles%rowtype;
+    v_reason text;
+    v_hash text;
+begin
+    select exists(
+        select 1 from public.profiles
+        where user_id = auth.uid() and short_id = 'developer'
+    ) into v_is_admin;
+
+    if not v_is_admin then
+        raise exception 'Forbidden: admin privileges required';
+    end if;
+
+    v_clean_id := lower(trim(coalesce(p_target_short_id, '')));
+    if v_clean_id = 'developer' then
+        raise exception 'Cannot device-ban developer account';
+    end if;
+    if v_clean_id !~ '^[1-9][0-9]{5}$' then
+        raise exception 'Invalid 6-digit player ID';
+    end if;
+
+    select * into v_prof from public.profiles where short_id = v_clean_id for update;
+    if not found then
+        raise exception 'Player with ID % not found', v_clean_id;
+    end if;
+
+    v_hash := lower(trim(coalesce(v_prof.last_device_hash, '')));
+    if v_hash = '' then
+        raise exception 'У игрока ещё не зафиксирован ID устройства (не входил с новой версии).';
+    end if;
+
+    v_reason := left(trim(coalesce(p_reason, '')), 160);
+    if v_reason = '' then
+        v_reason := coalesce(nullif(v_prof.ban_reason, ''), 'Бан устройства администратором');
+    end if;
+
+    if p_banned then
+        insert into public.banned_devices (device_hash, reason, banned_uid, banned_short_id, banned_at)
+        values (v_hash, v_reason, v_prof.user_id, v_prof.short_id, now())
+        on conflict (device_hash) do update
+        set reason = excluded.reason,
+            banned_uid = excluded.banned_uid,
+            banned_short_id = excluded.banned_short_id,
+            banned_at = now();
+
+        perform set_config('app.trusted_rpc', '1', true);
+        update public.profiles
+        set banned = true,
+            ban_reason = left(v_reason, 120),
+            online = false,
+            updated_at = now()
+        where user_id = v_prof.user_id;
+    else
+        delete from public.banned_devices where device_hash = v_hash;
+    end if;
+
+    return jsonb_build_object(
+        'short_id', v_prof.short_id,
+        'display_name', v_prof.display_name,
+        'device_hash', v_hash,
+        'device_banned', p_banned
+    );
+end;
+$$;
+
+create or replace function public.admin_unban_device_hash(p_device_hash text)
+returns void
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+    v_is_admin boolean;
+    v_clean_hash text := lower(trim(coalesce(p_device_hash, '')));
+begin
+    select exists(
+        select 1 from public.profiles
+        where user_id = auth.uid() and short_id = 'developer'
+    ) into v_is_admin;
+
+    if not v_is_admin then
+        raise exception 'Forbidden: admin privileges required';
+    end if;
+
+    delete from public.banned_devices where device_hash = v_clean_hash;
+end;
+$$;
+
+create or replace function public.admin_list_banned_devices()
+returns setof public.banned_devices
 language plpgsql
 security definer
 set search_path = public
@@ -702,9 +1022,8 @@ begin
     end if;
 
     return query
-    select * from public.profiles
-    where banned = true
-    order by updated_at desc
+    select * from public.banned_devices
+    order by banned_at desc
     limit 100;
 end;
 $$;
@@ -856,6 +1175,7 @@ end;
 $$;
 
 grant usage on schema public to anon, authenticated;
+grant select on table public.app_config to anon, authenticated;
 grant select, insert, update, delete on table
     public.profiles,
     public.friend_requests,
@@ -865,17 +1185,21 @@ grant select, insert, update, delete on table
     public.lobby_invites
 to authenticated;
 
+grant execute on function public.check_client_access(integer, text) to anon, authenticated;
 grant execute on function public.calc_level_step_xp(integer) to authenticated;
 grant execute on function public.calc_level_from_xp(bigint) to authenticated;
-grant execute on function public.ensure_my_profile(text) to authenticated;
+grant execute on function public.ensure_my_profile(text, text) to authenticated;
 grant execute on function public.accept_friend_request(uuid) to authenticated;
 grant execute on function public.remove_friendship(uuid) to authenticated;
-grant execute on function public.ping_presence(boolean) to authenticated;
+grant execute on function public.ping_presence(boolean, text) to authenticated;
 grant execute on function public.award_kill_xp(integer, integer) to authenticated;
 grant execute on function public.open_skin_case(text, integer) to authenticated;
 grant execute on function public.equip_weapon_skin(text, text) to authenticated;
 grant execute on function public.admin_set_ban(text, boolean, text) to authenticated;
 grant execute on function public.admin_list_banned() to authenticated;
+grant execute on function public.admin_set_device_ban(text, boolean, text) to authenticated;
+grant execute on function public.admin_unban_device_hash(text) to authenticated;
+grant execute on function public.admin_list_banned_devices() to authenticated;
 grant execute on function public.admin_kick_member(uuid, uuid) to authenticated;
 grant execute on function public.admin_grant_xp(text, integer) to authenticated;
 grant execute on function public.admin_grant_skins(text, text[]) to authenticated;

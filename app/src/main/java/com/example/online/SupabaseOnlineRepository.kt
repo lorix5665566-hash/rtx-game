@@ -32,8 +32,29 @@ class SupabaseOnlineRepository(
         withContext(Dispatchers.IO) {
             runCatching {
                 val cleanName = sanitizeDisplayName(fallbackName)
+                val deviceHash = authManager.deviceHash()
 
-                // Fast path: check existing profile directly
+                // Primary path: atomic server RPC enforces device bans AND records last_device_hash
+                val rpcRes = callRpc(
+                    fnName = "ensure_my_profile",
+                    body = JSONObject().apply {
+                        put("p_display_name", cleanName)
+                        put("p_device_hash", deviceHash)
+                    }
+                )
+                if (rpcRes.isSuccess) {
+                    val obj = parseSingleObject(rpcRes.getOrNull()?.trim().orEmpty())
+                    if (obj != null && obj.optString("user_id").isNotBlank() && obj.optString("short_id").isNotBlank()) {
+                        return@runCatching parseProfile(obj)
+                    }
+                } else {
+                    val errMsg = rpcRes.exceptionOrNull()?.message.orEmpty()
+                    if (errMsg.contains("DEVICE_BANNED", ignoreCase = true)) {
+                        throw IllegalStateException(errMsg)
+                    }
+                }
+
+                // Fallback path: check existing profile directly
                 val existingResult = runCatching { fetchProfileByUid(userId) }
                 if (existingResult.isSuccess) {
                     val existing = existingResult.getOrNull()
@@ -42,9 +63,6 @@ class SupabaseOnlineRepository(
                         return@runCatching existing.copy(online = true)
                     }
                 } else {
-                    // If direct SELECT failed with 403/RLS, try server-verified ensure_my_profile RPC
-                    val rpcProfile = tryEnsureProfileViaRpc(cleanName)
-                    if (rpcProfile != null) return@runCatching rpcProfile
                     throw existingResult.exceptionOrNull()
                         ?: IllegalStateException("Не удалось загрузить облачный профиль.")
                 }
@@ -70,26 +88,22 @@ class SupabaseOnlineRepository(
                             shortId = candidateId,
                             displayName = cleanName,
                             avatarData = AvatarPresets.DEFAULT_KEY,
-                            online = true
+                            online = true,
+                            lastDeviceHash = deviceHash
                         )
                     } else {
                         val err = resp.exceptionOrNull()
                         lastError = err
                         val errMsg = err?.message.orEmpty()
-                        // If a concurrent call already created our profile (409 / duplicate user_id), read and return it immediately
                         if (errMsg.contains("409") || errMsg.contains("duplicate key", ignoreCase = true) || errMsg.contains("23505")) {
                             val alreadyCreated = runCatching { fetchProfileByUid(userId) }.getOrNull()
                             if (alreadyCreated != null) {
                                 setOnlineStatus(userId, true)
                                 return@runCatching alreadyCreated.copy(online = true)
                             }
-                            // Otherwise short_id collided -> continue loop with a fresh 6-digit ID
                         } else {
-                            // If direct INSERT failed with 403/RLS, attempt atomic server RPC before surfacing error
-                            if (errMsg.contains("403") || errMsg.contains("RLS", ignoreCase = true)) {
-                                val rpcProfile = tryEnsureProfileViaRpc(cleanName)
-                                if (rpcProfile != null) return@runCatching rpcProfile
-                            }
+                            val rpcProfile = tryEnsureProfileViaRpc(cleanName)
+                            if (rpcProfile != null) return@runCatching rpcProfile
                             throw err ?: IllegalStateException("Не удалось создать облачный профиль игрока.")
                         }
                     }
@@ -101,14 +115,15 @@ class SupabaseOnlineRepository(
     private suspend fun tryEnsureProfileViaRpc(cleanName: String): PlayerProfile? {
         val rpcRes = callRpc(
             fnName = "ensure_my_profile",
-            body = JSONObject().apply { put("p_display_name", cleanName) }
+            body = JSONObject().apply {
+                put("p_display_name", cleanName)
+                put("p_device_hash", authManager.deviceHash())
+            }
         )
         if (rpcRes.isFailure) return null
         val text = rpcRes.getOrNull()?.trim().orEmpty()
         if (text.isBlank()) return null
-        val obj = runCatching {
-            if (text.startsWith("[")) JSONArray(text).optJSONObject(0) else JSONObject(text)
-        }.getOrNull() ?: return null
+        val obj = parseSingleObject(text) ?: return null
         val uid = obj.optString("user_id")
         val sid = obj.optString("short_id")
         return if (uid.isNotBlank() && sid.isNotBlank()) parseProfile(obj) else null
@@ -168,7 +183,10 @@ class SupabaseOnlineRepository(
             runCatching {
                 val rpc = callRpc(
                     fnName = "ping_presence",
-                    body = JSONObject().apply { put("p_online", online) }
+                    body = JSONObject().apply {
+                        put("p_online", online)
+                        put("p_device_hash", authManager.deviceHash())
+                    }
                 )
                 if (rpc.isFailure) {
                     patchRest(
@@ -319,6 +337,61 @@ class SupabaseOnlineRepository(
             val raw = callRpc("admin_set_ban", body).getOrThrow().trim()
             val obj = parseSingleObject(raw) ?: error("Не удалось прочитать ответ сервера.")
             parseProfile(obj)
+        }
+    }
+
+    suspend fun adminSetDeviceBanByAccount(
+        targetShortIdRaw: String,
+        banned: Boolean,
+        reasonRaw: String = ""
+    ): Result<String> = withContext(Dispatchers.IO) {
+        runCatching {
+            val shortId = targetShortIdRaw.trim().lowercase()
+            require(shortId != ADMIN_SHORT_ID) {
+                "Нельзя заблокировать устройство администратора ($ADMIN_SHORT_ID)."
+            }
+            require(SHORT_ID_REGEX.matches(shortId)) {
+                "ID игрока должен состоять из 6 цифр."
+            }
+            val body = JSONObject().apply {
+                put("p_target_short_id", shortId)
+                put("p_banned", banned)
+                put("p_reason", reasonRaw.trim().take(160))
+            }
+            val raw = callRpc("admin_set_device_ban", body).getOrThrow().trim()
+            val obj = parseSingleObject(raw)
+            obj?.optString("device_hash").orEmpty()
+        }
+    }
+
+    suspend fun adminUnbanDeviceHash(deviceHash: String): Result<Unit> = withContext(Dispatchers.IO) {
+        runCatching {
+            callRpc(
+                fnName = "admin_unban_device_hash",
+                body = JSONObject().apply { put("p_device_hash", deviceHash.trim().lowercase()) }
+            ).getOrThrow()
+            Unit
+        }
+    }
+
+    suspend fun adminFetchBannedDevices(): Result<List<BannedDeviceEntry>> = withContext(Dispatchers.IO) {
+        runCatching {
+            val raw = callRpc("admin_list_banned_devices", JSONObject()).getOrThrow()
+            val arr = JSONArray(raw)
+            buildList(arr.length()) {
+                for (i in 0 until arr.length()) {
+                    val o = arr.optJSONObject(i) ?: continue
+                    add(
+                        BannedDeviceEntry(
+                            deviceHash = o.optString("device_hash"),
+                            reason = o.optString("reason"),
+                            bannedUid = o.optString("banned_uid"),
+                            bannedShortId = o.optString("banned_short_id"),
+                            bannedAt = o.optString("banned_at")
+                        )
+                    )
+                }
+            }
         }
     }
 
@@ -1110,7 +1183,9 @@ class SupabaseOnlineRepository(
             ownedSkins = ownedList,
             equippedSkins = equippedMap,
             banned = o.optBoolean("banned", false),
-            banReason = o.optString("ban_reason", "")
+            banReason = o.optString("ban_reason", ""),
+            lastDeviceHash = o.optString("last_device_hash", ""),
+            deviceBanned = o.optBoolean("device_banned", false)
         )
     }
 

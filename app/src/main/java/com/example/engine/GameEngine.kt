@@ -329,6 +329,13 @@ class GameEngine(
     private var lastCtStrategy: Int = -1
     @Volatile var livePingMs: Int = 0
 
+    // Performance cache for heavy HUD projections (LOS radar checks, scoreboard, killfeed list, ESP) ~22Hz
+    private var hudHeavyTimer: Float = 99f
+    private var cachedRadarBlips: List<RadarBlip> = emptyList()
+    private var cachedScoreboardRows: List<ScoreboardRow> = emptyList()
+    private var cachedKillFeedEntries: List<KillFeedEntry> = emptyList()
+    private var cachedEspBoxes: List<EspBox> = emptyList()
+
     val bots = mutableListOf<BotOperative>()
 
     // Real-time multiplayer remote human players (thread-safe bridge with Supabase Realtime & REST)
@@ -1518,6 +1525,8 @@ class GameEngine(
         synchronized(remoteLock) {
             pendingIncomingPvpHits.clear()
         }
+        world.resetBreakables()
+        hudHeavyTimer = 99f
         bulletImpacts.clear()
         bulletTracers.clear()
 
@@ -2518,6 +2527,21 @@ class GameEngine(
             }
             if (bestIsHead) soundEngine.playHeadshot() else soundEngine.playHitMarker()
             if (settings.audio.hapticsEnabled) onHapticPulse(killedRemote || bestBackstabOrHead)
+        } else {
+            // Knife can also shatter metal grates in CT-Mid passage cleanly!
+            val grateHit = world.raycastBreakable(camX, camY, camZ, dirX, dirY, dirZ, maxRange)
+            if (grateHit != null) {
+                val (damaged, justBroken) = world.damageBreakableBarrier(
+                    grateHit.barrier.id,
+                    WeaponType.KNIFE.bodyDamage
+                )
+                if (damaged) {
+                    hitMarkerAlpha = 0.7f
+                    addBulletImpact(grateHit.x, grateHit.y, grateHit.z, grateHit.nx, grateHit.ny, grateHit.nz)
+                    if (justBroken) soundEngine.playMetalBreak() else soundEngine.playMetalHit()
+                    if (settings.audio.hapticsEnabled) onHapticPulse(justBroken)
+                }
+            }
         }
     }
 
@@ -2578,10 +2602,11 @@ class GameEngine(
 
         val wallHit = world.raycastWallsWithNormal(camX, camY, camZ, dirX, dirY, dirZ, 110f)
         val wallDist = wallHit.dist
+        val breakableHit = world.raycastBreakable(camX, camY, camZ, dirX, dirY, dirZ, wallDist)
 
         var hitBot: BotOperative? = null
         var hitRemote: RemoteHumanPlayer? = null
-        var hitDist = wallDist
+        var hitDist = breakableHit?.dist ?: wallDist
         var headshot = false
 
         // Hitboxes aligned tightly to calibrated 1.76m human character height!
@@ -2646,7 +2671,6 @@ class GameEngine(
             isHeadshotHit = headshot
             val dmg = if (headshot) w.headDamage else w.bodyDamage
             applyBotDamage(hitBot, dmg, headshot, killerIsPlayer = true, weaponUsed = w)
-            // White hitmarker on all non-lethal hits (body & head), RED strictly on kill!
             isKillHit = hitBot.isDead
             if (headshot) soundEngine.playHeadshot() else soundEngine.playHitMarker()
             if (headshot && settings.audio.hapticsEnabled) onHapticPulse(true)
@@ -2668,7 +2692,6 @@ class GameEngine(
             )
             if (killedRemote) {
                 lastLethalSentTo[hitRemote.userId] = SystemClock.elapsedRealtime() to headshot
-                // Opponent eliminated -> reset accumulated damage against them back to 0!
                 damageDealtByTarget.remove(hitRemote.userId)
                 damageTakenByAttacker.remove(hitRemote.userId)
                 if (!isWarmup) {
@@ -2690,6 +2713,13 @@ class GameEngine(
             }
             if (headshot) soundEngine.playHeadshot() else soundEngine.playHitMarker()
             if (headshot && settings.audio.hapticsEnabled) onHapticPulse(true)
+        } else if (breakableHit != null) {
+            val (damaged, justBroken) = world.damageBreakableBarrier(breakableHit.barrier.id, w.bodyDamage)
+            if (damaged) {
+                hitMarkerAlpha = 0.65f
+                addBulletImpact(breakableHit.x, breakableHit.y, breakableHit.z, breakableHit.nx, breakableHit.ny, breakableHit.nz)
+                if (justBroken) soundEngine.playMetalBreak() else soundEngine.playMetalHit()
+            }
         } else if (wallHit.hit) {
             // Leave a crisp 3D bullet impact mark flush on the struck wall/crate/floor!
             addBulletImpact(wallHit.x, wallHit.y, wallHit.z, wallHit.nx, wallHit.ny, wallHit.nz)
@@ -3180,14 +3210,58 @@ class GameEngine(
                         vz = (faceZ * 0.45f + perpZ * 0.88f) * moveSpeed
                     }
 
+                    // Smart anti-wall-stare orientation: validate alert & probe open corridor sightlines!
                     val moveYaw = Math.toDegrees(atan2(vx.toDouble(), vz.toDouble())).toFloat()
-                    val lookYaw = if (b.alertTimer > 0f) b.alertYawDeg else moveYaw
+                    var lookYaw = moveYaw
+                    if (b.alertTimer > 0f) {
+                        val aRad = Math.toRadians(b.alertYawDeg.toDouble())
+                        val alertClear = world.raycastWalls(
+                            b.x, b.y + 1.45f, b.z,
+                            sin(aRad).toFloat(), 0f, cos(aRad).toFloat(), 2.2f
+                        )
+                        if (alertClear >= 1.55f) {
+                            lookYaw = b.alertYawDeg
+                        } else {
+                            b.alertTimer = 0f
+                        }
+                    }
+                    // Prefer looking ahead toward the next future nav waypoint if current node is close (< 2.5m)
+                    if (b.alertTimer <= 0f && b.navPathIndex + 1 < b.navPath.size && dist < 2.4f) {
+                        val nextWp = b.navPath[b.navPathIndex + 1]
+                        lookYaw = Math.toDegrees(atan2((nextWp.first - b.x).toDouble(), (nextWp.second - b.z).toDouble())).toFloat()
+                    }
+                    lookYaw = pickOpenLookYaw(b.x, b.y + 1.45f, b.z, lookYaw)
+
+                    // Allow bots passing an intact breakable grate (Mirage CT-Mid) to shoot and shatter it cleanly!
+                    if (world.breakableBarriers.isNotEmpty()) {
+                        for (barrier in world.breakableBarriers) {
+                            if (barrier.broken) continue
+                            if (world.distance2D(b.x, b.z, barrier.centerX, barrier.centerZ) < 3.1f && b.fireCooldown <= 0f) {
+                                val gx = barrier.centerX - b.x
+                                val gy = barrier.centerY - (b.y + 1.38f)
+                                val gz = barrier.centerZ - b.z
+                                val gLen = sqrt(gx * gx + gy * gy + gz * gz).coerceAtLeast(0.1f)
+                                val hitG = world.raycastBreakable(b.x, b.y + 1.38f, b.z, gx / gLen, gy / gLen, gz / gLen, 3.5f)
+                                if (hitG != null) {
+                                    lookYaw = Math.toDegrees(atan2(gx.toDouble(), gz.toDouble())).toFloat()
+                                    b.fireCooldown = 0.24f
+                                    b.muzzleFlashTimer = 1.0f
+                                    addBulletTracer(b.x, b.y + 1.38f, b.z, hitG.x, hitG.y, hitG.z, 0.055f)
+                                    val (_, brokenNow) = world.damageBreakableBarrier(barrier.id, 18f)
+                                    if (brokenNow) soundEngine.playMetalBreak() else soundEngine.playMetalHit()
+                                }
+                                break
+                            }
+                        }
+                    }
+
                     b.yawDeg = lookYaw
                     b.aimYawDeg = moveAngleTowardDeg(b.aimYawDeg, lookYaw, 210f * dt)
                 } else {
-                    // Reached current waypoint/site -> hold tactical angle briefly (varies per round!) before advancing
+                    // Reached current waypoint/site -> look along longest open corridor line (never stare into walls!)
                     val scanOffset = sin((timeSec * 1.1f + b.aimSwaySeed).toDouble()).toFloat() * 24f
-                    val moveYaw = if (b.alertTimer > 0f) b.alertYawDeg else (b.yawDeg + scanOffset)
+                    val baseYaw = if (b.alertTimer > 0f) b.alertYawDeg else (b.yawDeg + scanOffset)
+                    val moveYaw = pickOpenLookYaw(b.x, b.y + 1.45f, b.z, baseYaw)
                     faceX = sin(Math.toRadians(b.visualYawDeg.toDouble())).toFloat()
                     faceZ = cos(Math.toRadians(b.visualYawDeg.toDouble())).toFloat()
                     b.aimYawDeg = moveAngleTowardDeg(b.aimYawDeg, moveYaw, 155f * dt)
@@ -3202,7 +3276,6 @@ class GameEngine(
                                 b.waypointIndex++
                                 b.navPath = emptyList()
                                 b.repathTimer = 0f
-                                // Brief tactical pause on next angle for slow-default / anchor roles
                                 if (b.tacticRole >= 3) {
                                     b.holdTimer = 1.6f + rng.nextFloat() * 2.6f
                                 }
@@ -3212,7 +3285,6 @@ class GameEngine(
                                 b.navPath = emptyList()
                                 b.repathTimer = 0f
                             } else if (b.team == TeamSide.CT && roundTimeSec < 75f && rng.nextFloat() < 0.004f) {
-                                // Occasional CT mid-round flank/rotation so rounds never feel static
                                 b.targetSiteIndex = (b.targetSiteIndex + 1) % routes.size
                                 b.waypointIndex = 0
                                 b.navPath = emptyList()
@@ -3645,6 +3717,25 @@ class GameEngine(
         return if (t > 0.1f) t else Float.MAX_VALUE
     }
 
+    private fun pickOpenLookYaw(bx: Float, eyeY: Float, bz: Float, preferredYawDeg: Float): Float {
+        val offsets = floatArrayOf(0f, -35f, 35f, -72f, 72f, -120f, 120f, 180f)
+        var bestYaw = preferredYawDeg
+        var bestScore = -1f
+        for (i in offsets.indices) {
+            val candYaw = preferredYawDeg + offsets[i]
+            val rad = Math.toRadians(candYaw.toDouble())
+            val clear = world.raycastWalls(bx, eyeY, bz, sin(rad).toFloat(), 0f, cos(rad).toFloat(), 5.5f)
+            if (i == 0 && clear >= 2.35f) return preferredYawDeg
+            val prefBias = if (offsets[i] == 0f) 0.5f else -abs(offsets[i]) * 0.012f
+            val score = clear + prefBias
+            if (score > bestScore) {
+                bestScore = score
+                bestYaw = candYaw
+            }
+        }
+        return bestYaw
+    }
+
     private fun publishHud() {
         val w = activeWeapon
         val inSite = world.bombsites.firstOrNull { it.contains(playerX, playerZ) }
@@ -3670,112 +3761,121 @@ class GameEngine(
             abs(playerY - plantedBombY) <= 2.4f
 
         val remotes = if (matchConfig.isMultiplayer) getRemotePlayersSnapshot() else emptyList()
-        val blips = ArrayList<RadarBlip>(bots.size + remotes.size + 1)
-        val eyeX = playerX
-        val eyeY = playerY + eyeHeight
-        val eyeZ = playerZ
-        val cosP = cos(playerPitchRad)
-        val camFwdX = -sin(playerYawRad) * cosP
-        val camFwdY = sin(playerPitchRad)
-        val camFwdZ = -cos(playerYawRad) * cosP
+        hudHeavyTimer += (1f / currentFps.coerceIn(30, 120))
+        if (hudHeavyTimer >= 0.045f) {
+            hudHeavyTimer = 0f
+            val blips = ArrayList<RadarBlip>(bots.size + remotes.size + 1)
+            val eyeX = playerX
+            val eyeY = playerY + eyeHeight
+            val eyeZ = playerZ
+            val cosP = cos(playerPitchRad)
+            val camFwdX = -sin(playerYawRad) * cosP
+            val camFwdY = sin(playerPitchRad)
+            val camFwdZ = -cos(playerYawRad) * cosP
 
-        // Fair CS2 Radar (NO wallhack!): allies & planted C4 are always shown; enemies appear ONLY when directly seen!
-        fun isEnemyInDirectSight(ex: Float, ey: Float, ez: Float): Boolean {
-            if (isPlayerDead) return false
-            val dx = ex - eyeX
-            val dyChest = (ey + 1.24f) - eyeY
-            val dz = ez - eyeZ
-            val dist = sqrt(dx * dx + dyChest * dyChest + dz * dz)
-            if (dist < 0.05f || dist > 56f) return false
-            val inv = 1f / dist
-            val dot = (dx * camFwdX + dyChest * camFwdY + dz * camFwdZ) * inv
-            // Strictly inside forward camera view cone (~56° half-angle) so enemies behind walls/back never appear
-            if (dot < 0.56f) return false
-            val wtChest = world.raycastWalls(eyeX, eyeY, eyeZ, dx * inv, dyChest * inv, dz * inv, dist)
-            if (wtChest >= dist - 0.65f) return true
-            // Also check peeking head height over low cover/crates
-            val dyHead = (ey + 1.58f) - eyeY
-            val distH = sqrt(dx * dx + dyHead * dyHead + dz * dz).coerceAtLeast(0.05f)
-            val wtHead = world.raycastWalls(eyeX, eyeY, eyeZ, dx / distH, dyHead / distH, dz / distH, distH)
-            return wtHead >= distH - 0.65f
-        }
+            fun isEnemyInDirectSight(ex: Float, ey: Float, ez: Float): Boolean {
+                if (isPlayerDead) return false
+                val dx = ex - eyeX
+                val dyChest = (ey + 1.24f) - eyeY
+                val dz = ez - eyeZ
+                val dist = sqrt(dx * dx + dyChest * dyChest + dz * dz)
+                if (dist < 0.05f || dist > 56f) return false
+                val inv = 1f / dist
+                val dot = (dx * camFwdX + dyChest * camFwdY + dz * camFwdZ) * inv
+                if (dot < 0.56f) return false
+                val wtChest = world.raycastWalls(eyeX, eyeY, eyeZ, dx * inv, dyChest * inv, dz * inv, dist)
+                if (wtChest >= dist - 0.65f) return true
+                val dyHead = (ey + 1.58f) - eyeY
+                val distH = sqrt(dx * dx + dyHead * dyHead + dz * dz).coerceAtLeast(0.05f)
+                val wtHead = world.raycastWalls(eyeX, eyeY, eyeZ, dx / distH, dyHead / distH, dz / distH, distH)
+                return wtHead >= distH - 0.65f
+            }
 
-        for (b in bots) {
-            if (!b.isDead) {
-                val ally = b.team == matchConfig.playerSide
-                if (ally || isEnemyInDirectSight(b.x, b.y, b.z)) {
-                    blips.add(RadarBlip(b.x - playerX, b.z - playerZ, isAlly = ally))
+            for (b in bots) {
+                if (!b.isDead) {
+                    val ally = b.team == matchConfig.playerSide
+                    if (ally || isEnemyInDirectSight(b.x, b.y, b.z)) {
+                        blips.add(RadarBlip(b.x - playerX, b.z - playerZ, isAlly = ally))
+                    }
                 }
             }
-        }
-        for (rp in remotes) {
-            if (!rp.isDead) {
-                val ally = rp.team == matchConfig.playerSide
-                if (ally || isEnemyInDirectSight(rp.x, rp.y, rp.z)) {
-                    blips.add(RadarBlip(rp.x - playerX, rp.z - playerZ, isAlly = ally))
+            for (rp in remotes) {
+                if (!rp.isDead) {
+                    val ally = rp.team == matchConfig.playerSide
+                    if (ally || isEnemyInDirectSight(rp.x, rp.y, rp.z)) {
+                        blips.add(RadarBlip(rp.x - playerX, rp.z - playerZ, isAlly = ally))
+                    }
                 }
             }
-        }
-        if (bombState == BombState.PLANTED) {
-            blips.add(RadarBlip(plantedBombX - playerX, plantedBombZ - playerZ, isAlly = false, isBomb = true))
-        }
+            if (bombState == BombState.PLANTED) {
+                blips.add(RadarBlip(plantedBombX - playerX, plantedBombZ - playerZ, isAlly = false, isBomb = true))
+            }
+            cachedRadarBlips = blips
 
-        val scoreboardRows = ArrayList<ScoreboardRow>(1 + remotes.size + bots.size)
-        scoreboardRows.add(
-            ScoreboardRow(
-                id = matchConfig.localUserId.ifBlank { "local_player" },
-                name = matchConfig.localDisplayName.ifBlank { "ВЫ" },
-                team = matchConfig.playerSide,
-                kills = kills,
-                deaths = deaths,
-                money = money,
-                pingMs = if (matchConfig.isMultiplayer) livePingMs else 0,
-                isAlive = !isPlayerDead,
-                isLocalPlayer = true,
-                isAlly = true,
-                isBot = false,
-                weaponLabel = activeWeapon.shortLabel,
-                level = localLevel.coerceAtLeast(1)
-            )
-        )
-        for (rp in remotes) {
-            val ally = rp.team == matchConfig.playerSide
+            val scoreboardRows = ArrayList<ScoreboardRow>(1 + remotes.size + bots.size)
             scoreboardRows.add(
                 ScoreboardRow(
-                    id = rp.userId,
-                    name = rp.displayName.ifBlank { "Игрок" },
-                    team = rp.team,
-                    kills = rp.kills,
-                    deaths = rp.deaths,
-                    money = -1, // Strictly hide enemy money (and unshared remote money)
-                    pingMs = livePingMs,
-                    isAlive = !rp.isDead,
-                    isLocalPlayer = false,
-                    isAlly = ally,
+                    id = matchConfig.localUserId.ifBlank { "local_player" },
+                    name = matchConfig.localDisplayName.ifBlank { "ВЫ" },
+                    team = matchConfig.playerSide,
+                    kills = kills,
+                    deaths = deaths,
+                    money = money,
+                    pingMs = if (matchConfig.isMultiplayer) livePingMs else 0,
+                    isAlive = !isPlayerDead,
+                    isLocalPlayer = true,
+                    isAlly = true,
                     isBot = false,
-                    weaponLabel = if (ally) rp.weapon.shortLabel else "",
-                    level = rp.level.coerceAtLeast(1)
+                    weaponLabel = activeWeapon.shortLabel,
+                    level = localLevel.coerceAtLeast(1)
                 )
             )
-        }
-        for (b in bots) {
-            val ally = b.team == matchConfig.playerSide
-            scoreboardRows.add(
-                ScoreboardRow(
-                    id = "bot_${b.id}",
-                    name = b.name,
-                    team = b.team,
-                    kills = b.kills,
-                    deaths = b.deaths,
-                    money = if (ally) b.money else -1, // Enemy money strictly hidden!
-                    pingMs = 0,
-                    isAlive = !b.isDead,
-                    isLocalPlayer = false,
-                    isAlly = ally,
-                    isBot = true,
-                    weaponLabel = if (ally) b.weapon.shortLabel else ""
+            for (rp in remotes) {
+                val ally = rp.team == matchConfig.playerSide
+                scoreboardRows.add(
+                    ScoreboardRow(
+                        id = rp.userId,
+                        name = rp.displayName.ifBlank { "Игрок" },
+                        team = rp.team,
+                        kills = rp.kills,
+                        deaths = rp.deaths,
+                        money = -1,
+                        pingMs = livePingMs,
+                        isAlive = !rp.isDead,
+                        isLocalPlayer = false,
+                        isAlly = ally,
+                        isBot = false,
+                        weaponLabel = if (ally) rp.weapon.shortLabel else "",
+                        level = rp.level.coerceAtLeast(1)
+                    )
                 )
-            )
+            }
+            for (b in bots) {
+                val ally = b.team == matchConfig.playerSide
+                scoreboardRows.add(
+                    ScoreboardRow(
+                        id = "bot_${b.id}",
+                        name = b.name,
+                        team = b.team,
+                        kills = b.kills,
+                        deaths = b.deaths,
+                        money = if (ally) b.money else -1,
+                        pingMs = 0,
+                        isAlive = !b.isDead,
+                        isLocalPlayer = false,
+                        isAlly = ally,
+                        isBot = true,
+                        weaponLabel = if (ally) b.weapon.shortLabel else ""
+                    )
+                )
+            }
+            cachedScoreboardRows = scoreboardRows
+            cachedKillFeedEntries = killFeedList.map { it.entry }
+            cachedEspBoxes = if (isLocalAdmin && adminEspEnabled && !awaitingTeamSelection && !isMatchFinished && !isSpectatingAlly) {
+                computeAdminEspBoxes(remotes, ::isEnemyInDirectSight)
+            } else {
+                emptyList()
+            }
         }
 
         val bloodAlpha = if (deathBloodTimer > 0f) {
@@ -3791,12 +3891,6 @@ class GameEngine(
                 moveSpeedRatio.coerceIn(0f, 1f) * 0.90f +
                 (if (isAirborneNow) 0.72f else 0f)
             ).coerceIn(0f, 1.85f)
-
-        val espBoxes = if (isLocalAdmin && adminEspEnabled && !awaitingTeamSelection && !isMatchFinished && !isSpectatingAlly) {
-            computeAdminEspBoxes(remotes, ::isEnemyInDirectSight)
-        } else {
-            emptyList()
-        }
 
         latestHud = HudSnapshot(
             mapId = matchConfig.map,
@@ -3870,18 +3964,18 @@ class GameEngine(
             isPlayerTeamWinner = isPlayerTeamWinner,
             bannerText = bannerText,
             killFeedText = killFeedText,
-            killFeedEntries = killFeedList.map { it.entry },
+            killFeedEntries = cachedKillFeedEntries,
             awaitingTeamSelection = awaitingTeamSelection,
             ctTeamCount = ctHumans,
             tTeamCount = tHumans,
             sidesSwapped = hasSwappedSides,
-            radarBlips = blips,
+            radarBlips = cachedRadarBlips,
             playerYawDeg = Math.toDegrees(playerYawRad.toDouble()).toFloat(),
             isMultiplayer = matchConfig.isMultiplayer,
             onlinePlayersCount = 1 + remotes.size,
             pingMs = if (matchConfig.isMultiplayer) livePingMs else 0,
-            scoreboardRows = scoreboardRows,
-            espBoxes = espBoxes,
+            scoreboardRows = cachedScoreboardRows,
+            espBoxes = cachedEspBoxes,
             adminEspEnabled = isLocalAdmin && adminEspEnabled,
             adminAutoAimEnabled = isLocalAdmin && adminAutoAimEnabled,
             xpToastText = if (xpToastTimer > 0f) xpToastText else ""

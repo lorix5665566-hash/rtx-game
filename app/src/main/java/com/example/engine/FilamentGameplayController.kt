@@ -96,6 +96,12 @@ class FilamentGameplayController(
     private val bulletHolePool = ArrayList<LoadedGlbModel>(48)
     private val bulletTracerPool = ArrayList<LoadedGlbModel>(12)
 
+    // Mirage Palace climbable sandstone stairs (11 steps) + breakable CT-Mid iron grate (12 bars/frame)
+    private val mirageStairPool = ArrayList<LoadedGlbModel>(11)
+    private val mirageGratePool = ArrayList<LoadedGlbModel>(12)
+    private var miragePropsPlacedMap: ArenaMapId? = null
+    private var lastMirageGrateBroken: Boolean = false
+
     private var lastGraphics: GraphicsSettings? = null
     private var activeSurface: Surface? = null
     private var appliedSurfaceFps: Int = 0
@@ -260,6 +266,18 @@ class FilamentGameplayController(
             FilamentSceneHelpers.configureViewmodelRenderables(engine, tr)
             bulletTracerPool.add(tr)
         }
+        val stairBuf = FilamentSceneHelpers.createUnitBoxGlbBuffer(
+            baseR = 0.78f, baseG = 0.67f, baseB = 0.50f, metallic = 0.04f, roughness = 0.86f
+        )
+        mirageStairPool.addAll(
+            FilamentSceneHelpers.loadInstancedGlb(assetLoader, resourceLoader, stairBuf, count = 11)
+        )
+        val grateBuf = FilamentSceneHelpers.createUnitBoxGlbBuffer(
+            baseR = 0.24f, baseG = 0.27f, baseB = 0.30f, metallic = 0.85f, roughness = 0.34f
+        )
+        mirageGratePool.addAll(
+            FilamentSceneHelpers.loadInstancedGlb(assetLoader, resourceLoader, grateBuf, count = 12)
+        )
         reloadDynamicSlots()
     }
 
@@ -350,7 +368,69 @@ class FilamentGameplayController(
             FilamentSceneHelpers.destroySkyRig(engine, scene, prevRig)
 
             loadedMapId = targetMap
+            miragePropsPlacedMap = null
             lastGraphics = null // Re-apply map-matched atmospheric fog tint
+        }
+        updateMirageWorldProps()
+    }
+
+    private fun updateMirageWorldProps() {
+        val isMirage = (loadedMapId == ArenaMapId.MIRAGE) && !isCustomMap
+        val grateBroken = !isMirage || gameEngine.world.isBreakableBroken("mirage_ct_mid_grate")
+        if (miragePropsPlacedMap != loadedMapId || lastMirageGrateBroken != grateBroken) {
+            miragePropsPlacedMap = loadedMapId
+            lastMirageGrateBroken = grateBroken
+            val tm = engine.transformManager
+            for (i in 0 until mirageStairPool.size) {
+                val m = mirageStairPool[i]
+                FilamentSceneHelpers.setAssetVisible(scene, m, isMirage)
+                if (isMirage) {
+                    val t = i.toFloat() / (mirageStairPool.size - 1).coerceAtLeast(1)
+                    val sx = 8.65f + t * 4.35f
+                    val stepTop = -0.20f + ((i + 1).toFloat() / mirageStairPool.size) * 2.62f
+                    val height = (stepTop - (-0.30f)).coerceAtLeast(0.24f)
+                    Matrix.setIdentityM(tmpMat, 0)
+                    Matrix.translateM(tmpMat, 0, sx, -0.30f + height * 0.5f, 23.6f)
+                    Matrix.scaleM(tmpMat, 0, 0.46f, height, 1.85f)
+                    tm.setTransform(tm.getInstance(m.rootEntity), tmpMat)
+                }
+            }
+            val grateVisible = isMirage && !grateBroken
+            val barrier = gameEngine.world.breakableBarriers.firstOrNull { it.id == "mirage_ct_mid_grate" }
+            for (i in 0 until mirageGratePool.size) {
+                val m = mirageGratePool[i]
+                FilamentSceneHelpers.setAssetVisible(scene, m, grateVisible)
+                if (grateVisible && barrier != null) {
+                    val w = barrier.maxX - barrier.minX
+                    val h = barrier.maxY - barrier.minY
+                    val zc = barrier.centerZ
+                    Matrix.setIdentityM(tmpMat, 0)
+                    when {
+                        i < 9 -> {
+                            // 9 vertical iron bars spanning CT-Mid passage
+                            val bx = barrier.minX + 0.16f + (i / 8f) * (w - 0.32f)
+                            Matrix.translateM(tmpMat, 0, bx, barrier.centerY, zc)
+                            Matrix.scaleM(tmpMat, 0, 0.08f, h, 0.08f)
+                        }
+                        i == 9 -> {
+                            // Top horizontal steel crossbar
+                            Matrix.translateM(tmpMat, 0, barrier.centerX, barrier.maxY - 0.08f, zc)
+                            Matrix.scaleM(tmpMat, 0, w, 0.12f, 0.14f)
+                        }
+                        i == 10 -> {
+                            // Middle steel lock crossbar
+                            Matrix.translateM(tmpMat, 0, barrier.centerX, barrier.centerY, zc)
+                            Matrix.scaleM(tmpMat, 0, w, 0.10f, 0.12f)
+                        }
+                        else -> {
+                            // Bottom steel sill
+                            Matrix.translateM(tmpMat, 0, barrier.centerX, barrier.minY + 0.06f, zc)
+                            Matrix.scaleM(tmpMat, 0, w, 0.12f, 0.14f)
+                        }
+                    }
+                    tm.setTransform(tm.getInstance(m.rootEntity), tmpMat)
+                }
+            }
         }
     }
 
@@ -403,6 +483,8 @@ class FilamentGameplayController(
         tPool.asReversed().forEach { destroyModel(it) }; tPool.clear()
         bulletHolePool.asReversed().forEach { destroyModel(it) }; bulletHolePool.clear()
         bulletTracerPool.asReversed().forEach { destroyModel(it) }; bulletTracerPool.clear()
+        mirageStairPool.asReversed().forEach { destroyModel(it) }; mirageStairPool.clear()
+        mirageGratePool.asReversed().forEach { destroyModel(it) }; mirageGratePool.clear()
 
         runCatching { resourceLoader.destroy() }
         runCatching { assetLoader.destroy() }
@@ -737,19 +819,23 @@ class FilamentGameplayController(
             val botShooting = !b.isDead && b.fireCooldown > b.weapon.fireIntervalSec * 0.55f && b.hasLineOfSight
             val botAnimClock = gameEngine.timeSec + b.id * 0.37f
 
+            val settledCorpse = b.isDead && b.deathProgress >= 0.995f
+            val needsRootTransform = !model.inScene || !settledCorpse || !model.deathPoseSettled
             FilamentSceneHelpers.setAssetVisible(scene, model, true)
-            FilamentSceneHelpers.buildCharacterMatrix(
-                out = tmpMat,
-                model = model,
-                x = b.x,
-                y = b.y,
-                z = b.z,
-                yawDeg = b.visualYawDeg,
-                deathProgress = b.deathProgress,
-                targetHeight = 1.76f,
-                isCustomImported = isCustomChar
-            )
-            tm.setTransform(tm.getInstance(model.rootEntity), tmpMat)
+            if (needsRootTransform) {
+                FilamentSceneHelpers.buildCharacterMatrix(
+                    out = tmpMat,
+                    model = model,
+                    x = b.x,
+                    y = b.y,
+                    z = b.z,
+                    yawDeg = b.visualYawDeg,
+                    deathProgress = b.deathProgress,
+                    targetHeight = 1.76f,
+                    isCustomImported = isCustomChar
+                )
+                tm.setTransform(tm.getInstance(model.rootEntity), tmpMat)
+            }
 
             val dx = b.x - px
             val dz = b.z - pz

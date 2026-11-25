@@ -35,6 +35,7 @@ import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Gamepad
 import androidx.compose.material.icons.filled.GraphicEq
 import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.material.icons.filled.Security
 import androidx.compose.material.icons.filled.Tune
 import androidx.compose.material.icons.filled.Visibility
 import androidx.compose.material3.Button
@@ -83,6 +84,8 @@ import kotlin.math.roundToInt
 @Composable
 fun SettingsScreen(
     settings: GameSettings,
+    isAdmin: Boolean = false,
+    onOpenAdminPanel: () -> Unit = {},
     onApplyPreset: (GraphicsPreset) -> Unit,
     onUpdateGraphics: (GraphicsSettings) -> Unit,
     onUpdateSensitivity: (SensitivitySettings) -> Unit,
@@ -196,6 +199,34 @@ fun SettingsScreen(
                             )
                         }
                     }
+                    if (isAdmin) {
+                        val adminShape = CutCornerShape(topStart = m.s(7f), bottomEnd = m.s(7f))
+                        Row(
+                            modifier = Modifier
+                                .clip(adminShape)
+                                .background(ThreatCrimson.copy(alpha = 0.22f))
+                                .border(1.4.dp, ThreatCrimson, adminShape)
+                                .clickable(onClick = onOpenAdminPanel)
+                                .padding(horizontal = m.s(11f), vertical = m.s(8f))
+                                .testTag("settings_header_admin_button"),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(m.s(5f))
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.Security,
+                                contentDescription = "Админ-панель",
+                                tint = ThreatCrimson,
+                                modifier = Modifier.size(m.s(15f))
+                            )
+                            Text(
+                                text = "АДМИН",
+                                fontSize = m.sp(10.5f),
+                                fontWeight = FontWeight.Black,
+                                color = ThreatCrimson,
+                                maxLines = 1
+                            )
+                        }
+                    }
                 }
             }
 
@@ -230,6 +261,8 @@ fun SettingsScreen(
                         )
                         else -> AudioAndHudSection(
                             audio = settings.audio,
+                            isAdmin = isAdmin,
+                            onOpenAdminPanel = onOpenAdminPanel,
                             onUpdateAudio = onUpdateAudio,
                             onOpenControlEditor = onOpenControlEditor,
                             onResetAll = onResetAll
@@ -522,6 +555,8 @@ private fun SensitivitySettingsSection(
 @Composable
 private fun AudioAndHudSection(
     audio: AudioSettings,
+    isAdmin: Boolean,
+    onOpenAdminPanel: () -> Unit,
     onUpdateAudio: (AudioSettings) -> Unit,
     onOpenControlEditor: () -> Unit,
     onResetAll: () -> Unit
@@ -530,7 +565,10 @@ private fun AudioAndHudSection(
         modifier = Modifier.fillMaxWidth(),
         horizontalArrangement = Arrangement.spacedBy(12.dp)
     ) {
-        Box(modifier = Modifier.weight(1f)) {
+        Column(
+            modifier = Modifier.weight(1f),
+            verticalArrangement = Arrangement.spacedBy(10.dp)
+        ) {
             SettingsCard(title = "ЗВУК И ВИБРООТКЛИК", icon = {
                 Icon(Icons.Default.GraphicEq, contentDescription = null, tint = RtxEmerald, modifier = Modifier.size(18.dp))
             }) {
@@ -548,6 +586,34 @@ private fun AudioAndHudSection(
                     onCheckedChange = { onUpdateAudio(audio.copy(hapticsEnabled = it)) },
                     tag = "toggle_haptics"
                 )
+            }
+
+            if (isAdmin) {
+                SettingsCard(title = "АДМИНИСТРИРОВАНИЕ", icon = {
+                    Icon(Icons.Default.Security, contentDescription = null, tint = ThreatCrimson, modifier = Modifier.size(18.dp))
+                }) {
+                    Text(
+                        text = "Доступ администратора (developer): баны аккаунтов и устройств, выдача скинов/EXP, ESP и автонаводка.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = TextSecondary
+                    )
+                    Button(
+                        onClick = onOpenAdminPanel,
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = ThreatCrimson,
+                            contentColor = TextPrimary
+                        ),
+                        shape = CutCornerShape(topStart = 10.dp, bottomEnd = 10.dp),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(48.dp)
+                            .testTag("settings_open_admin_panel")
+                    ) {
+                        Icon(Icons.Default.Security, contentDescription = null, modifier = Modifier.size(18.dp))
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text("ОТКРЫТЬ АДМИН-ПАНЕЛЬ", style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.Black)
+                    }
+                }
             }
         }
 

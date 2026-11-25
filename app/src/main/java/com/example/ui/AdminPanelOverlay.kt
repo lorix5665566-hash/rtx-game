@@ -39,6 +39,8 @@ import androidx.compose.material.icons.filled.GpsFixed
 import androidx.compose.material.icons.filled.PersonRemove
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Security
+import androidx.compose.material.icons.filled.Smartphone
+import androidx.compose.material.icons.filled.SystemUpdate
 import androidx.compose.material.icons.filled.Visibility
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
@@ -79,6 +81,8 @@ import com.example.model.SkinCatalog
 import com.example.model.TeamSide
 import com.example.model.WeaponType
 import com.example.online.ADMIN_SHORT_ID
+import com.example.online.BannedDeviceEntry
+import com.example.online.ClientAccessStatus
 import com.example.online.PlayerMatchState
 import com.example.online.PlayerProfile
 import com.example.online.isValidPlayerShortId
@@ -233,6 +237,7 @@ fun AdminPanelOverlay(
     lobbyMembers: List<PlayerMatchState>,
     scoreboardRows: List<ScoreboardRow>,
     bannedAccounts: List<PlayerProfile>,
+    bannedDevices: List<BannedDeviceEntry> = emptyList(),
     isBusy: Boolean,
     statusMessage: String?,
     onRefreshBanned: () -> Unit,
@@ -240,6 +245,8 @@ fun AdminPanelOverlay(
     onKickBot: (botId: Int) -> Unit,
     onBanAccount: (shortId: String, reason: String, targetUid: String) -> Unit,
     onUnbanAccount: (shortId: String) -> Unit,
+    onSetDeviceBanByAccount: (shortId: String, banned: Boolean) -> Unit = { _, _ -> },
+    onUnbanDeviceHash: (deviceHash: String) -> Unit = {},
     onGrantXp: (targetShortId: String, xpAmount: Int) -> Unit,
     onGrantSkins: (targetShortId: String, skinIds: List<String>) -> Unit,
     onClearStatus: () -> Unit,
@@ -1106,7 +1113,7 @@ fun AdminPanelOverlay(
                                                 verticalAlignment = Alignment.CenterVertically,
                                                 horizontalArrangement = Arrangement.SpaceBetween
                                             ) {
-                                                Column(modifier = Modifier.weight(1f)) {
+                                                Column(modifier = Modifier.weight(1f).padding(end = 8.dp)) {
                                                     Text(
                                                         text = "${acc.displayName} • ID ${acc.shortId}",
                                                         fontSize = 12.5.sp,
@@ -1120,18 +1127,139 @@ fun AdminPanelOverlay(
                                                         maxLines = 2,
                                                         overflow = TextOverflow.Ellipsis
                                                     )
+                                                    val deviceHint = when {
+                                                        acc.deviceBanned -> "Устройство: ЗАБЛОКИРОВАНО (${acc.lastDeviceHash.take(8)}…)"
+                                                        acc.lastDeviceHash.isNotBlank() -> "Устройство: ${acc.lastDeviceHash.take(8)}…"
+                                                        else -> "Устройство ещё не зафиксировано"
+                                                    }
+                                                    Text(
+                                                        text = deviceHint,
+                                                        fontSize = 9.5.sp,
+                                                        fontWeight = FontWeight.SemiBold,
+                                                        color = if (acc.deviceBanned) TacticalAmber else TextSecondary
+                                                    )
                                                 }
-                                                Button(
-                                                    onClick = { onUnbanAccount(acc.shortId) },
+                                                Row(
+                                                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                                                    verticalAlignment = Alignment.CenterVertically
+                                                ) {
+                                                    Button(
+                                                        onClick = {
+                                                            onSetDeviceBanByAccount(acc.shortId, !acc.deviceBanned)
+                                                        },
+                                                        enabled = !isBusy && (acc.deviceBanned || acc.lastDeviceHash.isNotBlank()),
+                                                        colors = ButtonDefaults.buttonColors(
+                                                            containerColor = if (acc.deviceBanned) TacticalAmber else ThreatCrimson,
+                                                            contentColor = if (acc.deviceBanned) ObsidianVoid else Color.White
+                                                        ),
+                                                        shape = RoundedCornerShape(6.dp),
+                                                        modifier = Modifier
+                                                            .height(48.dp)
+                                                            .testTag("admin_device_ban_row_${acc.shortId}")
+                                                    ) {
+                                                        Icon(
+                                                            imageVector = Icons.Default.Smartphone,
+                                                            contentDescription = null,
+                                                            modifier = Modifier.size(15.dp)
+                                                        )
+                                                        Spacer(Modifier.width(4.dp))
+                                                        Text(
+                                                            text = if (acc.deviceBanned) "РАЗБАН УСТР." else "БАН УСТР.",
+                                                            fontSize = 10.sp,
+                                                            fontWeight = FontWeight.Black
+                                                        )
+                                                    }
+
+                                                    Button(
+                                                        onClick = { onUnbanAccount(acc.shortId) },
+                                                        enabled = !isBusy,
+                                                        colors = ButtonDefaults.buttonColors(containerColor = RtxEmerald),
+                                                        shape = RoundedCornerShape(6.dp),
+                                                        modifier = Modifier
+                                                            .height(48.dp)
+                                                            .testTag("admin_unban_row_${acc.shortId}")
+                                                    ) {
+                                                        Text(
+                                                            text = "РАЗБАНИТЬ",
+                                                            color = Color(0xFF04140E),
+                                                            fontSize = 10.5.sp,
+                                                            fontWeight = FontWeight.Black
+                                                        )
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        // Banned Devices Roster
+                        Surface(
+                            color = ObsidianVoid.copy(alpha = 0.72f),
+                            shape = RoundedCornerShape(10.dp),
+                            border = BorderStroke(1.dp, TacticalAmber.copy(alpha = 0.45f)),
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Column(
+                                modifier = Modifier.padding(12.dp),
+                                verticalArrangement = Arrangement.spacedBy(8.dp)
+                            ) {
+                                Text(
+                                    text = "ЗАБЛОКИРОВАННЫЕ УСТРОЙСТВА (${bannedDevices.size})",
+                                    fontSize = 11.5.sp,
+                                    fontWeight = FontWeight.Black,
+                                    color = TacticalAmber
+                                )
+                                if (bannedDevices.isEmpty()) {
+                                    Text(
+                                        text = "Заблокированных устройств пока нет. Забаньте устройство рядом с забаненным аккаунтом выше.",
+                                        fontSize = 11.sp,
+                                        color = TextSecondary
+                                    )
+                                } else {
+                                    bannedDevices.forEach { dev ->
+                                        Surface(
+                                            color = ElevatedGunmetal,
+                                            shape = RoundedCornerShape(8.dp),
+                                            border = BorderStroke(1.dp, TacticalAmber.copy(alpha = 0.45f)),
+                                            modifier = Modifier.fillMaxWidth()
+                                        ) {
+                                            Row(
+                                                modifier = Modifier
+                                                    .fillMaxWidth()
+                                                    .padding(horizontal = 10.dp, vertical = 8.dp),
+                                                verticalAlignment = Alignment.CenterVertically,
+                                                horizontalArrangement = Arrangement.SpaceBetween
+                                            ) {
+                                                Column(modifier = Modifier.weight(1f).padding(end = 8.dp)) {
+                                                    Text(
+                                                        text = "Устройство #${dev.deviceHash.take(12)}… • ID ${dev.bannedShortId.ifBlank { "—" }}",
+                                                        fontSize = 11.5.sp,
+                                                        fontWeight = FontWeight.Bold,
+                                                        color = TextPrimary
+                                                    )
+                                                    Text(
+                                                        text = dev.reason.ifBlank { "Бан устройства администратором" },
+                                                        fontSize = 10.sp,
+                                                        color = ThreatCrimson,
+                                                        maxLines = 2,
+                                                        overflow = TextOverflow.Ellipsis
+                                                    )
+                                                }
+                                                OutlinedButton(
+                                                    onClick = { onUnbanDeviceHash(dev.deviceHash) },
                                                     enabled = !isBusy,
-                                                    colors = ButtonDefaults.buttonColors(containerColor = RtxEmerald),
+                                                    border = BorderStroke(1.dp, RtxEmerald),
                                                     shape = RoundedCornerShape(6.dp),
-                                                    modifier = Modifier.testTag("admin_unban_row_${acc.shortId}")
+                                                    modifier = Modifier
+                                                        .height(48.dp)
+                                                        .testTag("admin_unban_device_${dev.deviceHash.take(8)}")
                                                 ) {
                                                     Text(
-                                                        text = "РАЗБАНИТЬ",
-                                                        color = Color(0xFF04140E),
-                                                        fontSize = 11.sp,
+                                                        text = "РАЗБАН УСТР.",
+                                                        color = RtxEmerald,
+                                                        fontSize = 10.5.sp,
                                                         fontWeight = FontWeight.Black
                                                     )
                                                 }
@@ -1324,3 +1452,168 @@ fun BannedAccountScreen(
         }
     }
 }
+
+/**
+ * Full-screen mandatory update blocker when the client build is older than server `min_version_code`.
+ */
+@Composable
+fun UpdateRequiredScreen(
+    accessStatus: ClientAccessStatus,
+    onRetry: () -> Unit
+) {
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(ObsidianVoid)
+            .safeDrawingPadding()
+            .padding(24.dp),
+        contentAlignment = Alignment.Center
+    ) {
+        Surface(
+            color = TacticalSurface,
+            shape = CutCornerShape(topStart = 18.dp, bottomEnd = 18.dp),
+            border = BorderStroke(2.dp, TacticalAmber),
+            modifier = Modifier.widthIn(max = 480.dp)
+        ) {
+            Column(
+                modifier = Modifier.padding(24.dp),
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.spacedBy(12.dp)
+            ) {
+                Icon(
+                    imageVector = Icons.Default.SystemUpdate,
+                    contentDescription = "Требуется обновление",
+                    tint = TacticalAmber,
+                    modifier = Modifier.size(54.dp)
+                )
+                Text(
+                    text = "ТРЕБУЕТСЯ ОБНОВЛЕНИЕ",
+                    fontSize = 18.sp,
+                    fontWeight = FontWeight.Black,
+                    color = TacticalAmber,
+                    textAlign = TextAlign.Center
+                )
+                Text(
+                    text = "Ваша версия: v${com.example.BuildConfig.VERSION_NAME} (сборка ${com.example.BuildConfig.VERSION_CODE})\nАктуальная версия: v${accessStatus.latestVersionName} (сборка ${accessStatus.minVersionCode})",
+                    fontSize = 12.sp,
+                    fontWeight = FontWeight.Bold,
+                    color = IceCyan,
+                    textAlign = TextAlign.Center
+                )
+                Text(
+                    text = accessStatus.updateMessage.ifBlank {
+                        "Для входа в игру и онлайн-матчи необходимо установить самую последнюю версию Vanguard RTX."
+                    },
+                    fontSize = 13.sp,
+                    color = TextPrimary,
+                    textAlign = TextAlign.Center
+                )
+                Spacer(Modifier.height(4.dp))
+                Button(
+                    onClick = onRetry,
+                    colors = ButtonDefaults.buttonColors(containerColor = TacticalAmber, contentColor = ObsidianVoid),
+                    shape = CutCornerShape(topStart = 8.dp, bottomEnd = 8.dp),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(48.dp)
+                        .testTag("update_required_retry")
+                ) {
+                    Icon(Icons.Default.Refresh, contentDescription = null, modifier = Modifier.size(18.dp))
+                    Spacer(Modifier.width(8.dp))
+                    Text("ПРОВЕРИТЬ ВЕРСИЮ", fontWeight = FontWeight.Black, fontSize = 12.sp)
+                }
+            }
+        }
+    }
+}
+
+/**
+ * Full-screen hardware/device ban lockout preventing login and new account creation.
+ */
+@Composable
+fun DeviceBannedScreen(
+    banReason: String,
+    onRetry: () -> Unit,
+    onSignOut: (() -> Unit)? = null
+) {
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(ObsidianVoid)
+            .safeDrawingPadding()
+            .padding(24.dp),
+        contentAlignment = Alignment.Center
+    ) {
+        Surface(
+            color = TacticalSurface,
+            shape = CutCornerShape(topStart = 18.dp, bottomEnd = 18.dp),
+            border = BorderStroke(2.dp, ThreatCrimson),
+            modifier = Modifier.widthIn(max = 480.dp)
+        ) {
+            Column(
+                modifier = Modifier.padding(24.dp),
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.spacedBy(12.dp)
+            ) {
+                Icon(
+                    imageVector = Icons.Default.Smartphone,
+                    contentDescription = "Устройство заблокировано",
+                    tint = ThreatCrimson,
+                    modifier = Modifier.size(54.dp)
+                )
+                Text(
+                    text = "УСТРОЙСТВО ЗАБЛОКИРОВАНО",
+                    fontSize = 18.sp,
+                    fontWeight = FontWeight.Black,
+                    color = ThreatCrimson,
+                    textAlign = TextAlign.Center
+                )
+                Text(
+                    text = banReason.ifBlank { "Доступ с этого устройства заблокирован администратором сервера." },
+                    fontSize = 13.sp,
+                    color = TextPrimary,
+                    textAlign = TextAlign.Center
+                )
+                Text(
+                    text = "Вход в существующие аккаунты и создание новых аккаунтов на этом устройстве невозможны.",
+                    fontSize = 11.5.sp,
+                    color = TextSecondary,
+                    textAlign = TextAlign.Center
+                )
+                Spacer(Modifier.height(4.dp))
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(10.dp)
+                ) {
+                    OutlinedButton(
+                        onClick = onRetry,
+                        border = BorderStroke(1.dp, RtxEmerald),
+                        modifier = Modifier
+                            .weight(1f)
+                            .height(48.dp)
+                            .testTag("device_banned_retry")
+                    ) {
+                        Icon(Icons.Default.Refresh, contentDescription = null, tint = RtxEmerald, modifier = Modifier.size(18.dp))
+                        Spacer(Modifier.width(6.dp))
+                        Text("ПРОВЕРИТЬ", color = RtxEmerald, fontWeight = FontWeight.Bold, fontSize = 12.sp)
+                    }
+                    if (onSignOut != null) {
+                        Button(
+                            onClick = onSignOut,
+                            colors = ButtonDefaults.buttonColors(containerColor = ThreatCrimson),
+                            modifier = Modifier
+                                .weight(1f)
+                                .height(48.dp)
+                                .testTag("device_banned_sign_out")
+                        ) {
+                            Icon(Icons.Default.ExitToApp, contentDescription = null, modifier = Modifier.size(18.dp))
+                            Spacer(Modifier.width(6.dp))
+                            Text("ВЫЙТИ", fontWeight = FontWeight.Black, fontSize = 12.sp)
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+

@@ -33,7 +33,8 @@ sealed interface AuthActionResult {
  */
 class SupabaseAuthManager(context: Context) {
 
-    private val prefs = context.applicationContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+    private val appContext = context.applicationContext
+    private val prefs = appContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
     private val refreshMutex = Mutex()
 
     private val _session = MutableStateFlow<SupabaseSession?>(loadPersistedSession())
@@ -42,6 +43,52 @@ class SupabaseAuthManager(context: Context) {
     val isConfigured: Boolean
         get() = SupabaseConfig.isConfigured
 
+    fun deviceHash(): String = DeviceIdProvider.getDeviceHash(appContext)
+
+    /**
+     * Verifies both mandatory latest version (`BuildConfig.VERSION_CODE >= min_version_code`)
+     * and whether the current hardware device hash is banned on the server.
+     */
+    suspend fun checkClientAccess(): ClientAccessStatus = withContext(Dispatchers.IO) {
+        if (!SupabaseConfig.isConfigured) return@withContext ClientAccessStatus(allowed = true, checked = false)
+        val token = _session.value?.accessToken?.takeIf { it.isNotBlank() }
+        val payload = JSONObject().apply {
+            put("p_version_code", com.example.BuildConfig.VERSION_CODE)
+            put("p_device_hash", deviceHash())
+        }
+        val builder = SupabaseConfig.applyPublicAuthHeaders(
+            Request.Builder()
+                .url("${SupabaseConfig.baseUrl}/rest/v1/rpc/check_client_access")
+                .addHeader("Content-Type", "application/json")
+        )
+        if (token != null) {
+            builder.header("Authorization", "Bearer $token")
+        }
+        val req = builder.post(payload.toString().toRequestBody(JSON_MEDIA)).build()
+        runCatching {
+            SupabaseConfig.httpClient.newCall(req).execute().use { resp ->
+                if (!resp.isSuccessful) {
+                    return@use ClientAccessStatus(allowed = true, checked = false)
+                }
+                val text = resp.body?.string().orEmpty().trim()
+                val json = runCatching { JSONObject(text) }.getOrNull()
+                    ?: return@use ClientAccessStatus(allowed = true, checked = false)
+                ClientAccessStatus(
+                    allowed = json.optBoolean("allowed", true),
+                    updateRequired = json.optBoolean("update_required", false),
+                    minVersionCode = json.optInt("min_version_code", com.example.BuildConfig.VERSION_CODE),
+                    latestVersionName = json.optString("latest_version_name", com.example.BuildConfig.VERSION_NAME),
+                    updateMessage = json.optString("update_message", ""),
+                    deviceBanned = json.optBoolean("device_banned", false),
+                    banReason = json.optString("ban_reason", ""),
+                    checked = true
+                )
+            }
+        }.getOrElse {
+            ClientAccessStatus(allowed = true, checked = false)
+        }
+    }
+
     suspend fun register(
         rawLogin: String,
         password: String,
@@ -49,6 +96,17 @@ class SupabaseAuthManager(context: Context) {
     ): AuthActionResult = withContext(Dispatchers.IO) {
         SupabaseConfig.configValidationError()?.let {
             return@withContext AuthActionResult.Error(it)
+        }
+        val access = checkClientAccess()
+        if (access.updateRequired) {
+            return@withContext AuthActionResult.Error(
+                "Требуется последняя версия ${access.latestVersionName}. Обновите игру, чтобы продолжить."
+            )
+        }
+        if (access.deviceBanned) {
+            return@withContext AuthActionResult.Error(
+                "Это устройство заблокировано (${access.banReason.ifBlank { "решение администратора" }}). Создание новых аккаунтов запрещено."
+            )
         }
         val login = rawLogin.trim()
         val validationError = validateCredentials(login, password)
@@ -61,7 +119,10 @@ class SupabaseAuthManager(context: Context) {
         val body = JSONObject().apply {
             put("email", syntheticEmail)
             put("password", password)
-            put("data", JSONObject().apply { put("display_name", login) })
+            put("data", JSONObject().apply {
+                put("display_name", login)
+                put("device_hash", deviceHash())
+            })
         }
 
         val req = SupabaseConfig.applyPublicAuthHeaders(
@@ -101,6 +162,12 @@ class SupabaseAuthManager(context: Context) {
         SupabaseConfig.configValidationError()?.let {
             return@withContext AuthActionResult.Error(it)
         }
+        val access = checkClientAccess()
+        if (access.updateRequired) {
+            return@withContext AuthActionResult.Error(
+                "Требуется последняя версия ${access.latestVersionName}. Обновите игру, чтобы продолжить."
+            )
+        }
         val login = rawLogin.trim()
         val validationError = validateCredentials(login, password)
         if (validationError != null) return@withContext AuthActionResult.Error(validationError)
@@ -129,6 +196,13 @@ class SupabaseAuthManager(context: Context) {
                 val parsed = parseSession(json, fallbackLogin = login)
                     ?: return@use AuthActionResult.Error("Сервер вернул некорректную сессию.")
                 saveSession(parsed)
+                val postAccess = checkClientAccess()
+                if (postAccess.deviceBanned) {
+                    logout()
+                    return@use AuthActionResult.Error(
+                        "Это устройство заблокировано (${postAccess.banReason.ifBlank { "решение администратора" }})."
+                    )
+                }
                 AuthActionResult.Success(parsed)
             }
         }.getOrElse { err ->
