@@ -2064,8 +2064,16 @@ class GameEngine(
             radius = 0.36f,
             actualFeetY = playerY
         )
-        playerX = resolvedX
-        playerZ = resolvedZ
+        val maxDisplacement = baseSpeed * dt * 1.12f
+        val moveDist = sqrt((resolvedX - playerX) * (resolvedX - playerX) + (resolvedZ - playerZ) * (resolvedZ - playerZ))
+        if (moveDist > maxDisplacement && moveDist > 0.001f) {
+            val ratio = maxDisplacement / moveDist
+            playerX += (resolvedX - playerX) * ratio
+            playerZ += (resolvedZ - playerZ) * ratio
+        } else {
+            playerX = resolvedX
+            playerZ = resolvedZ
+        }
         playerFloorY = floorY
 
         if (pendingJump) {

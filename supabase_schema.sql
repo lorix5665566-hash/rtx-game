@@ -1,5 +1,5 @@
 -- ============================================================================
--- Vanguard RTX v0.09beta — Supabase Cloud Multiplayer, Security & Skins Schema
+-- Vanguard RTX v0.10beta — Supabase Cloud Multiplayer, Security & Skins Schema
 -- Paste this entire script into Supabase Dashboard -> SQL Editor -> Run.
 -- Also set: Authentication -> Providers -> Email -> Confirm email = OFF
 -- ============================================================================
@@ -115,22 +115,22 @@ revoke all on function private_security.seal_text(text) from public, anon, authe
 revoke all on function private_security.unseal_text(text) from public, anon, authenticated;
 
 -- ----------------------------------------------------------------------------
--- 0. Global App Version Policy (enforces exact latest build v0.09beta!)
+-- 0. Global App Version Policy (enforces exact latest build v0.10beta!)
 -- ----------------------------------------------------------------------------
 create table if not exists public.app_config (
     id integer primary key default 1 check (id = 1),
-    min_version_code integer not null default 9,
-    latest_version_name text not null default '0.09beta',
-    update_message text not null default 'Доступна только последняя версия Vanguard RTX v0.09beta. Обновите игру, чтобы войти или зарегистрироваться.',
+    min_version_code integer not null default 10,
+    latest_version_name text not null default '0.10beta',
+    update_message text not null default 'Доступна только последняя версия Vanguard RTX v0.10beta. Обновите игру, чтобы войти или зарегистрироваться.',
     updated_at timestamptz not null default now()
 );
 
 insert into public.app_config (id, min_version_code, latest_version_name, update_message)
 values (
     1,
-    9,
-    '0.09beta',
-    'Доступна только последняя версия Vanguard RTX v0.09beta. Обновите игру, чтобы войти или зарегистрироваться.'
+    10,
+    '0.10beta',
+    'Доступна только последняя версия Vanguard RTX v0.10beta. Обновите игру, чтобы войти или зарегистрироваться.'
 )
 on conflict (id) do update
 set min_version_code = greatest(public.app_config.min_version_code, excluded.min_version_code),
@@ -303,6 +303,85 @@ alter table public.lobby_members add column if not exists level integer not null
 alter table public.lobby_members add column if not exists equipped_skins jsonb not null default '{}'::jsonb;
 
 create index if not exists idx_lobby_members_lobby on public.lobby_members(lobby_id);
+
+-- Anti-cheat validation trigger for live match telemetry
+create or replace function public.enforce_lobby_member_anti_cheat()
+returns trigger
+language plpgsql
+security definer
+set search_path = public, extensions, private_security
+as $$
+declare
+    v_prof public.profiles%rowtype;
+    v_owned jsonb;
+    v_sanitized_skins jsonb := '{}'::jsonb;
+    v_weapon text;
+    v_skin_id text;
+    v_dt double precision;
+    v_dist double precision;
+begin
+    -- 1. Anti-ban bypass: Banned accounts cannot participate in matches
+    select * into v_prof from public.profiles where user_id = new.user_id;
+    if found and v_prof.banned = true and v_prof.short_id <> 'developer' then
+        raise exception 'PLAYER_BANNED: Аккаунт заблокирован';
+    end if;
+
+    -- 2. Anti-level spoofing: Player cannot spoof level in lobby
+    if found then
+        new.level := v_prof.level;
+    end if;
+
+    -- 3. Anti-skin spoofing: Only allow skins the player actually owns
+    if found then
+        v_owned := coalesce(v_prof.owned_skins, '[]'::jsonb);
+        if new.equipped_skins is not null and jsonb_typeof(new.equipped_skins) = 'object' then
+            for v_weapon, v_skin_id in select * from jsonb_each_text(new.equipped_skins) loop
+                if v_skin_id = '' or (v_owned ? v_skin_id) or v_prof.short_id = 'developer' then
+                    v_sanitized_skins := jsonb_set(v_sanitized_skins, array[v_weapon], to_jsonb(v_skin_id), true);
+                end if;
+            end loop;
+            new.equipped_skins := v_sanitized_skins;
+        end if;
+    end if;
+
+    -- 4. Anti-illegal weapon check
+    if new.weapon not in ('AK47', 'M4A1_S', 'AWP', 'DESERT_EAGLE', 'GLOCK_18', 'USP_S', 'MP9', 'P90', 'KNIFE', 'C4_BOMB') then
+        new.weapon := 'GLOCK_18';
+    end if;
+
+    -- 5. Anti-godmode / health clamp
+    new.hp := least(greatest(coalesce(new.hp, 100), 0), 100);
+    if new.hp = 0 then
+        new.dead := true;
+    end if;
+
+    -- 6. Anti-teleport / speedhack validation (max plausible velocity including lag spikes: 38 m/s)
+    if tg_op = 'UPDATE' and old is not null then
+        if old.x <> 0 and old.z <> 0 and new.dead = false and old.dead = false then
+            v_dt := extract(epoch from (now() - old.updated_at));
+            if v_dt between 0.02 and 2.5 then
+                v_dist := sqrt(power(new.x - old.x, 2) + power(new.z - old.z, 2));
+                if (v_dist / v_dt) > 38.0 then
+                    new.x := old.x;
+                    new.z := old.z;
+                end if;
+            end if;
+        end if;
+    end if;
+
+    -- 7. Hit telemetry bounds
+    new.hit_damage := least(greatest(coalesce(new.hit_damage, 0), 0), 100);
+
+    new.updated_at := now();
+    return new;
+end;
+$$;
+
+drop trigger if exists trg_enforce_lobby_member_anti_cheat on public.lobby_members;
+create trigger trg_enforce_lobby_member_anti_cheat
+    before insert or update on public.lobby_members
+    for each row
+    execute function public.enforce_lobby_member_anti_cheat();
 
 -- 6. Lobby Invites
 create table if not exists public.lobby_invites (
@@ -807,9 +886,9 @@ declare
 begin
     select * into v_cfg from public.app_config where id = 1;
     if not found then
-        v_cfg.min_version_code := 9;
-        v_cfg.latest_version_name := '0.09beta';
-        v_cfg.update_message := 'Доступна только последняя версия Vanguard RTX v0.09beta. Обновите игру, чтобы войти или зарегистрироваться.';
+        v_cfg.min_version_code := 10;
+        v_cfg.latest_version_name := '0.10beta';
+        v_cfg.update_message := 'Доступна только последняя версия Vanguard RTX v0.10beta. Обновите игру, чтобы войти или зарегистрироваться.';
     end if;
 
     -- Strictly allow ONLY the exact latest build version (blocks older, custom, or mismatched versions!)
@@ -1167,6 +1246,11 @@ begin
     select * into v_prof from public.profiles where user_id = v_uid for update;
     if not found then
         raise exception 'Profile not found';
+    end if;
+
+    -- Anti-cheat rate limit: prevent scripts/exploits spamming award_kill_xp faster than once every 1.5 seconds
+    if v_prof.last_seen_at > now() - interval '1.5 seconds' and v_prof.short_id <> 'developer' then
+        return v_prof;
     end if;
 
     v_new_xp := v_prof.xp + (v_kills * 100)::bigint;
