@@ -76,6 +76,7 @@ class SupabaseOnlineRepository(
                         put("display_name", cleanName)
                         put("avatar_data", AvatarPresets.DEFAULT_KEY)
                         put("online", true)
+                        put("last_device_hash", deviceHash)
                     }
                     val resp = postRest("profiles", payload, prefer = "return=representation")
                     if (resp.isSuccess) {
@@ -95,6 +96,9 @@ class SupabaseOnlineRepository(
                         val err = resp.exceptionOrNull()
                         lastError = err
                         val errMsg = err?.message.orEmpty()
+                        if (errMsg.contains("DEVICE_BANNED", ignoreCase = true)) {
+                            throw IllegalStateException(errMsg)
+                        }
                         if (errMsg.contains("409") || errMsg.contains("duplicate key", ignoreCase = true) || errMsg.contains("23505")) {
                             val alreadyCreated = runCatching { fetchProfileByUid(userId) }.getOrNull()
                             if (alreadyCreated != null) {

@@ -1130,7 +1130,7 @@ fun AdminPanelOverlay(
                                                     val deviceHint = when {
                                                         acc.deviceBanned -> "Устройство: ЗАБЛОКИРОВАНО (${acc.lastDeviceHash.take(8)}…)"
                                                         acc.lastDeviceHash.isNotBlank() -> "Устройство: ${acc.lastDeviceHash.take(8)}…"
-                                                        else -> "Устройство ещё не зафиксировано"
+                                                        else -> "Устройство заблокируется автоматически при входе"
                                                     }
                                                     Text(
                                                         text = deviceHint,

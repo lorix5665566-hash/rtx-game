@@ -70,6 +70,9 @@ class FilamentLobbyController(
     private var ctCharModel: LoadedGlbModel? = null
     private var ak47WeaponModel: LoadedGlbModel? = null
     private var m4WeaponModel: LoadedGlbModel? = null
+    private val mirageStairPool = ArrayList<LoadedGlbModel>(11)
+    private val mirageGratePool = ArrayList<LoadedGlbModel>(12)
+    private var miragePropsMap: ArenaMapId? = null
 
     private var lastGraphics: GraphicsSettings? = null
     private var activeSurface: Surface? = null
@@ -175,6 +178,27 @@ class FilamentLobbyController(
             assetLoader, resourceLoader,
             registry.loadBundledAssetBuffer(ModelSlot.WEAPON_M4A1_S.bundledAssetPath)
         )
+
+        val stairBuf = FilamentSceneHelpers.createUnitBoxGlbBuffer(
+            baseR = 0.78f, baseG = 0.68f, baseB = 0.54f,
+            metallic = 0.0f, roughness = 0.88f
+        )
+        repeat(11) {
+            stairBuf.rewind()
+            FilamentSceneHelpers.loadGlb(assetLoader, resourceLoader, stairBuf)?.let {
+                mirageStairPool.add(it)
+            }
+        }
+        val grateBuf = FilamentSceneHelpers.createUnitBoxGlbBuffer(
+            baseR = 0.24f, baseG = 0.27f, baseB = 0.30f,
+            metallic = 0.85f, roughness = 0.36f
+        )
+        repeat(12) {
+            grateBuf.rewind()
+            FilamentSceneHelpers.loadGlb(assetLoader, resourceLoader, grateBuf)?.let {
+                mirageGratePool.add(it)
+            }
+        }
     }
 
     private fun ensureSelectedMapLoaded() {
@@ -206,10 +230,64 @@ class FilamentLobbyController(
         FilamentSceneHelpers.destroySkyRig(engine, scene, prevRig)
 
         loadedMap = targetMap
+        miragePropsMap = null
         lastGraphics = null
         characterYawDeg = activeWorld.lobbyDefaultCharYawDeg
         yawVelocityDegPerSec = 0f
         turnShuffleState.reset()
+        updateMirageProps()
+    }
+
+    private fun updateMirageProps() {
+        val isMirage = loadedMap == ArenaMapId.MIRAGE
+        if (miragePropsMap == loadedMap) return
+        miragePropsMap = loadedMap
+        val tm = engine.transformManager
+        for (i in 0 until mirageStairPool.size) {
+            val m = mirageStairPool[i]
+            FilamentSceneHelpers.setAssetVisible(scene, m, isMirage)
+            if (isMirage) {
+                val t = i.toFloat() / (mirageStairPool.size - 1).coerceAtLeast(1)
+                val sx = 8.65f + t * 4.35f
+                val stepTop = -0.20f + ((i + 1).toFloat() / mirageStairPool.size) * 2.62f
+                val height = (stepTop - (-0.30f)).coerceAtLeast(0.24f)
+                Matrix.setIdentityM(tmpMat, 0)
+                Matrix.translateM(tmpMat, 0, sx, -0.30f + height * 0.5f, 23.6f)
+                Matrix.scaleM(tmpMat, 0, 0.46f, height, 1.85f)
+                tm.setTransform(tm.getInstance(m.rootEntity), tmpMat)
+            }
+        }
+        val barrier = activeWorld.breakableBarriers.firstOrNull { it.id == "mirage_ct_mid_grate" }
+        for (i in 0 until mirageGratePool.size) {
+            val m = mirageGratePool[i]
+            FilamentSceneHelpers.setAssetVisible(scene, m, isMirage && barrier != null)
+            if (isMirage && barrier != null) {
+                val w = barrier.maxX - barrier.minX
+                val h = barrier.maxY - barrier.minY
+                val zc = barrier.centerZ
+                Matrix.setIdentityM(tmpMat, 0)
+                when {
+                    i < 9 -> {
+                        val bx = barrier.minX + 0.16f + (i / 8f) * (w - 0.32f)
+                        Matrix.translateM(tmpMat, 0, bx, barrier.centerY, zc)
+                        Matrix.scaleM(tmpMat, 0, 0.08f, h, 0.08f)
+                    }
+                    i == 9 -> {
+                        Matrix.translateM(tmpMat, 0, barrier.centerX, barrier.maxY - 0.08f, zc)
+                        Matrix.scaleM(tmpMat, 0, w, 0.12f, 0.14f)
+                    }
+                    i == 10 -> {
+                        Matrix.translateM(tmpMat, 0, barrier.centerX, barrier.centerY, zc)
+                        Matrix.scaleM(tmpMat, 0, w, 0.10f, 0.12f)
+                    }
+                    else -> {
+                        Matrix.translateM(tmpMat, 0, barrier.centerX, barrier.minY + 0.06f, zc)
+                        Matrix.scaleM(tmpMat, 0, w, 0.12f, 0.14f)
+                    }
+                }
+                tm.setTransform(tm.getInstance(m.rootEntity), tmpMat)
+            }
+        }
     }
 
     fun start() {
@@ -246,6 +324,8 @@ class FilamentLobbyController(
         destroyModel(ctCharModel); ctCharModel = null
         destroyModel(ak47WeaponModel); ak47WeaponModel = null
         destroyModel(m4WeaponModel); m4WeaponModel = null
+        mirageStairPool.asReversed().forEach { destroyModel(it) }; mirageStairPool.clear()
+        mirageGratePool.asReversed().forEach { destroyModel(it) }; mirageGratePool.clear()
 
         runCatching { resourceLoader.destroy() }
         runCatching { assetLoader.destroy() }
@@ -346,6 +426,8 @@ class FilamentLobbyController(
             lastGraphics = gfx
         }
 
+        if (surfaceWidth <= 1 || surfaceHeight <= 1) return
+
         val aspect = surfaceWidth.toDouble() / surfaceHeight.toDouble().coerceAtLeast(1.0)
         camera.setProjection(38.0, aspect, 0.12, 200.0, Camera.Fov.VERTICAL)
 
@@ -353,11 +435,18 @@ class FilamentLobbyController(
         val (baseCamX, baseCamY, baseCamZ) = activeWorld.lobbyCamPos
         val (lookX, lookY, lookZ) = activeWorld.lobbyLookTarget
 
-        // Subtle handheld sway orthogonal to sightline (stays well inside verified wall-free pocket)
+        // Subtle handheld sway orthogonal to sightline (never tilts perspective or distorts framing)
+        val fwdX = lookX - baseCamX
+        val fwdZ = lookZ - baseCamZ
+        val fwdLen = kotlin.math.sqrt(fwdX * fwdX + fwdZ * fwdZ).coerceAtLeast(0.001f)
+        val rightX = -fwdZ / fwdLen
+        val rightZ = fwdX / fwdLen
         val swayA = sin(timeSec * 0.55f) * 0.045f
         val swayY = cos(timeSec * 0.42f) * 0.018f
         camera.lookAt(
-            (baseCamX + swayA).toDouble(), (baseCamY + swayY).toDouble(), baseCamZ.toDouble(),
+            (baseCamX + rightX * swayA).toDouble(),
+            (baseCamY + swayY).toDouble(),
+            (baseCamZ + rightZ * swayA).toDouble(),
             lookX.toDouble(), lookY.toDouble(), lookZ.toDouble(),
             0.0, 1.0, 0.0
         )

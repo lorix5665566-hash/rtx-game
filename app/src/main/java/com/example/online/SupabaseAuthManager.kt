@@ -148,6 +148,13 @@ class SupabaseAuthManager(context: Context) {
                     )
                 }
                 saveSession(parsed)
+                val postAccess = checkClientAccess()
+                if (postAccess.deviceBanned) {
+                    logout()
+                    return@use AuthActionResult.Error(
+                        "Это устройство заблокировано (${postAccess.banReason.ifBlank { "решение администратора" }})."
+                    )
+                }
                 AuthActionResult.Success(parsed)
             }
         }.getOrElse { err ->
@@ -166,6 +173,11 @@ class SupabaseAuthManager(context: Context) {
         if (access.updateRequired) {
             return@withContext AuthActionResult.Error(
                 "Требуется последняя версия ${access.latestVersionName}. Обновите игру, чтобы продолжить."
+            )
+        }
+        if (access.deviceBanned) {
+            return@withContext AuthActionResult.Error(
+                "Это устройство заблокировано (${access.banReason.ifBlank { "решение администратора" }}). Вход невозможен."
             )
         }
         val login = rawLogin.trim()

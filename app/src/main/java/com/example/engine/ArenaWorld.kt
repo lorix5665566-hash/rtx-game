@@ -223,10 +223,10 @@ class ArenaWorld(
 
                 val framing = computeOpenLobbyFraming(
                     preferredAnchors = listOf(
-                        9.7f to 23.8f,    // Open sunlit Site A plaza
-                        35.8f to -8.0f,   // Open T-Spawn yard (well clear of outer east wall)
-                        6.0f to -3.5f,    // Open Mid plaza
-                        -15.5f to 22.0f   // Open CT courtyard
+                        5.5f to 20.5f,    // Open sunlit Site A courtyard (flat sandstone floor)
+                        12.0f to 17.0f,   // Open sunlit Site A plaza
+                        38.5f to -10.5f,  // Open T-Spawn yard
+                        -16.5f to 18.0f   // Open CT courtyard
                     )
                 )
                 lobbyStandPos = framing.standPos
@@ -306,20 +306,26 @@ class ArenaWorld(
      * stands fully visible in an open sunlit zone of Mirage or Dust 2.
      */
     private fun computeOpenLobbyFraming(preferredAnchors: List<Pair<Float, Float>>): LobbyFraming {
-        fun isAreaWallFree(px: Float, pz: Float, refY: Float, radius: Float, lowOff: Float, highOff: Float): Boolean {
-            val h = sampleNearestFloorHeight(px, pz, refY, maxStepUp = 1.4f, maxDrop = 2.0f) ?: return false
+        fun isZoneFlatAndWallFree(px: Float, pz: Float, refY: Float, radius: Float, maxSlope: Float, lowOff: Float, highOff: Float): Boolean {
+            if (mapId == ArenaMapId.MIRAGE && px in 7.8f..14.0f && pz in 21.8f..25.4f) return false
+            val h = sampleNearestFloorHeight(px, pz, refY, maxStepUp = 1.0f, maxDrop = 1.0f) ?: return false
+            if (abs(h - refY) > maxSlope) return false
             val yLow = min(refY, h) + lowOff
             val yHigh = maxOf(refY, h) + highOff
             if (hasWallAt(px, pz, yLow, yHigh)) return false
             val rDiag = radius * 0.7071f
-            return !hasWallAt(px + radius, pz, yLow, yHigh) &&
-                !hasWallAt(px - radius, pz, yLow, yHigh) &&
-                !hasWallAt(px, pz + radius, yLow, yHigh) &&
-                !hasWallAt(px, pz - radius, yLow, yHigh) &&
-                !hasWallAt(px + rDiag, pz + rDiag, yLow, yHigh) &&
-                !hasWallAt(px - rDiag, pz + rDiag, yLow, yHigh) &&
-                !hasWallAt(px + rDiag, pz - rDiag, yLow, yHigh) &&
-                !hasWallAt(px - rDiag, pz - rDiag, yLow, yHigh)
+            val offsets = arrayOf(
+                radius to 0f, -radius to 0f, 0f to radius, 0f to -radius,
+                rDiag to rDiag, -rDiag to rDiag, rDiag to -rDiag, -rDiag to -rDiag
+            )
+            for ((ox, oz) in offsets) {
+                val tx = px + ox
+                val tz = pz + oz
+                val th = sampleNearestFloorHeight(tx, tz, refY, maxStepUp = 1.0f, maxDrop = 1.0f) ?: return false
+                if (abs(th - refY) > maxSlope) return false
+                if (hasWallAt(tx, tz, yLow, yHigh)) return false
+            }
+            return true
         }
 
         fun isSightlineClean(
@@ -339,6 +345,8 @@ class ArenaWorld(
                 val t = i.toFloat() / steps
                 val sx = camX + dx * t
                 val sz = camZ + dz * t
+                val fh = sampleNearestFloorHeight(sx, sz, standY, maxStepUp = 1.0f, maxDrop = 1.0f) ?: return false
+                if (abs(fh - standY) > 0.35f) return false
                 // Check center + 0.34m left/right cone across feet-to-head vertical band
                 if (hasWallAt(sx, sz, standY + 0.25f, standY + 1.90f)) return false
                 if (hasWallAt(sx + px * 0.34f, sz + pz * 0.34f, standY + 0.35f, standY + 1.80f)) return false
@@ -354,18 +362,21 @@ class ArenaWorld(
         for ((ax, az) in preferredAnchors) {
             val base = snapToNearestWalkable(ax, az)
             candidateStands.add(base)
-            // Also probe a 2.5m ring around each anchor to find the widest unobstructed pocket
+            // Also probe a 2.2m ring around each anchor to find the widest flat unobstructed pocket
             for (k in 0 until 8) {
                 val ang = k * (Math.PI * 2.0 / 8.0)
-                val px = base.first + cos(ang).toFloat() * 2.2f
-                val pz = base.second + sin(ang).toFloat() * 2.2f
+                val px = base.first + cos(ang).toFloat() * 2.0f
+                val pz = base.second + sin(ang).toFloat() * 2.0f
                 candidateStands.add(snapToNearestWalkable(px, pz))
             }
         }
 
         for ((idx, stand) in candidateStands.withIndex()) {
+            if (mapId == ArenaMapId.MIRAGE && stand.first in 7.8f..14.0f && stand.second in 21.8f..25.4f) {
+                continue
+            }
             val standY = sampleFloorHeight(stand.first, stand.second) ?: continue
-            if (!isAreaWallFree(stand.first, stand.second, standY, radius = 0.85f, lowOff = 0.30f, highOff = 1.85f)) {
+            if (!isZoneFlatAndWallFree(stand.first, stand.second, standY, radius = 0.85f, maxSlope = 0.16f, lowOff = 0.30f, highOff = 1.85f)) {
                 continue
             }
             // Slight bonus for earlier (preferred) anchor zones
@@ -379,7 +390,7 @@ class ArenaWorld(
                     val camX = stand.first + dirX * camDist
                     val camZ = stand.second + dirZ * camDist
 
-                    if (!isAreaWallFree(camX, camZ, standY, radius = 0.90f, lowOff = 0.25f, highOff = 2.05f)) {
+                    if (!isZoneFlatAndWallFree(camX, camZ, standY, radius = 0.85f, maxSlope = 0.22f, lowOff = 0.25f, highOff = 2.05f)) {
                         continue
                     }
                     if (!isSightlineClean(camX, camZ, stand.first, stand.second, standY)) {

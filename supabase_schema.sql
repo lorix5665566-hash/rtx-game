@@ -219,6 +219,10 @@ create policy "profiles_insert_own" on public.profiles
         and level = 1
         and coins = 0
         and banned = false
+        and not exists (
+            select 1 from public.banned_devices bd
+            where bd.device_hash = lower(trim(coalesce(nullif(last_device_hash, ''), auth.jwt() -> 'user_metadata' ->> 'device_hash', '')))
+        )
     );
 
 drop policy if exists "profiles_update_own" on public.profiles;
@@ -375,7 +379,64 @@ create trigger trg_prevent_non_admin_profile_tamper
     for each row
     execute function public.prevent_non_admin_profile_tamper();
 
--- Migrate legacy admin short_id '932760' -> 'developer' safely
+-- Enforce hardware device-ban BEFORE inserting any new player profile (direct REST or RPC)
+create or replace function public.enforce_device_ban_on_profile_insert()
+returns trigger
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+    v_meta_hash text;
+    v_hash text;
+    v_reason text;
+    v_banned_acc public.profiles%rowtype;
+begin
+    v_hash := lower(left(trim(coalesce(new.last_device_hash, '')), 128));
+    if v_hash = '' then
+        select lower(left(trim(coalesce(raw_user_meta_data ->> 'device_hash', '')), 128))
+        into v_meta_hash
+        from auth.users
+        where id = new.user_id;
+        v_hash := coalesce(v_meta_hash, '');
+    end if;
+    new.last_device_hash := v_hash;
+
+    if new.short_id <> 'developer' and v_hash <> '' then
+        select coalesce(nullif(reason, ''), 'Устройство заблокировано администратором.')
+        into v_reason
+        from public.banned_devices
+        where device_hash = v_hash
+        limit 1;
+        if found then
+            raise exception 'DEVICE_BANNED: %', v_reason;
+        end if;
+
+        select * into v_banned_acc
+        from public.profiles
+        where banned = true
+          and short_id <> 'developer'
+          and lower(trim(last_device_hash)) = v_hash
+        limit 1;
+        if found then
+            v_reason := coalesce(nullif(v_banned_acc.ban_reason, ''), 'Устройство связано с заблокированным аккаунтом.');
+            insert into public.banned_devices (device_hash, reason, banned_uid, banned_short_id, banned_at)
+            values (v_hash, left(v_reason, 160), v_banned_acc.user_id, v_banned_acc.short_id, now())
+            on conflict (device_hash) do nothing;
+            raise exception 'DEVICE_BANNED: %', v_reason;
+        end if;
+    end if;
+    return new;
+end;
+$$;
+
+drop trigger if exists trg_enforce_device_ban_on_profile_insert on public.profiles;
+create trigger trg_enforce_device_ban_on_profile_insert
+    before insert on public.profiles
+    for each row
+    execute function public.enforce_device_ban_on_profile_insert();
+
+-- Migrate legacy admin short_id '932760' -> 'developer', backfill device hashes & auto-ban devices of banned accounts
 do $$
 begin
     perform set_config('app.trusted_rpc', '1', true);
@@ -389,6 +450,29 @@ begin
         set short_id = 'developer'
         where short_id = '932760';
     end if;
+
+    -- Recover device hashes from auth signup metadata wherever profiles.last_device_hash is empty
+    update public.profiles p
+    set last_device_hash = lower(left(trim(u.raw_user_meta_data ->> 'device_hash'), 128))
+    from auth.users u
+    where u.id = p.user_id
+      and trim(coalesce(p.last_device_hash, '')) = ''
+      and trim(coalesce(u.raw_user_meta_data ->> 'device_hash', '')) <> '';
+
+    -- Automatically ban devices of all existing banned accounts
+    insert into public.banned_devices (device_hash, reason, banned_uid, banned_short_id, banned_at)
+    select distinct on (lower(trim(p.last_device_hash)))
+        lower(trim(p.last_device_hash)),
+        left(coalesce(nullif(trim(p.ban_reason), ''), 'Автобан устройства: аккаунт заблокирован'), 160),
+        p.user_id,
+        p.short_id,
+        coalesce(p.updated_at, now())
+    from public.profiles p
+    where p.banned = true
+      and p.short_id <> 'developer'
+      and trim(coalesce(p.last_device_hash, '')) <> ''
+      and char_length(trim(p.last_device_hash)) between 16 and 128
+    on conflict (device_hash) do nothing;
 end $$;
 
 -- ============================================================================
@@ -451,8 +535,11 @@ set search_path = public
 as $$
 declare
     v_cfg public.app_config%rowtype;
-    v_clean_hash text := lower(trim(coalesce(p_device_hash, '')));
+    v_clean_hash text := lower(left(trim(coalesce(p_device_hash, '')), 128));
     v_ban public.banned_devices%rowtype;
+    v_my_prof public.profiles%rowtype;
+    v_banned_acc public.profiles%rowtype;
+    v_effective_hash text := '';
     v_update_required boolean := false;
     v_device_banned boolean := false;
     v_ban_reason text := '';
@@ -468,20 +555,73 @@ begin
     v_update_required := coalesce(p_version_code, 0) < v_cfg.min_version_code;
 
     if auth.uid() is not null then
-        select exists(
-            select 1 from public.profiles
-            where user_id = auth.uid() and short_id = 'developer'
-        ) into v_is_dev;
+        select * into v_my_prof from public.profiles where user_id = auth.uid();
+        if found and v_my_prof.short_id = 'developer' then
+            v_is_dev := true;
+        end if;
     end if;
 
-    if not v_is_dev and v_clean_hash <> '' then
-        select * into v_ban
-        from public.banned_devices
-        where device_hash = v_clean_hash
-        limit 1;
-        if found then
+    if not v_is_dev then
+        -- 1. If the currently signed-in account is banned, automatically ban its current device!
+        if v_my_prof.user_id is not null and v_my_prof.banned = true then
             v_device_banned := true;
-            v_ban_reason := coalesce(nullif(v_ban.reason, ''), 'Устройство заблокировано администратором.');
+            v_ban_reason := coalesce(nullif(trim(v_my_prof.ban_reason), ''), 'Аккаунт и устройство заблокированы администратором.');
+            v_effective_hash := coalesce(nullif(v_clean_hash, ''), lower(trim(coalesce(v_my_prof.last_device_hash, ''))));
+            if v_effective_hash <> '' and char_length(v_effective_hash) between 16 and 128 then
+                insert into public.banned_devices (device_hash, reason, banned_uid, banned_short_id, banned_at)
+                values (v_effective_hash, left(v_ban_reason, 160), v_my_prof.user_id, v_my_prof.short_id, now())
+                on conflict (device_hash) do update
+                set reason = excluded.reason,
+                    banned_uid = excluded.banned_uid,
+                    banned_short_id = excluded.banned_short_id;
+
+                if lower(trim(coalesce(v_my_prof.last_device_hash, ''))) <> v_effective_hash then
+                    perform set_config('app.trusted_rpc', '1', true);
+                    update public.profiles
+                    set last_device_hash = v_effective_hash,
+                        online = false,
+                        updated_at = now()
+                    where user_id = v_my_prof.user_id;
+                end if;
+            end if;
+        end if;
+
+        -- 2. Check banned_devices by hardware device hash
+        if not v_device_banned and v_clean_hash <> '' then
+            select * into v_ban
+            from public.banned_devices
+            where device_hash = v_clean_hash
+            limit 1;
+            if found then
+                v_device_banned := true;
+                v_ban_reason := coalesce(nullif(v_ban.reason, ''), 'Устройство заблокировано администратором.');
+            else
+                -- 3. Auto-catch any banned account previously seen on this hardware hash
+                select * into v_banned_acc
+                from public.profiles
+                where banned = true
+                  and short_id <> 'developer'
+                  and lower(trim(last_device_hash)) = v_clean_hash
+                limit 1;
+                if found then
+                    v_device_banned := true;
+                    v_ban_reason := coalesce(nullif(trim(v_banned_acc.ban_reason), ''), 'Автобан устройства: аккаунт заблокирован.');
+                    if char_length(v_clean_hash) between 16 and 128 then
+                        insert into public.banned_devices (device_hash, reason, banned_uid, banned_short_id, banned_at)
+                        values (v_clean_hash, left(v_ban_reason, 160), v_banned_acc.user_id, v_banned_acc.short_id, now())
+                        on conflict (device_hash) do nothing;
+                    end if;
+                end if;
+            end if;
+        end if;
+
+        -- 4. Persist device hash on healthy signed-in profiles automatically
+        if not v_device_banned and v_my_prof.user_id is not null and v_clean_hash <> ''
+           and lower(trim(coalesce(v_my_prof.last_device_hash, ''))) <> v_clean_hash then
+            perform set_config('app.trusted_rpc', '1', true);
+            update public.profiles
+            set last_device_hash = v_clean_hash
+            where user_id = v_my_prof.user_id;
         end if;
     end if;
 
@@ -510,25 +650,74 @@ as $$
 declare
     v_uid uuid := auth.uid();
     v_existing public.profiles%rowtype;
+    v_banned_acc public.profiles%rowtype;
     v_name text;
     v_short_id text;
     v_clean_hash text := lower(left(trim(coalesce(p_device_hash, '')), 128));
+    v_meta_hash text;
     v_ban_reason text;
 begin
     if v_uid is null then
         raise exception 'Not authenticated';
     end if;
 
+    if v_clean_hash = '' then
+        select lower(left(trim(coalesce(raw_user_meta_data ->> 'device_hash', '')), 128))
+        into v_meta_hash
+        from auth.users
+        where id = v_uid;
+        v_clean_hash := coalesce(v_meta_hash, '');
+    end if;
+
     select * into v_existing from public.profiles where user_id = v_uid;
     if found then
-        if v_existing.short_id <> 'developer' and v_clean_hash <> '' then
-            select coalesce(nullif(reason, ''), 'Устройство заблокировано администратором.')
-            into v_ban_reason
-            from public.banned_devices
-            where device_hash = v_clean_hash
-            limit 1;
-            if found then
+        if v_existing.short_id <> 'developer' then
+            -- If account is banned, automatically ban its current device hash too
+            if v_existing.banned = true then
+                v_ban_reason := coalesce(nullif(trim(v_existing.ban_reason), ''), 'Аккаунт и устройство заблокированы администратором.');
+                if v_clean_hash <> '' and char_length(v_clean_hash) between 16 and 128 then
+                    insert into public.banned_devices (device_hash, reason, banned_uid, banned_short_id, banned_at)
+                    values (v_clean_hash, left(v_ban_reason, 160), v_existing.user_id, v_existing.short_id, now())
+                    on conflict (device_hash) do update
+                    set reason = excluded.reason,
+                        banned_uid = excluded.banned_uid,
+                        banned_short_id = excluded.banned_short_id;
+
+                    perform set_config('app.trusted_rpc', '1', true);
+                    update public.profiles
+                    set last_device_hash = v_clean_hash,
+                        online = false,
+                        updated_at = now()
+                    where user_id = v_uid;
+                end if;
                 raise exception 'DEVICE_BANNED: %', v_ban_reason;
+            end if;
+
+            if v_clean_hash <> '' then
+                select coalesce(nullif(reason, ''), 'Устройство заблокировано администратором.')
+                into v_ban_reason
+                from public.banned_devices
+                where device_hash = v_clean_hash
+                limit 1;
+                if found then
+                    raise exception 'DEVICE_BANNED: %', v_ban_reason;
+                end if;
+
+                select * into v_banned_acc
+                from public.profiles
+                where banned = true
+                  and short_id <> 'developer'
+                  and lower(trim(last_device_hash)) = v_clean_hash
+                limit 1;
+                if found then
+                    v_ban_reason := coalesce(nullif(trim(v_banned_acc.ban_reason), ''), 'Автобан устройства: аккаунт заблокирован.');
+                    if char_length(v_clean_hash) between 16 and 128 then
+                        insert into public.banned_devices (device_hash, reason, banned_uid, banned_short_id, banned_at)
+                        values (v_clean_hash, left(v_ban_reason, 160), v_banned_acc.user_id, v_banned_acc.short_id, now())
+                        on conflict (device_hash) do nothing;
+                    end if;
+                    raise exception 'DEVICE_BANNED: %', v_ban_reason;
+                end if;
             end if;
         end if;
 
@@ -551,6 +740,22 @@ begin
         where device_hash = v_clean_hash
         limit 1;
         if found then
+            raise exception 'DEVICE_BANNED: %', v_ban_reason;
+        end if;
+
+        select * into v_banned_acc
+        from public.profiles
+        where banned = true
+          and short_id <> 'developer'
+          and lower(trim(last_device_hash)) = v_clean_hash
+        limit 1;
+        if found then
+            v_ban_reason := coalesce(nullif(trim(v_banned_acc.ban_reason), ''), 'Автобан устройства: аккаунт заблокирован.');
+            if char_length(v_clean_hash) between 16 and 128 then
+                insert into public.banned_devices (device_hash, reason, banned_uid, banned_short_id, banned_at)
+                values (v_clean_hash, left(v_ban_reason, 160), v_banned_acc.user_id, v_banned_acc.short_id, now())
+                on conflict (device_hash) do nothing;
+            end if;
             raise exception 'DEVICE_BANNED: %', v_ban_reason;
         end if;
     end if;
@@ -598,10 +803,33 @@ as $$
 declare
     v_uid uuid := auth.uid();
     v_clean_hash text := lower(left(trim(coalesce(p_device_hash, '')), 128));
+    v_prof public.profiles%rowtype;
 begin
     if v_uid is null then
         return;
     end if;
+    select * into v_prof from public.profiles where user_id = v_uid;
+    if found and v_prof.banned = true and v_prof.short_id <> 'developer' then
+        if v_clean_hash <> '' and char_length(v_clean_hash) between 16 and 128 then
+            insert into public.banned_devices (device_hash, reason, banned_uid, banned_short_id, banned_at)
+            values (
+                v_clean_hash,
+                left(coalesce(nullif(trim(v_prof.ban_reason), ''), 'Автобан устройства: аккаунт заблокирован'), 160),
+                v_prof.user_id,
+                v_prof.short_id,
+                now()
+            )
+            on conflict (device_hash) do nothing;
+        end if;
+        perform set_config('app.trusted_rpc', '1', true);
+        update public.profiles
+        set online = false,
+            last_device_hash = case when v_clean_hash <> '' then v_clean_hash else last_device_hash end,
+            updated_at = now()
+        where user_id = v_uid;
+        return;
+    end if;
+
     perform set_config('app.trusted_rpc', '1', true);
     update public.profiles
     set online = coalesce(p_online, false),
@@ -793,6 +1021,8 @@ declare
     v_is_admin boolean;
     v_clean_id text;
     v_clean_reason text;
+    v_hash text;
+    v_meta_hash text;
     v_updated public.profiles%rowtype;
 begin
     select exists(
@@ -829,6 +1059,38 @@ begin
 
     if coalesce(p_banned, false) then
         delete from public.lobby_members where user_id = v_updated.user_id;
+
+        -- Automatically recover & ban the account's device hash!
+        v_hash := lower(left(trim(coalesce(v_updated.last_device_hash, '')), 128));
+        if v_hash = '' then
+            select lower(left(trim(coalesce(raw_user_meta_data ->> 'device_hash', '')), 128))
+            into v_meta_hash
+            from auth.users
+            where id = v_updated.user_id;
+            v_hash := coalesce(v_meta_hash, '');
+            if v_hash <> '' then
+                update public.profiles
+                set last_device_hash = v_hash
+                where user_id = v_updated.user_id
+                returning * into v_updated;
+            end if;
+        end if;
+
+        if v_hash <> '' and char_length(v_hash) between 16 and 128 then
+            insert into public.banned_devices (device_hash, reason, banned_uid, banned_short_id, banned_at)
+            values (
+                v_hash,
+                left(coalesce(nullif(v_clean_reason, ''), 'Автобан устройства: аккаунт заблокирован'), 160),
+                v_updated.user_id,
+                v_updated.short_id,
+                now()
+            )
+            on conflict (device_hash) do update
+            set reason = excluded.reason,
+                banned_uid = excluded.banned_uid,
+                banned_short_id = excluded.banned_short_id,
+                banned_at = now();
+        end if;
     end if;
 
     return v_updated;

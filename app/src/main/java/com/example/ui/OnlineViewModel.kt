@@ -201,11 +201,22 @@ class OnlineViewModel(
                 .onSuccess { profile ->
                     _profileState.value = OnlineUiState.Success(profile)
                     refreshSocialData()
+                    if (profile.banned && !profile.isAdmin) {
+                        checkClientAccessNow()
+                    }
                 }
                 .onFailure { err ->
-                    _profileState.value = OnlineUiState.Error(
-                        err.localizedMessage ?: "Не удалось загрузить или создать ID профиля"
-                    )
+                    val msg = err.localizedMessage ?: "Не удалось загрузить или создать ID профиля"
+                    if (msg.contains("DEVICE_BANNED", ignoreCase = true)) {
+                        _clientAccessStatus.value = _clientAccessStatus.value.copy(
+                            allowed = false,
+                            deviceBanned = true,
+                            banReason = msg.substringAfter("DEVICE_BANNED:").trim()
+                                .ifBlank { "Устройство заблокировано администратором." },
+                            checked = true
+                        )
+                    }
+                    _profileState.value = OnlineUiState.Error(msg)
                 }
         }
     }
@@ -220,6 +231,7 @@ class OnlineViewModel(
 
     fun refreshBanStatusNow() {
         viewModelScope.launch {
+            checkClientAccessNow()
             repository.refreshMyProfile(currentUserId).onSuccess { updated ->
                 if (updated != null) {
                     _profileState.value = OnlineUiState.Success(updated)
@@ -568,7 +580,11 @@ class OnlineViewModel(
                     _lobbyMemberStates.value = _lobbyMemberStates.value.filterNot {
                         it.userId == bannedProfile.userId || it.shortId == cleanId
                     }
-                    _adminStatus.value = "Аккаунт ${bannedProfile.displayName} (ID $cleanId) забанен."
+                    _adminStatus.value = if (bannedProfile.lastDeviceHash.isNotBlank()) {
+                        "Аккаунт ${bannedProfile.displayName} (ID $cleanId) и его устройство автоматически забанены."
+                    } else {
+                        "Аккаунт ${bannedProfile.displayName} (ID $cleanId) забанен (устройство заблокируется автоматически при входе)."
+                    }
                     refreshBannedAccounts()
                 }
                 .onFailure { err ->
@@ -651,11 +667,20 @@ class OnlineViewModel(
                             .onSuccess {
                                 _profileState.value = OnlineUiState.Success(it)
                                 refreshSocialData()
+                                if (it.banned && !it.isAdmin) checkClientAccessNow()
                             }
                             .onFailure { err ->
-                                _profileState.value = OnlineUiState.Error(
-                                    err.localizedMessage ?: "Не удалось загрузить или создать ID профиля"
-                                )
+                                val msg = err.localizedMessage ?: "Не удалось загрузить или создать ID профиля"
+                                if (msg.contains("DEVICE_BANNED", ignoreCase = true)) {
+                                    _clientAccessStatus.value = _clientAccessStatus.value.copy(
+                                        allowed = false,
+                                        deviceBanned = true,
+                                        banReason = msg.substringAfter("DEVICE_BANNED:").trim()
+                                            .ifBlank { "Устройство заблокировано администратором." },
+                                        checked = true
+                                    )
+                                }
+                                _profileState.value = OnlineUiState.Error(msg)
                             }
                     } else if (isAppForeground) {
                         refreshSocialData()
@@ -663,7 +688,11 @@ class OnlineViewModel(
                             repository.refreshMyProfile(currentUserId).onSuccess { refreshed ->
                                 if (refreshed != null) {
                                     _profileState.value = OnlineUiState.Success(refreshed)
-                                    if (!refreshed.banned) _localBanNotice.value = null
+                                    if (!refreshed.banned) {
+                                        _localBanNotice.value = null
+                                    } else if (!refreshed.isAdmin) {
+                                        checkClientAccessNow()
+                                    }
                                 }
                             }
                         }
